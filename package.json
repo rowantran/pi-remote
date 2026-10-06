@@ -1,0 +1,24 @@
+{
+  "name": "pi-remote",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local terminal client for persistent, unmodified remote Pi RPC processes",
+  "type": "module",
+  "bin": { "pi-remote": "bin/pi-remote" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "verify": "npm run check && npm test && npm run build"
+  },
+  "engines": { "node": ">=22.19" },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.0.4",
+    "@earendil-works/pi-tui": "1.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}
