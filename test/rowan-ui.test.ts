@@ -18,6 +18,7 @@ const adapter = fileURLToPath(new URL('../examples/rowan-ui.ts', import.meta.url
 const originalRoot = process.env.PI_REMOTE_RENDERER_REPO
   ?? join(homedir(), '.pi/agent/git/github.com/rowantran/pi-extensions');
 const originalWorkedFor = join(originalRoot, 'worked-for.ts');
+const originalBell = join(originalRoot, 'emit-terminal-bel.ts');
 const plain = (lines: string[]) => stripTerminalSequences(lines.join('\n'));
 
 // This fixture deliberately differs from the real persisted renderer/filter. Its markers
@@ -75,6 +76,13 @@ async function withRepo(run: (root: string) => Promise<void>, timingSource = wor
     'codemode/render.ts': 'export function compactCodemodeTool() { return {}; }',
     'background/render.ts': 'export function renderBackgroundMessage() {}',
     'worked-for.ts': timingSource,
+    // Records instead of writing BEL, so test output stays clean. Mirrors the original mode check.
+    'emit-terminal-bel.ts': `export default function(pi) {
+      pi.on('agent_settled', (_event, ctx) => {
+        if (ctx.mode !== 'tui') return;
+        (globalThis.rowanUiBells ??= []).push(ctx.mode);
+      });
+    }`,
     'background.ts': 'throw new Error("Worker factory must never load");',
     'codemode.ts': 'throw new Error("Execution factory must never load");',
   };
@@ -142,7 +150,12 @@ function captureAPI() {
   let writes = 0;
   let requests = 0;
   const api = {
-    on(name: string, fn: Function) { hooks.set(name, fn); return () => hooks.delete(name); },
+    on(name: string, fn: Function) {
+      // Several factories may share an event; keep registration order like Pi.
+      const previous = hooks.get(name);
+      hooks.set(name, previous ? (...args: unknown[]) => { previous(...args); fn(...args); } : fn);
+      return () => hooks.delete(name);
+    },
     appendEntry() { writes++; assert.fail('Local timing append must not reach the host'); },
     sendMessage() { requests++; assert.fail('No local model requests'); },
     sendUserMessage() { requests++; assert.fail('No local model requests'); },
@@ -406,6 +419,58 @@ test('Full worked-for factory updates the RemoteTui screen with a native animate
         assert.equal(connection.requests.length, reads, 'Animation, reload, and detach must send no requests');
         assert.equal(ui.view.snapshot.live.busy, true, 'Detach must not abort the remote run');
       } finally { ui.detach(); await finished; await flushUI(); }
+    });
+  });
+});
+
+class BellConnection extends WorkedForConnection {
+  constructor(private readonly current: () => Snapshot) { super(); }
+  override async request<T = any>(method: string, params?: RecordValue): Promise<T> {
+    // Settle events trigger a read-only snapshot refresh; everything else stays read-only too.
+    if (method === 'snapshot') { this.requests.push({ method, params }); return structuredClone(this.current()) as T; }
+    return super.request<T>(method, params);
+  }
+}
+
+test('Terminal bell factory rings the local terminal once per remote settle, not on attach', async t => {
+  for (const original of [false, true]) await t.test(original ? 'unchanged original' : 'fixture', {
+    skip: original && !existsSync(originalBell),
+  }, async t => {
+    await withRepo(async root => {
+      if (original) await copyFile(originalBell, join(root, 'emit-terminal-bel.ts'));
+      const bells: string[] = [];
+      (globalThis as any).rowanUiBells = bells;
+      // The original writes BEL straight to process.stdout, outside pi-tui's frame writes.
+      const write = process.stdout.write;
+      t.mock.method(process.stdout, 'write', function (this: typeof process.stdout, chunk: unknown, ...rest: unknown[]) {
+        if (chunk === '\x07') { bells.push('stdout'); return true; }
+        return Reflect.apply(write, this, [chunk, ...rest]);
+      });
+      const initial = snapshot();
+      let seq = initial.seq;
+      const connection = new BellConnection(() => ({ ...initial, seq }));
+      const terminal = new WorkedForTerminal();
+      const ui = new RemoteTui(connection, 'slot', initial, terminal, {
+        presentationPaths: [adapter], presentationConfig: join(root, 'absent-config.json'), theme: 'dark',
+      });
+      const finished = ui.run();
+      const send = async (type: string) => {
+        connection.listener!({ type: 'event', slotId: 'slot', seq: ++seq, event: { type } });
+        await flushUI();
+      };
+      try {
+        await ui.initialize(); await flushUI();
+        assert.deepEqual(bells, [], 'Attaching to an idle slot must not ring');
+        for (let run = 1; run <= 2; run++) {
+          await send('agent_start');
+          assert.equal(bells.length, run - 1, 'Starting work must not ring');
+          await send('agent_settled');
+          assert.deepEqual(bells, Array(run).fill(original ? 'stdout' : 'tui'));
+        }
+        assert.doesNotMatch(plain(ui.tui.getScreenLines()), /Local presentation:/);
+        ui.detach(); await finished; await flushUI();
+        assert.equal(bells.length, 2, 'Detach must not ring');
+      } finally { ui.detach(); await finished; delete (globalThis as any).rowanUiBells; }
     });
   });
 });
