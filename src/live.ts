@@ -4,12 +4,38 @@ export function emptyLive(): LiveState {
   return { busy: false, compacting: false, messages: [], tools: {}, steering: [], followUp: [] };
 }
 export function messageKey(message: RecordValue): string {
-  return `${message.role}:${message.timestamp}:${message.toolCallId ?? ''}`;
+  const identity = message.toolCallId ?? (message.role === 'entry' ? message.id : '');
+  return `${message.role}:${message.timestamp}:${identity}:${message.customType ?? ''}`;
 }
-function putMessage(live: LiveState, message: RecordValue) {
-  const index = live.messages.findIndex(m => messageKey(m) === messageKey(message));
-  if (index === -1) live.messages.push(structuredClone(message));
-  else live.messages[index] = structuredClone(message);
+
+// Local lifecycle bookkeeping, never serialized or inferred from stopReason/content.
+const completedMessages = new WeakMap<LiveState, WeakSet<RecordValue>>();
+function completedFor(live: LiveState): WeakSet<RecordValue> {
+  let completed = completedMessages.get(live);
+  if (!completed) { completed = new WeakSet(); completedMessages.set(live, completed); }
+  return completed;
+}
+
+/** Pair an end with its unfinished start, not an earlier identical completed occurrence. */
+export function putLiveMessage(live: LiveState, message: RecordValue, ended: boolean): void {
+  const completed = completedFor(live), key = messageKey(message);
+  // A start is a new occurrence even if an incomplete/legacy snapshot supplied an identical
+  // completed message without local lifecycle bookkeeping. Only its end replaces a start.
+  const index = ended ? live.messages.findLastIndex(m => !completed.has(m) && messageKey(m) === key) : -1;
+  const copy = structuredClone(message);
+  if (index === -1) live.messages.push(copy); else live.messages[index] = copy;
+  if (ended) completed.add(copy);
+}
+
+/** Capture the tail at the get_entries response; commit retirement only after validation. */
+export function captureLiveSnapshot(live: LiveState): { state: LiveState; retire: () => void } {
+  const completed = completedFor(live);
+  const covered = new Set(live.messages.filter(message => completed.has(message)));
+  const state = structuredClone({ ...live, messages: live.messages.filter(message => !covered.has(message)) });
+  return { state, retire: () => {
+    // A message can finish after the cut. Retire only the exact occurrences captured above.
+    live.messages = live.messages.filter(message => !covered.has(message));
+  } };
 }
 
 /** Display-only state. Never feeds reconstructed messages back into Pi. */
@@ -25,16 +51,14 @@ export function applyLiveEvent(live: LiveState, event: RecordValue): void {
       break;
     }
     case 'remote_bash_end': live.bash = {}; break;
-    case 'agent_start':
-      if (!live.busy) live.messages = [];
-      live.busy = true;
-      break;
+    // A run boundary is not a history checkpoint. Keep the tail until get_entries succeeds.
+    case 'agent_start': live.busy = true; break;
     case 'agent_settled': live.busy = false; break;
     case 'compaction_start': live.compacting = true; break;
     case 'compaction_end': live.compacting = false; break;
     case 'queue_update': live.steering = event.steering ?? []; live.followUp = event.followUp ?? []; break;
     case 'message_start': case 'message_end':
-      putMessage(live, event.message);
+      if (event.message) putLiveMessage(live, event.message, event.type === 'message_end');
       break;
     case 'message_update': {
       const message = [...live.messages].reverse().find(m => m.role === 'assistant' && m.stopReason === 'pending');

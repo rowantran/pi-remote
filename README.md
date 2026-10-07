@@ -173,7 +173,9 @@ Remote state survives client disconnect:
 
 Dialogs have **no client-imposed timeout**. If an extension explicitly supplies a timeout, Pi keeps its normal timeout semantics. Disconnect is never converted to cancellation.
 
-On attach, the daemon obtains the current branch entries through RPC and combines them with display-only live state. Snapshot sequence numbers and buffered events close the snapshot/live-stream race. Reconstructed display state is never supplied back to the model or written into Pi's session file.
+On attach or refresh, a successful history snapshot replaces completed live messages with saved branch entries. Its live buffer contains only unfinished messages; the client then applies events newer than the snapshot's sequence number. Completion comes from `message_end`, not timestamps or task IDs, so queued background notices do not appear again after the final answer. Failed queries and incomplete startup/session-transition snapshots do not retire live messages. A slot with no client attached keeps completed live messages until the next successful attach or snapshot. Reconstructed display state is never supplied back to the model or written into Pi's session file.
+
+The snapshot's optional `historyComplete` marker identifies this contract: `true` means saved history is current through the snapshot boundary; `false` means startup or a session transition is using cached history and an uncheckpointed live buffer. Neither form merges messages by timestamp. Unmarked snapshots from older daemons retain their legacy merge behavior. Both the client and daemon need this update to fix duplicate background notices. Deployment does not update a running daemon; follow the safe upgrade procedure below after its active work has finished.
 
 ## Extension compatibility and local presentation
 

@@ -1,5 +1,7 @@
 import { stripTerminalSequences } from '@earendil-works/pi-tui';
 import type { RecordValue, RemoteEvent, Snapshot } from './protocol.js';
+import { messageKey, putLiveMessage } from './live.js';
+export { messageKey } from './live.js';
 
 /** Remote content must not execute terminal control sequences. */
 export function safeText(value: unknown): string {
@@ -23,16 +25,14 @@ export function activeBranch(entries: RecordValue[], leafId: string | null): Rec
   return branch.reverse();
 }
 
-export function messageKey(message: RecordValue): string {
-  const identity = message.toolCallId ?? (message.role === 'entry' ? message.id : '');
-  return `${message.role}:${message.timestamp}:${identity}:${message.customType ?? ''}`;
-}
-
 /** Optional projections are owned by one Transcript and keyed only by immutable stored entries. */
 export function transcriptMessages(snapshot: Snapshot, projections?: WeakMap<RecordValue, RecordValue>): RecordValue[] {
   const messages: RecordValue[] = [];
   const indexes = new Map<string, number>();
   const put = (message: RecordValue) => {
+    // Snapshot baselines and their tails are disjoint, even during transitions. Preserve occurrences,
+    // including identical notices created or persisted within the same millisecond.
+    if (snapshot.historyComplete !== undefined) { messages.push(message); return; }
     const key = messageKey(message);
     const index = indexes.get(key);
     if (index === undefined) { indexes.set(key, messages.length); messages.push(message); }
@@ -56,7 +56,8 @@ export function transcriptMessages(snapshot: Snapshot, projections?: WeakMap<Rec
       putDerived(entry, { ...entry, role: 'entry', content: `Session entry: ${entry.customType ?? 'custom'} (renderer not loaded)` });
     }
   }
-  // Messages can already be persisted while they remain in the current-run live state.
+  // Normal snapshots supply unfinished messages plus newer events. Incomplete snapshots
+  // retain the whole uncheckpointed tail. Only unmarked legacy snapshots need timestamp merging.
   for (const message of snapshot.live.messages) put(message);
   return messages;
 }
@@ -129,10 +130,7 @@ export class RemoteView {
       case 'queue_update': live.steering = [...(event.steering ?? [])]; live.followUp = [...(event.followUp ?? [])]; break;
       case 'message_start': case 'message_end': {
         if (!event.message) break;
-        const key = messageKey(event.message);
-        const index = live.messages.findIndex(message => messageKey(message) === key);
-        const message = structuredClone(event.message);
-        if (index < 0) live.messages.push(message); else live.messages[index] = message;
+        putLiveMessage(live, event.message, event.type === 'message_end');
         break;
       }
       case 'message_update': {
