@@ -6,7 +6,7 @@ import { tmpdir, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { crop, sideBySide, strip } from './golden/terminal.js';
+import { crop, sideBySide, strip, workingDisplay } from './golden/terminal.js';
 
 const exec = promisify(execFile);
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -104,10 +104,14 @@ async function compare(names: string[], dir: string, checkpoint: string, width: 
   const stockLines = transcripts[0].text.trimEnd().split('\n'), remoteLines = transcripts[1].text.trimEnd().split('\n');
   await writeFile(join(stageDir, 'side-by-side.txt'), sideBySide(transcripts[0].text, transcripts[1].text, width));
   await writeFile(join(stageDir, 'side-by-side.ansi'), sideBySide(transcripts[0].ansi, transcripts[1].ansi, width, true));
-  const equal = transcripts[0].canonical === transcripts[1].canonical;
+  const working = captures.map(workingDisplay);
+  await writeFile(join(stageDir, 'working.json'), JSON.stringify({ stock: working[0], remote: working[1] }, null, 2));
+  const workingEqual = JSON.stringify(working[0]) === JSON.stringify(working[1]);
+  const transcriptEqual = transcripts[0].canonical === transcripts[1].canonical;
+  const equal = transcriptEqual && workingEqual;
   const textEqual = transcripts[0].text === transcripts[1].text;
-  const result = { scenario: dir.split('/').at(-1), checkpoint, equal, textEqual, stockLines: stockLines.length, remoteLines: remoteLines.length, artifacts: stageDir };
-  summary.push(result); console.log(`${equal ? 'PASS' : 'DIFF'} ${result.scenario}/${checkpoint} (text ${textEqual ? 'equal' : 'differs'}, ANSI styles ${equal ? 'equal' : 'differ'})`);
+  const result = { scenario: dir.split('/').at(-1), checkpoint, equal, textEqual, workingEqual, stockLines: stockLines.length, remoteLines: remoteLines.length, artifacts: stageDir };
+  summary.push(result); console.log(`${equal ? 'PASS' : 'DIFF'} ${result.scenario}/${checkpoint} (text ${textEqual ? 'equal' : 'differs'}, ANSI styles ${transcriptEqual ? 'equal' : 'differ'}, working display ${workingEqual ? 'equal' : 'differs'})`);
 }
 
 async function runScenario(width: number, theme: string) {

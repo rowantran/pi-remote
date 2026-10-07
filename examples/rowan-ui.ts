@@ -2,8 +2,27 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createJiti } from 'jiti';
-import { Text } from '@earendil-works/pi-tui';
 import type { ExtensionAPI, MessageRenderer } from '@earendil-works/pi-coding-agent';
+
+// Only this original factory may attempt its expected timing append locally. Remote Pi owns
+// persisted history, so suppress that append rather than forwarding it or changing host guards.
+type WorkedForPresentationAPI = Pick<ExtensionAPI,
+  'on' | 'appendEntry' | 'registerEntryRenderer' | 'registerMarkdownTransformer'>;
+function workedForPresentationAPI(pi: ExtensionAPI): WorkedForPresentationAPI {
+  const on = ((name: string, handler: any) => {
+    // Model-context filtering belongs to remote Pi, not this display-only client.
+    if (name === 'context') return () => {};
+    return Reflect.apply(pi.on, pi, [name, handler]);
+  }) as ExtensionAPI['on'];
+  return {
+    on,
+    appendEntry: (customType: string) => {
+      if (customType !== 'worked-for') throw new Error(`Unexpected worked-for entry type: ${customType}`);
+    },
+    registerEntryRenderer: pi.registerEntryRenderer.bind(pi),
+    registerMarkdownTransformer: pi.registerMarkdownTransformer.bind(pi),
+  };
+}
 
 /** Local presentation adapter. Never loads providers, background workers, or tool executors. */
 export default async function rowanUI(pi: ExtensionAPI) {
@@ -16,6 +35,7 @@ export default async function rowanUI(pi: ExtensionAPI) {
   const caret = await loader.import<any>(join(root, 'prompt-caret.ts'), { default: true });
   const background = await loader.import<any>(join(root, 'assistant-background.ts'), { default: true });
   const compact = await loader.import<any>(join(root, 'compact-tools.ts'));
+  const workedFor = await loader.import<any>(join(root, 'worked-for.ts'), { default: true });
   const codemode = await loader.import<any>(join(root, 'codemode/render.ts'));
   const { renderBackgroundMessage } = await loader.import<{ renderBackgroundMessage: MessageRenderer }>(join(root, 'background/render.ts'));
   footer(pi);
@@ -23,6 +43,10 @@ export default async function rowanUI(pi: ExtensionAPI) {
   // The transcript uses the same public Pi classes this original factory decorates.
   background(pi);
   compact.default(pi);
+  // Keep the original live timer, settle/shutdown cleanup, renderer and Markdown filter.
+  // Its private CustomEntryComponent spacing patch runs too, but our Transcript renders
+  // custom entries directly and does not use that native wrapper.
+  await workedFor(workedForPresentationAPI(pi));
   // Completion/check-in notices share the renderer without loading background.ts workers.
   pi.registerMessageRenderer('background', renderBackgroundMessage);
 
@@ -41,14 +65,4 @@ export default async function rowanUI(pi: ExtensionAPI) {
     compact.withCompactToolRendering(capture).registerTool({ ...visualTool, name });
     return captured;
   });
-  // The original worked-for factory patches Pi internals. Reuse only its persisted data.
-  pi.registerEntryRenderer('worked-for', (entry, _options, theme) => {
-    const seconds = Math.max(0, Math.round(Number((entry.data as any)?.elapsedSeconds ?? 0)));
-    const label = seconds >= 3600 ? `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m ${seconds % 60}s`
-      : seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`;
-    return new Text(theme.fg('dim', `Worked for ${label}`), 1, 0);
-  });
-  // Preserve the original extension's display-only filter for older timing messages.
-  pi.registerMarkdownTransformer((markdown, context) => context.messageType === 'assistant'
-    && /^_Worked for (?:(?:\d+h )?\d+m )?\d+s_$/.test(markdown) ? '' : markdown);
 }

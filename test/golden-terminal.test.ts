@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { canonicalLines, crop, lineToAnsi, sideBySide, strip } from './golden/terminal.js';
+import { canonicalLines, crop, lineToAnsi, sideBySide, strip, workingDisplay } from './golden/terminal.js';
 
 const border = '─'.repeat(80);
 const screen = (body: string[]) => ['Startup metadata', '', ...body, '', '', border, 'editor', border, 'footer', ''].join('\n');
@@ -64,6 +64,21 @@ test('golden crop excludes native and remote working status without masking tran
     const distant = crop(screen(['GOLDEN_USER', '', '', '', status, '', '', '', '', '']), 160);
     assert.match(distant.text, /Working/, 'transcript status text outside the prompt edge must remain');
   }
+});
+
+test('golden working comparison normalizes only spinner phase and catches placement, spacing and styling', () => {
+  const separate = (status: string, gap = '') => ['GOLDEN_USER', 'answer', '', status, gap, border, 'editor', border, 'footer'].join('\n');
+  const embedded = (status: string) => ['GOLDEN_USER', 'answer', '', `── ${status} ──`, 'editor', border, 'footer'].join('\n');
+  assert.deepEqual(workingDisplay(separate(' ⠋ Working ')), workingDisplay(separate(' ⠙ Working ')));
+  assert.notDeepEqual(workingDisplay(separate(' ⠋ Working ')), workingDisplay(separate('⠋ Working')));
+  assert.notDeepEqual(workingDisplay(separate(' ⠋ Working ')), workingDisplay(separate(' ⠋ Working ', 'missing gap')));
+  assert.notDeepEqual(workingDisplay(separate(' ⠋ Working ')), workingDisplay(separate(' \x1b[31m⠋ Working\x1b[0m ')));
+  assert.notDeepEqual(workingDisplay(separate(' ⠋ Working ')), workingDisplay(separate('Working…')));
+  assert.notDeepEqual(workingDisplay(separate(' ⠋ Working ')), workingDisplay(embedded('⠋ Working')));
+  assert.deepEqual(workingDisplay(embedded('⠋ Working')), workingDisplay(embedded('⠙ Working')));
+  assert.notDeepEqual(workingDisplay(embedded('⠋ Working')), workingDisplay(screen(['GOLDEN_USER', 'answer'])));
+  assert.equal(workingDisplay(screen(['GOLDEN_USER', ' ⠋ Working', 'answer'])), null,
+    'Status-shaped transcript text must not be treated as prompt status');
 });
 
 test('golden crop keeps legacy remote heading and fails closed on missing boundaries', () => {

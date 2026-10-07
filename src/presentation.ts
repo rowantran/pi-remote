@@ -98,6 +98,7 @@ export class PresentationHost {
   workingMessage?: string;
   workingVisible = true;
   workingIndicator?: RecordValue;
+  workingIndicatorRevision = 0;
   hiddenThinkingLabel?: string;
   readonly tools = new Map<string, ToolRenderers & { name: string; description?: string; parameters?: unknown; label?: string }>();
   private readonly hooks = new Map<string, Hook[]>();
@@ -328,7 +329,9 @@ export class PresentationHost {
       setTitle: (title: string) => this.options.setTitle?.(title),
       setWorkingMessage: (message?: string) => { this.workingMessage = message; this.changed(); },
       setWorkingVisible: (visible: boolean) => { this.workingVisible = visible; this.changed(); },
-      setWorkingIndicator: (options?: RecordValue) => { this.workingIndicator = options; this.changed(); },
+      setWorkingIndicator: (options?: RecordValue) => {
+        this.workingIndicator = options; this.workingIndicatorRevision++; this.changed();
+      },
       setHiddenThinkingLabel: (label?: string) => { this.hiddenThinkingLabel = label; this.changed(); },
     };
     const sessionManager = this.restricted({

@@ -1,6 +1,7 @@
 import { readAttachment } from './files.js';
 import { Transcript } from './transcript.js';
 import { ScheduledTuiAltScreen } from './scheduled-tui.js';
+import { WorkingIndicator } from './working-indicator.js';
 import { createRemoteKeybindings } from './keybindings.js';
 import { readLocalClipboard, editLocally } from './local-input.js';
 import { PresentationHost, readPresentationConfig, createPresentationTheme, type PresentationChange } from './presentation.js';
@@ -9,12 +10,12 @@ import { hostname } from 'node:os';
 import { REMOTE_ICON, detachMessage, remoteSessionEnv, stoppedMessage } from './remote-session.js';
 import { RemoteAutocompleteProvider, transformPromptWithAttachments } from './editor-completion.js';
 import {
-  copyToClipboard, getSelectListTheme, initTheme,
+  copyToClipboard, CustomEditor, getSelectListTheme, initTheme,
   type SessionInfo, type Theme,
 } from '@earendil-works/pi-coding-agent';
 import {
   type Component, Container, Editor, type Focusable, fuzzyFilter, getKeybindings, Input, isKeyRelease, Key,
-  matchesKey, ProcessTerminal, ScrollView, SelectList, type SelectItem, setKeybindings,
+  matchesKey, ProcessTerminal, ScrollView, SelectList, type SelectItem, setKeybindings, Spacer,
   Text, type Terminal, type TerminalColors, type TerminalColorScheme, TuiAltScreen, truncateToWidth, VStack,
 } from '@earendil-works/pi-tui';
 import {
@@ -119,6 +120,10 @@ export class RemoteTui {
   private editorHistory: string[] = [];
   private completion?: RemoteAutocompleteProvider;
   private metadataTimer?: NodeJS.Timeout;
+  private working?: WorkingIndicator;
+  private workingMessage?: string;
+  private workingOptionsRevision?: number;
+  private workingEditor?: Editor & Pick<CustomEditor, 'embedWorkingStatus' | 'setWorkingStatusIndicator'>;
   presentation?: PresentationHost;
   private localTheme: Theme = createPresentationTheme();
   private initialized = false;
@@ -244,6 +249,7 @@ export class RemoteTui {
     this.tui.setTerminalColorSchemeNotifications(selection.includes('/'));
     const previous = this.presentation;
     this.presentation = undefined; // Async shutdown must not rebuild rows against a retiring host.
+    this.clearWorkingIndicator();
     this.transcript.reset(); // Stop native renderer timers before disabling the old host.
     await previous?.shutdown();
     if (this.detached) return;
@@ -277,12 +283,21 @@ export class RemoteTui {
     const next = factory?.(this.tui, { borderColor: text => this.localTheme.fg('borderMuted', text), selectList: getSelectListTheme() }, getKeybindings() as unknown as Parameters<NonNullable<PresentationHost['editorFactory']>>[2]) ?? this.makeEditor();
     // Pi's public editor contract is supported; the selected stable extension subclasses Editor.
     this.editor = next as Editor;
+    // Native Pi copies the default thinking border onto factory editors. Editors such as
+    // prompt-caret may still restore their own neutral border when they render.
+    if (this.editor.borderColor !== undefined) {
+      this.editor.borderColor = value => this.localTheme.getThinkingBorderColor(this.view.snapshot.state.thinkingLevel ?? 'off')(value);
+    }
     this.editor.setText(text);
     for (const item of this.editorHistory) this.editor.addToHistory(item);
     this.editor.onSubmit = value => { void this.submit(value, 'steer'); };
     if (this.completion) this.editor.setAutocompleteProvider(this.completion);
     this.appliedEditorFactory = factory;
-    if (previous !== next) (previous as Editor & { dispose?(): void }).dispose?.();
+    if (previous !== next) {
+      this.workingEditor?.setWorkingStatusIndicator(undefined);
+      this.workingEditor = undefined;
+      (previous as Editor & { dispose?(): void }).dispose?.();
+    }
   }
 
   private presentationChanged(scope: PresentationChange = 'transcript'): void {
@@ -347,6 +362,7 @@ export class RemoteTui {
     if (this.localInputPending || this.activeRemote || this.localDialog || this.detached) return;
     this.localInputPending = true; this.externalEditorActive = true;
     const draft = this.editor.getExpandedText();
+    this.clearWorkingIndicator();
     this.tui.stop();
     try { const text = await editLocally(draft); if (!this.detached) this.editor.setText(text); }
     catch (error) { this.notify(`Local editor failed: ${errorText(error)}`); }
@@ -357,7 +373,8 @@ export class RemoteTui {
   }
 
   private makeEditor(): Editor {
-    return new Editor(this.tui, { borderColor: accent, selectList: getSelectListTheme() }, { paddingX: 0 });
+    return new CustomEditor(this.tui, { borderColor: text => this.localTheme.getThinkingBorderColor(this.view.snapshot.state.thinkingLevel ?? 'off')(text), selectList: getSelectListTheme() },
+      getKeybindings() as unknown as ConstructorParameters<typeof CustomEditor>[2], { paddingX: 0, embedWorkingStatus: true });
   }
   private notify(text: string, kind: 'general' | 'connection' = 'general'): void {
     if (this.detached) return;
@@ -379,8 +396,10 @@ export class RemoteTui {
         if (this.detached) return;
         this.connected = true; this.generation++;
         const presentation = this.view.snapshot.presentation;
+        const wasBusy = this.view.snapshot.live.busy;
         this.view.replace(snapshot);
         this.view.snapshot.presentation = { ...presentation, ...snapshot.presentation };
+        this.reconcileWorkingLifecycle(wasBusy);
         this.metadataPending.clear();
         this.transcript.reset();
         this.transcript.clearConnectionNotices();
@@ -446,6 +465,7 @@ export class RemoteTui {
     if (this.detached) return;
     this.detached = true; this.generation++;
     clearInterval(this.metadataTimer);
+    this.clearWorkingIndicator();
     for (const unsubscribe of this.unsubscribe.splice(0)) unsubscribe();
     // Cancel only a LOCAL picker promise. Never answer a remote dialog on detach.
     this.localDialog?.cancel();
@@ -466,9 +486,11 @@ export class RemoteTui {
       && Object.keys(this.view.snapshot.live.bash ?? {}).length > 0
       && event.event.state?.messageCount > (this.view.snapshot.state.messageCount ?? 0);
     if (this.refreshing) this.journal.push(event);
+    const wasBusy = this.view.snapshot.live.busy;
     if (!this.view.apply(event)) return;
     this.transcript.changed();
     this.displayEvent(event.event);
+    if (event.event.type !== 'agent_start' && event.event.type !== 'agent_settled') this.reconcileWorkingLifecycle(wasBusy);
     if (event.event.type === 'extension_ui_request' && event.event.method === 'notify') this.notify(event.event.message ?? '');
     if (event.event.type === 'extension_error') this.notify(`Extension error: ${event.event.error}`);
     if (event.event.type === 'remote_warning') this.notify(`Remote warning: ${event.event.error ?? event.event.message ?? 'State inspection failed; remote work is preserved.'}`);
@@ -491,8 +513,10 @@ export class RemoteTui {
         const snapshot = await this.connection.request<Snapshot>('snapshot', { slotId: this.slotId });
         if (this.detached || generation !== this.generation) return;
         const presentation = this.view.snapshot.presentation;
+        const wasBusy = this.view.snapshot.live.busy;
         this.view.replace(snapshot, this.journal);
         this.view.snapshot.presentation = { ...presentation, ...snapshot.presentation };
+        this.reconcileWorkingLifecycle(wasBusy);
         this.presentation?.update(this.view.snapshot);
         this.transcript.invalidate(); this.syncBottom();
         void this.refreshPresentationData();
@@ -534,7 +558,8 @@ export class RemoteTui {
       return new Dialog(list, [record.title, record.message].filter(Boolean).join('\n'), '↑/↓ choose · Enter submit · Esc cancel · Ctrl+D detach');
     }
     if (record.method === 'editor') {
-      const editor = this.makeEditor(); editor.setText(record.prefill ?? ''); editor.disableSubmit = true;
+      const editor = new Editor(this.tui, { borderColor: accent, selectList: getSelectListTheme() }, { paddingX: 0 });
+      editor.setText(record.prefill ?? ''); editor.disableSubmit = true;
       return new Dialog(editor, record.title ?? 'Edit text', 'Enter submit · Shift+Enter / Ctrl+J newline · Esc cancel · Ctrl+D detach', data => {
         if (matchesKey(data, Key.enter)) done({ value: editor.getExpandedText() });
         else editor.handleInput(data);
@@ -563,6 +588,45 @@ export class RemoteTui {
     }
   }
 
+  /** Snapshot/slot-exit transitions must also start or stop local extension timers. */
+  private reconcileWorkingLifecycle(wasBusy: boolean): void {
+    const busy = this.view.snapshot.live.busy;
+    if (wasBusy !== busy) this.displayEvent({ type: busy ? 'agent_start' : 'agent_settled' });
+  }
+
+  private clearWorkingIndicator(): void {
+    this.workingEditor?.setWorkingStatusIndicator(undefined);
+    this.workingEditor = undefined;
+    this.working?.dispose();
+    this.working = undefined; this.workingMessage = undefined; this.workingOptionsRevision = undefined;
+  }
+
+  /** Keep one loader across message, widget and editor updates; do not restart every frame. */
+  private syncWorkingIndicator(control: Component): void {
+    if (!this.view.snapshot.live.busy || this.presentation?.workingVisible === false) {
+      this.clearWorkingIndicator(); return;
+    }
+    this.workingEditor?.setWorkingStatusIndicator(undefined);
+    this.workingEditor = control === this.editor && 'embedWorkingStatus' in this.editor
+      && this.editor.embedWorkingStatus === true && 'setWorkingStatusIndicator' in this.editor
+      && typeof this.editor.setWorkingStatusIndicator === 'function'
+      ? this.editor as typeof this.workingEditor : undefined;
+    const message = this.presentation?.workingMessage ?? 'Working';
+    const options = this.presentation?.workingIndicator;
+    const optionsRevision = this.presentation?.workingIndicatorRevision ?? 0;
+    const color = (role: 'accent' | 'muted', text: string) => this.workingEditor
+      ? this.workingEditor.borderColor(text) : this.localTheme.fg(role, text);
+    if (!this.working) {
+      this.working = new WorkingIndicator(this.tui, text => color('accent', text), text => color('muted', text), message, options);
+    } else {
+      if (optionsRevision !== this.workingOptionsRevision) this.working.setIndicator(options);
+      if (message !== this.workingMessage) this.working.setMessage(message);
+      this.working.invalidate(); // Theme/editor colors may have changed; animation state stays intact.
+    }
+    this.workingMessage = message; this.workingOptionsRevision = optionsRevision;
+    this.workingEditor?.setWorkingStatusIndicator(this.working);
+  }
+
   private syncBottom(): void {
     if (this.detached || this.externalEditorActive) return;
     const ui = this.view.snapshot.ui;
@@ -585,14 +649,14 @@ export class RemoteTui {
       }
       for (const local of this.presentation?.widgets.values() ?? []) if (local.placement === placement) this.bottom.addChild(local.component);
     };
-    // Match Pi's separate-status layout: pending prompts, status, widgets, editor, footer.
+    // Pi embeds status in supporting editors, or uses the padded Loader above widgets.
+    const control = this.activeRemote?.component ?? this.localDialog?.component ?? this.editor;
+    this.syncWorkingIndicator(control);
     this.bottom.addChild(new DynamicLines(width => this.queueLines(width)));
-    if (this.view.snapshot.live.busy && this.presentation?.workingVisible !== false) {
-      this.bottom.addChild(new Text(this.presentation?.workingMessage ?? muted('Working…'), 0, 0));
-    }
+    if (this.working && !this.workingEditor) this.bottom.addChild(this.working);
+    this.bottom.addChild(new Spacer(1)); // Native above-editor widget container's leading gap.
     widget('aboveEditor');
     if (this.pendingAttachments.length) this.bottom.addChild(new Text(muted(`Attached: ${this.pendingAttachments.map(file => safeText(file.path)).join(', ')} · /clear-attachments to remove`), 0, 0));
-    const control = this.activeRemote?.component ?? this.localDialog?.component ?? this.editor;
     this.bottom.addChild(control);
     widget('belowEditor');
     if (this.presentation?.footer) {

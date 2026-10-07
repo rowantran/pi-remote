@@ -289,7 +289,7 @@ test('footer shows the remote host and no key-hint line', async t => {
   assert.doesNotMatch(screen, /Alt\+Enter follow-up/);
 });
 
-test('working status stays above the prompt and footer while the agent runs', async t => {
+test('working status stays in the editor border above the prompt and footer while the agent runs', async t => {
   const initial = snapshot(); initial.live.busy = true; initial.live.steering = ['queued instruction'];
   initial.ui = [
     { id: 'above', method: 'setWidget', widgetKey: 'above', widgetLines: ['above-editor widget'] },
@@ -300,7 +300,7 @@ test('working status stays above the prompt and footer while the agent runs', as
   const rows = () => { ui.tui.renderNow(); return ui.tui.getScreenLines().map(stripTerminalSequences); };
   const checkOrder = () => {
     const screen = rows();
-    const markers = ['Steer: queued instruction', 'Working…', 'above-editor widget', 'prompt draft', 'below-editor widget', 'Working · slot'];
+    const markers = ['Steer: queued instruction', 'above-editor widget', ' Working ', 'prompt draft', 'below-editor widget', 'Working · slot'];
     const positions = markers.map(marker => screen.findIndex(row => row.includes(marker)));
     assert.ok(positions.every(position => position >= 0), screen.join('\n'));
     assert.deepEqual([...positions].sort((a, b) => a - b), positions, screen.join('\n'));
@@ -313,7 +313,7 @@ test('working status stays above the prompt and footer while the agent runs', as
   checkOrder();
   connection.handler = method => method === 'snapshot' ? snapshot({ seq: 2 }) : {};
   connection.emit(event(2, { type: 'agent_settled' })); await flush();
-  assert.ok(!rows().some(row => row.includes('Working…')));
+  assert.ok(!rows().some(row => row.includes(' Working ')));
   assert.ok(rows().some(row => row.includes('Ready · slot')));
 });
 
@@ -323,7 +323,7 @@ test('working status remains above a remote dialog instead of below the footer',
   const { ui } = launch(t, initial);
   ui.tui.renderNow();
   const screen = ui.tui.getScreenLines().map(stripTerminalSequences);
-  const working = screen.findIndex(row => row.includes('Working…'));
+  const working = screen.findIndex(row => /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Working/.test(row));
   const dialog = screen.findIndex(row => row.includes('Remote question'));
   const footer = screen.findIndex(row => row.includes('Working · slot'));
   assert.ok(working >= 0 && working < dialog && dialog < footer, screen.join('\n'));
