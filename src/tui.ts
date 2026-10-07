@@ -4,7 +4,7 @@ import { ScheduledTuiAltScreen } from './scheduled-tui.js';
 import { createRemoteKeybindings } from './keybindings.js';
 import { readLocalClipboard, editLocally } from './local-input.js';
 import { PresentationHost, readPresentationConfig, createPresentationTheme, type PresentationChange } from './presentation.js';
-import { loadLocalTheme, readPiThemeSetting, resolveThemeSelection, terminalAppearance } from './local-theme.js';
+import { loadLocalTheme, readPiHideThinkingBlock, readPiThemeSetting, resolveThemeSelection, terminalAppearance } from './local-theme.js';
 import { hostname } from 'node:os';
 import { REMOTE_ICON, detachMessage, remoteSessionEnv } from './remote-session.js';
 import { RemoteAutocompleteProvider, transformPromptWithAttachments } from './editor-completion.js';
@@ -82,6 +82,8 @@ export interface TuiOptions {
   host?: string;
   /** Minimum interval between normal frame starts; defaults to 8 ms locally. */
   renderIntervalMs?: number;
+  /** Start with thinking blocks hidden, like Pi's `hideThinkingBlock` setting. */
+  hideThinkingBlock?: boolean;
 }
 
 /** Exported for terminal-adapter tests; uses only the public pi-tui API. */
@@ -142,6 +144,7 @@ export class RemoteTui {
     this.editor = this.makeEditor();
     this.editor.onSubmit = text => { void this.submit(text, 'steer'); };
     this.transcript = new Transcript(this.view, this.tui, () => this.presentation);
+    this.transcript.thinking = !options.hideThinkingBlock;
     this.root = new DocumentLayout([
       { component: new ScrollView(this.transcript, { primary: true, follow: 'end', scrollbar: 'auto' }), basis: 0, grow: 1, minSize: 1 },
       { component: this.bottom, basis: 'auto', shrink: 1, minSize: 1 },
@@ -786,7 +789,8 @@ export async function runTui(connection: RemoteConnection, slotId: string, initi
   // Presentation extensions run in this process. They read the same pi-remote session
   // variables that the daemon gives the remote Pi process.
   Object.assign(process.env, remoteSessionEnv({ host, slotId, slotNumber: initialSnapshot.slot.number }));
-  const client = new RemoteTui(connection, slotId, initialSnapshot, new ProcessTerminal(), { ...options, host });
+  const hideThinkingBlock = options.hideThinkingBlock ?? await readPiHideThinkingBlock();
+  const client = new RemoteTui(connection, slotId, initialSnapshot, new ProcessTerminal(), { ...options, host, hideThinkingBlock });
   // Start input and outstanding startup dialogs before any trusted extension factory can await.
   const finished = client.run();
   void client.initialize();

@@ -48,6 +48,14 @@ export function resolveThemeSelection(selection: string, appearance: TerminalCol
   return parts.length === 2 && appearance === 'light' ? parts[0]! : parts.at(-1)!;
 }
 
+/** Pi's global `hideThinkingBlock` setting on this client machine. Missing or invalid settings mean visible, as in Pi. */
+export async function readPiHideThinkingBlock(agentDir = defaultAgentDir()): Promise<boolean> {
+  try {
+    const settings = JSON.parse(await readFile(join(agentDir, 'settings.json'), 'utf8'));
+    return settings?.hideThinkingBlock === true;
+  } catch { return false; }
+}
+
 /** Pi's own `theme` setting, used when no client theme is selected. Missing or invalid settings are ignored. */
 export async function readPiThemeSetting(agentDir = defaultAgentDir()): Promise<string | undefined> {
   try {

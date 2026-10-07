@@ -107,7 +107,7 @@ For zsh or bash, put `pi-remote` on `PATH` with `npm link`, then install the mat
 | Esc | Cancel the current dialog, or clear queued input then abort; cleared queue text returns to the editor |
 | Ctrl+D / `/detach` | Detach only, including while a dialog is open |
 | Ctrl+O | Expand/collapse tool output |
-| Ctrl+T | Show/hide thinking |
+| Ctrl+T | Show/hide thinking. The starting state follows `hideThinkingBlock` in your local `~/.pi/agent/settings.json`; Ctrl+T changes only the current view |
 | PageUp/PageDown | Scroll transcript |
 | Ctrl+End | Follow new output |
 | Ctrl+Shift+F | Search transcript |
