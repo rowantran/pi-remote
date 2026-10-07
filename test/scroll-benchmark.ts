@@ -35,8 +35,9 @@
  * profile runs should be separate from unprofiled timing comparisons.
  * This measures CPU/rendering, not SSH,
  * terminal emulator throughput, initial rendering, or sustained provider traffic.
- * Wheel/PageUp events use pi-tui's 16 ms throttle; renderNow bypasses that scheduler
- * so this benchmark measures CPU frame cost, not achievable scheduled display FPS.
+ * CPU measurements call renderNow, bypassing scheduling. --scheduled-duration
+ * separately measures scheduled wheel-scroll writes to the memory terminal, not
+ * terminal-emulator display FPS. --render-interval selects an 8/16 ms control.
  */
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
@@ -70,6 +71,9 @@ const HELP = `Usage: node --import tsx test/scroll-benchmark.ts [options]
   --scenario NAME      Run only idle-scroll, metadata-update-scroll, or
                        assistant-delta-scroll (default: all three)
   --profile FILE       Save a CPU profile of the measured loop only (single scenario)
+  --render-interval MS  Minimum scheduled frame interval (default 8; control: 16)
+  --scheduled-duration MS  Measure scheduled wheel writes (idle only, max 10000)
+  --input-interval MS   Wheel input interval for scheduled measurement (default 4)
   --experiment NAME    Idle-only diagnostic ablation: none (default), cache-footer,
                        cache-settled-tools, cache-both, cache-document,
                        cache-document-and-footer. NOT production behavior.
@@ -77,7 +81,7 @@ const HELP = `Usage: node --import tsx test/scroll-benchmark.ts [options]
 Exactly one of --snapshot or --capture is required. Capture performs only the
 transport handshake, list and snapshot, then closes SSH before any replay.
 Output is JSON statistics, never transcript text. See the file header for the
-baseline/fixed commands and limitations. No profiler is started by this script.
+baseline/fixed commands and limitations. Profiling is opt-in with --profile.
 `;
 
 const hash = (data: string | Buffer) => createHash('sha256').update(data).digest('hex');
@@ -139,6 +143,7 @@ class MemoryTerminal implements Terminal {
   bytes = 0;
   writes = 0;
   frames = 0;
+  onFrame?: () => void;
   input: (data: string) => void = () => {};
   constructor(readonly columns: number, readonly rows: number) {}
   start(input: (data: string) => void, _resize: () => void) { this.input = input; }
@@ -148,7 +153,9 @@ class MemoryTerminal implements Terminal {
     this.bytes += Buffer.byteLength(data);
     this.writes++;
     // pi-tui writes one synchronized-output buffer for every alternate-screen frame.
-    this.frames += data.split('\x1b[?2026h').length - 1;
+    const frames = data.split('\x1b[?2026h').length - 1;
+    this.frames += frames;
+    for (let i = 0; i < frames; i++) this.onFrame?.();
   }
   moveBy(lines: number) { if (lines) this.write(`\x1b[${Math.abs(lines)}${lines > 0 ? 'B' : 'A'}`); }
   hideCursor() { this.write('\x1b[?25l'); }
@@ -220,7 +227,7 @@ function statistics(values: number[]) {
   };
 }
 
-async function replay(snapshot: Snapshot, options: { width: number; rows: number; iterations: number; config: string; extensions: string[]; scenarios: readonly Scenario[]; theme?: string; profile?: string; experiment: RenderExperiment }) {
+async function replay(snapshot: Snapshot, options: { width: number; rows: number; iterations: number; config: string; extensions: string[]; scenarios: readonly Scenario[]; theme?: string; profile?: string; experiment: RenderExperiment; renderIntervalMs: number; scheduledDuration?: number; inputInterval: number }) {
   const terminal = new MemoryTerminal(options.width, options.rows);
   const connection = new FakeConnection(snapshot);
   // Match runTui's local presentation environment, with the same deterministic
@@ -230,7 +237,7 @@ async function replay(snapshot: Snapshot, options: { width: number; rows: number
   const originalToolRender = ToolExecutionComponent.prototype.render;
   const ui = new RemoteTui(connection, snapshot.slot.id, snapshot, terminal, {
     presentationConfig: options.config, presentationPaths: options.extensions,
-    theme: options.theme, host: 'scroll-benchmark',
+    theme: options.theme, host: 'scroll-benchmark', renderIntervalMs: options.renderIntervalMs,
   });
   let sequence = snapshot.seq;
   const emit = (event: RecordValue) => connection.emit({ type: 'event', slotId: snapshot.slot.id, seq: ++sequence, event });
@@ -335,7 +342,51 @@ async function replay(snapshot: Snapshot, options: { width: number; rows: number
         ...(name === 'assistant-delta-scroll' ? { deltaCharactersPerFrame: DELTA.length } : {}),
       });
     }
+    let scheduled;
+    if (options.scheduledDuration !== undefined) {
+      // Drain pending work and reset once; there is NO renderNow in the measured loop.
+      await frame(() => terminal.input(CTRL_END), false);
+      const before = counts();
+      const beforeBytes = terminal.bytes;
+      const beforeRequests = connection.requests.length;
+      const frameTimes: number[] = [];
+      let movingFrames = 0, inputs = 0, hitTop = false, lastTop = ui.tui.viewportTop;
+      terminal.onFrame = () => {
+        frameTimes.push(performance.now());
+        const top = ui.tui.viewportTop;
+        if (top !== lastTop) movingFrames++;
+        lastTop = top;
+      };
+      const start = performance.now();
+      const timer = setInterval(() => {
+        inputs++;
+        // Monotonic one-line wheel movement avoids cancellation/coalescing artifacts.
+        terminal.input('\x1b[<64;10;5M');
+        if (ui.tui.viewportTop === 0) hitTop = true;
+      }, options.inputInterval);
+      try { await new Promise<void>(accept => setTimeout(accept, options.scheduledDuration)); }
+      finally { clearInterval(timer); terminal.onFrame = undefined; }
+      const end = performance.now();
+      assertRequests();
+      if (connection.requests.length !== beforeRequests) throw new Error('Background metadata refresh overlapped scheduled measurement; shorten the total replay duration');
+      if (movingFrames === 0) throw new Error('No viewport movement in scheduled measurement');
+      if (hitTop) throw new Error('No viewport movement at transcript top; shorten --scheduled-duration');
+      const after = counts();
+      if (before.transcriptSha256 !== after.transcriptSha256) throw new Error('Scheduled scrolling changed the transcript');
+      const gaps = frameTimes.slice(1).map((time, i) => time - frameTimes[i]);
+      scheduled = {
+        scope: 'Scheduled synchronized-output writes to a memory terminal; not real terminal display FPS',
+        renderNowUsedDuringMeasurement: false, renderIntervalMs: options.renderIntervalMs,
+        inputIntervalMs: options.inputInterval, inputEvents: inputs, measuredMs: end - start,
+        frames: frameTimes.length, movingFrames, framesPerSecond: frameTimes.length * 1000 / (end - start),
+        movingFramesPerSecond: movingFrames * 1000 / (end - start),
+        writtenBytes: terminal.bytes - beforeBytes,
+        interWriteMs: gaps.length ? statistics(gaps) : null,
+        before, after,
+      };
+    }
     return {
+      ...(scheduled ? { scheduled } : {}),
       initial: initialCounts, resolvedTheme: observe(ui).localTheme.name,
       presentation: {
         assistantRenderPatched: AssistantMessageComponent.prototype.render !== originalAssistantRender,
@@ -363,6 +414,8 @@ async function main() {
     theme: { type: 'string' }, width: { type: 'string', default: '140' },
     rows: { type: 'string', default: '45' }, iterations: { type: 'string', default: '40' },
     scenario: { type: 'string' }, profile: { type: 'string' },
+    'render-interval': { type: 'string', default: '8' }, 'scheduled-duration': { type: 'string' },
+    'input-interval': { type: 'string', default: '4' },
     experiment: { type: 'string', default: 'none' }, help: { type: 'boolean' },
   } });
   if (values.help) { process.stdout.write(HELP); return; }
@@ -375,7 +428,13 @@ async function main() {
   if (values.profile && values.scenario === undefined) throw new Error('--profile requires a single --scenario');
   if (!RENDER_EXPERIMENTS.includes(values.experiment as RenderExperiment)) throw new Error('--experiment is not a supported render ablation');
   if (values.experiment !== 'none' && values.scenario !== 'idle-scroll') throw new Error('--experiment requires --scenario idle-scroll');
+  if (values['scheduled-duration'] !== undefined && (values.scenario !== 'idle-scroll' || values.experiment !== 'none' || values.profile)) {
+    throw new Error('--scheduled-duration requires --scenario idle-scroll, no profile and no experiment');
+  }
   const options = {
+    renderIntervalMs: integer(values['render-interval']!, '--render-interval', 1),
+    scheduledDuration: values['scheduled-duration'] === undefined ? undefined : integer(values['scheduled-duration'], '--scheduled-duration', 100),
+    inputInterval: integer(values['input-interval']!, '--input-interval', 1),
     profile: values.profile, experiment: values.experiment as RenderExperiment,
     width: integer(values.width!, '--width', 20), rows: integer(values.rows!, '--rows', 10),
     iterations: integer(values.iterations!, '--iterations', 1),
@@ -383,6 +442,7 @@ async function main() {
     extensions: values['ui-extension'] ?? [], theme: values.theme,
     scenarios: values.scenario === undefined ? SCENARIOS : [values.scenario as Scenario],
   };
+  if (options.scheduledDuration !== undefined && options.scheduledDuration > 10_000) throw new Error('--scheduled-duration must be <= 10000 ms to limit metadata-timer overlap');
   const text = values.capture ? await capture(values.capture, values.host!, values.slot!) : await readFile(values.snapshot!, 'utf8');
   const snapshot = parseSnapshot(text);
   if (options.experiment !== 'none' && (snapshot.live.busy || snapshot.live.compacting || Object.values(snapshot.live.tools).some(tool => tool.type !== 'tool_execution_end'))) {
@@ -395,7 +455,7 @@ async function main() {
   const sourceHashes = await Promise.all(sourceFiles.map(async name => [name, await fileHash(join(root, 'src', name))]));
   const result = await replay(snapshot, options);
   process.stdout.write(JSON.stringify({
-    benchmarkVersion: 1,
+    benchmarkVersion: 2,
     runtime: { node: process.version, platform: process.platform, arch: process.arch, cpu: cpus()[0]?.model, root },
     input: {
       snapshotSha256: hash(text), scriptSha256: await fileHash(script), sourceSha256: hash(JSON.stringify(sourceHashes)),
@@ -403,6 +463,7 @@ async function main() {
       uiConfig: options.config, uiConfigSha256: await fileHash(options.config),
       uiExtensions: await Promise.all(config.extensions.map(async path => ({ path, sha256: await fileHash(path) }))),
       width: options.width, rows: options.rows, iterations: options.iterations, scenarios: options.scenarios,
+      renderIntervalMs: options.renderIntervalMs,
       entries: snapshot.entries.length, liveMessages: snapshot.live.messages.length,
       capturedBusy: snapshot.live.busy, capturedCompacting: snapshot.live.compacting,
     },
@@ -429,7 +490,7 @@ async function main() {
 // text. Known benchmark validation failures are safe, everything else is generic.
 main().catch(error => {
   const message = error instanceof Error ? error.message : '';
-  const safe = /^(Specify exactly|--(?:capture|host|width|rows|iterations|scenario|profile|experiment)|Invalid snapshot JSON|File must contain|Replay attempted|Extra asynchronous|Background metadata|No viewport movement)/.test(message);
+  const safe = /^(Specify exactly|--(?:capture|host|width|rows|iterations|scenario|profile|experiment|render-interval|scheduled-duration|input-interval)|Invalid snapshot JSON|File must contain|Replay attempted|Extra asynchronous|Background metadata|No viewport movement|Scheduled scrolling changed the transcript)/.test(message);
   process.stderr.write(`Scroll benchmark failed: ${safe ? message : 'check input paths, private capture destination, SSH, and trusted UI configuration (details withheld)'}\n`);
   process.exitCode = 1;
 });
