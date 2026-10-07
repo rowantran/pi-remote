@@ -8,7 +8,8 @@ import {
   createReadToolDefinition, createWriteToolDefinition,
   type ToolRenderers, type TruncationResult,
 } from '@earendil-works/pi-coding-agent';
-import { Container, Spacer, Text, truncateToWidth, type Component, type TUI } from '@earendil-works/pi-tui';
+import { Container, Spacer, Text, type Component, type TUI } from '@earendil-works/pi-tui';
+import { WidthCache } from './width-cache.js';
 import type { PresentationHost } from './presentation.js';
 import type { RecordValue } from './protocol.js';
 import { messageKey, RemoteView, safeText, transcriptMessages } from './view.js';
@@ -68,6 +69,7 @@ export class Transcript extends Container {
   private messages = new Map<string, { source: RecordValue; component: Component }>();
   private renderedExpanded = this.expanded;
   private renderedThinking = this.thinking;
+  private readonly widthCache = new WidthCache();
 
   constructor(private view: RemoteView, private ui: TUI,
     private presentation: () => PresentationHost | undefined = () => undefined) { super(); }
@@ -83,7 +85,7 @@ export class Transcript extends Container {
   reset(): void {
     for (const row of this.tools.values()) this.retire(row);
     this.host?.retainToolCalls([]);
-    this.tools.clear(); this.messages.clear(); this.changed();
+    this.tools.clear(); this.messages.clear(); this.widthCache.clear(); this.changed();
   }
 
   private retire(row: ToolRow): void {
@@ -256,6 +258,6 @@ export class Transcript extends Container {
     }
     if (this.dirty) this.rebuild();
     // Pi components own normal layout; enforce the client width contract even at 1 column.
-    return super.render(width).map(line => truncateToWidth(line, width, ''));
+    return this.widthCache.clamp(super.render(width), width);
   }
 }

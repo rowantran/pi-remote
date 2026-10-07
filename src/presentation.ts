@@ -9,7 +9,8 @@ import {
   type ToolRenderers, type ToolRendererResolver, type ToolRenderResultOptions,
   type MessageRenderer, type EntryRenderer, type MarkdownTransformer, type MarkdownTransformContext,
 } from '@earendil-works/pi-coding-agent';
-import { type Component, type TUI, Editor, matchesKey, Text, truncateToWidth } from '@earendil-works/pi-tui';
+import { type Component, type TUI, Editor, matchesKey, Text } from '@earendil-works/pi-tui';
+import { WidthCache } from './width-cache.js';
 import type { RecordValue, Snapshot } from './protocol.js';
 import { activeBranch, messageKey } from './view.js';
 
@@ -49,12 +50,13 @@ type EditorFactory = NonNullable<Parameters<ExtensionUIContext['setEditorCompone
 type RenderContext = Parameters<NonNullable<ToolDefinition<any, any>['renderCall']>>[2];
 export type PresentationToolContext = Partial<RenderContext> & { toolCallId: string };
 export interface PresentationWidget { component: DisposableComponent; placement: 'aboveEditor' | 'belowEditor' }
+export type PresentationChange = 'layout' | 'transcript';
 export interface PresentationHostOptions {
   snapshot: () => Snapshot;
   tui: TUI;
   theme?: () => Theme;
   notify: (message: string, type?: 'info' | 'warning' | 'error') => void;
-  invalidate: () => void;
+  invalidate: (scope: PresentationChange) => void;
   getEditorText?: () => string;
   setEditorText?: (text: string) => void;
   getToolsExpanded?: () => boolean;
@@ -156,8 +158,8 @@ export class PresentationHost {
     const message = `${name} is unavailable in the presentation-only host; nothing was sent or executed`;
     this.report(name, message); throw new Error(message);
   }
-  private changed(): void { if (!this.stopped) this.options.invalidate(); }
-  private renderersChanged(): void { this._rendererRevision++; this.changed(); }
+  private changed(scope: PresentationChange = 'layout'): void { if (!this.stopped) this.options.invalidate(scope); }
+  private renderersChanged(): void { this._rendererRevision++; this.changed('transcript'); }
   private call<T>(key: string, fn: (...args: any[]) => T, ...args: any[]): T | undefined {
     if (this.disabled.has(fn)) return undefined;
     try { return fn(...args); }
@@ -230,14 +232,14 @@ export class PresentationHost {
   async command(name: string, args = ''): Promise<boolean> {
     const hook = this.commands.get(name.replace(/^\//, ''));
     if (!hook || this.stopped) return false;
-    await this.invoke(hook, args, this.context); this.changed(); return true;
+    await this.invoke(hook, args, this.context); this.changed('transcript'); return true;
   }
   get commandNames(): string[] { return [...this.commands.keys()]; }
   hasShortcut(data: string): boolean { return !this.stopped && [...this.shortcuts.keys()].some(key => matchesKey(data, key as any)); }
   async shortcut(data: string): Promise<boolean> {
     if (this.stopped) return false;
     for (const [key, hook] of this.shortcuts) {
-      if (matchesKey(data, key as any)) { await this.invoke(hook, this.context); this.changed(); return true; }
+      if (matchesKey(data, key as any)) { await this.invoke(hook, this.context); this.changed('transcript'); return true; }
     }
     return false;
   }
@@ -307,7 +309,7 @@ export class PresentationHost {
       setHeader: (factory?: Function) => {
         this.header?.dispose?.();
         this.header = factory ? this.component('header', this.call('header factory', factory as any, this.options.tui, this.theme)) : undefined;
-        this.changed();
+        this.changed('transcript');
       },
       setWidget: (key: string, content?: string[] | string | Function, options?: RecordValue) => {
         this.widgets.get(key)?.component.dispose?.(); this.widgets.delete(key);
@@ -398,6 +400,7 @@ export class PresentationHost {
     const existing = this.guardedComponents.get(value);
     if (existing) return existing;
     let failed = false;
+    const widthCache = new WidthCache();
     const guarded = new Proxy(value, { get: (target, property) => {
       const member = Reflect.get(target, property, target);
       if (typeof member !== 'function') return member;
@@ -405,8 +408,9 @@ export class PresentationHost {
         if (failed && property !== 'dispose') return property === 'render' ? [] : undefined;
         try {
           const result = member.apply(target, args);
-          return property === 'render' ? result.map((line: string) => truncateToWidth(line, args[0], '')) : result;
-        } catch (error) { failed = true; this.report(key, error); return property === 'render' ? [] : undefined; }
+          if (property === 'dispose') widthCache.clear();
+          return property === 'render' ? widthCache.clamp(result, args[0]) : result;
+        } catch (error) { failed = true; widthCache.clear(); this.report(key, error); return property === 'render' ? [] : undefined; }
       };
     }, set: (target, property, value) => Reflect.set(target, property, value, target) });
     this.guardedComponents.set(value, guarded); this.guardedComponents.set(guarded, guarded);

@@ -305,6 +305,21 @@ The golden test starts a normal Pi TUI and a pi-remote client backed by stock Pi
 
 Each checkpoint saves both raw ANSI screens, transcript text, resolved foreground/background/attribute runs, diffs, and side-by-side views. The test fails on text or style differences after normalizing wall-clock duration labels. Startup/editor/footer UI and transient toggle notifications are outside this transcript comparison. It checks neither inline images nor terminal palette auto-detection. Isolated homes, sessions, workspaces, daemons, and a private tmux server keep tests separate from active work. Only test processes are stopped; the printed artifact directory is retained for inspection.
 
+### Scrolling benchmark
+
+Capture an existing slot once, then measure local scrolling without a remote connection:
+
+```sh
+npm run test:scroll -- --capture /tmp/pi-scroll.json --host devbox --slot 2 \
+  --scenario idle-scroll --iterations 10
+npm run test:scroll -- --snapshot /tmp/pi-scroll.json \
+  --scenario assistant-delta-scroll --iterations 10
+```
+
+Capture uses only read-only slot/history queries. The new snapshot file is private (`0600`); it contains conversation and tool output, so do not commit or share it. Replay uses a memory terminal and reports frame/render timings and output hashes, not transcript text. Streaming and metadata events are simulated locally; they never change the real slot.
+
+For before/after comparisons, use the same snapshot, dimensions, theme and adapter code in both worktrees. Select a worktree-local adapter with `--ui-extension` and an absent `--ui-config` path, rather than a config that points at the other checkout. Compare the reported transcript hashes and renderer-patch flags. Run each scenario separately (`idle-scroll`, `metadata-update-scroll`, `assistant-delta-scroll`) and alternate baseline/fixed runs. Startup is excluded; normal renderer timers remain active. See [`test/scroll-benchmark.ts`](test/scroll-benchmark.ts) for complete commands and limitations.
+
 ### Power-user / debugging commands
 
 `rpc` and `watch` are optional interfaces for scripts and debugging. **You do not need them for normal interactive use; use `attach` instead.**
@@ -328,6 +343,7 @@ pi-remote watch 1
 - `src/live.ts`: display-only streaming reconstruction on the daemon.
 - `src/tui.ts`, `src/view.ts`: local terminal UI and transcript projection.
 - `src/transcript.ts`, `src/keybindings.ts`: public Pi transcript components and application shortcut hints.
+- `src/width-cache.ts`: cached line-width checks, without suppressing dynamic component rendering.
 - `src/presentation.ts`, `src/local-theme.ts`: explicit adapter loading and local themes.
 - `src/files.ts`, `src/local-input.ts`, `src/editor-completion.ts`: attachments, clipboard/editor integration, and remote editor completion.
 - `src/remote-session.ts`: environment variables that identify a pi-remote session, and the detach message.

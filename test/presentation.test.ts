@@ -104,6 +104,32 @@ test('tool renderer context retains state and previous components without retain
   await host.shutdown();
 });
 
+test('width caching keeps dynamic adapter renders live and contains later failures', async () => {
+  const { host, notices } = setup();
+  const source = ['\x1b[31mwide styled text\x1b[39m'];
+  let renders = 0;
+  let fail = false;
+  host.tools.set('dynamic', { name: 'dynamic', renderCall: () => ({
+    render() { renders++; if (fail) throw new Error('late render failure'); return source; },
+    invalidate() {},
+  }) });
+  try {
+    const component = host.renderCall('dynamic', {}, { toolCallId: 'dynamic' })!;
+    const first = component.render(8);
+    assert.equal(component.render(8), first);
+    assert.equal(renders, 2, 'render still runs when only its width check is cached');
+    source[0] = 'changed output';
+    assert.equal(stripAnsi(component.render(8)[0]), 'changed ');
+    assert.equal(renders, 3);
+    assert.equal(stripAnsi(component.render(80)[0]), 'changed output');
+    assert.ok(component.render(1).every(line => visibleWidth(line) <= 1));
+    fail = true;
+    assert.deepEqual(component.render(8), []);
+    assert.deepEqual(component.render(8), []);
+    assert.equal(notices.filter(message => message.includes('late render failure')).length, 1);
+  } finally { await host.shutdown(); }
+});
+
 test('errors stay local, notify once, and mutation APIs never execute', async () => {
   const { host, notices } = setup(); await host.load([resolve(fixtures, 'errors.ts')]); await host.start();
   for (let i = 0; i < 2; i++) {
