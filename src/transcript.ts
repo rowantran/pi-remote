@@ -41,6 +41,9 @@ export function builtinToolRenderers(cwd: string): Map<string, ToolRenderers> {
   return renderers;
 }
 
+const EMPTY_TOOL_ARGS: RecordValue = Object.freeze({});
+interface ParsedToolArgs { text: string; args: RecordValue }
+
 interface ToolState {
   name: string; args: RecordValue; argsComplete?: boolean; executionStarted?: boolean;
   result?: RecordValue; isPartial?: boolean; isError?: boolean; failure?: string;
@@ -66,6 +69,7 @@ export class Transcript extends Container {
   private hiddenThinkingLabel?: string;
   private defaults = new Map<string, ToolRenderers>();
   private tools = new Map<string, ToolRow>();
+  private parsedToolArgs = new WeakMap<RecordValue, ParsedToolArgs>();
   private messages = new Map<string, { source: RecordValue; component: Component }>();
   private renderedExpanded = this.expanded;
   private renderedThinking = this.thinking;
@@ -85,7 +89,8 @@ export class Transcript extends Container {
   reset(): void {
     for (const row of this.tools.values()) this.retire(row);
     this.host?.retainToolCalls([]);
-    this.tools.clear(); this.messages.clear(); this.widthCache.clear(); this.changed();
+    this.tools.clear(); this.parsedToolArgs = new WeakMap();
+    this.messages.clear(); this.widthCache.clear(); this.changed();
   }
 
   private retire(row: ToolRow): void {
@@ -179,6 +184,18 @@ export class Transcript extends Container {
     return container;
   }
 
+  private toolArgs(block: RecordValue): RecordValue {
+    if (!block.argumentText) return block.arguments ?? EMPTY_TOOL_ARGS;
+    // RemoteView preserves unchanged blocks across assistant-text deltas. Parsing each rebuild
+    // would produce new args identities and needlessly recreate historical renderer components.
+    // Track text too: mutable test fixtures can update a block without replacing its identity.
+    const cached = this.parsedToolArgs.get(block);
+    if (cached && cached.text === block.argumentText) return cached.args;
+    const args = parseStreamingJson(block.argumentText);
+    this.parsedToolArgs.set(block, { text: block.argumentText, args });
+    return args;
+  }
+
   private rebuild(): void {
     this.clear();
     const messages = transcriptMessages(this.view.snapshot);
@@ -188,7 +205,7 @@ export class Transcript extends Container {
         if (block?.type !== 'toolCall' || !block.id) continue;
         const failed = message.stopReason === 'aborted' || message.stopReason === 'error';
         tools.set(block.id, { name: block.name,
-          args: block.argumentText ? parseStreamingJson(block.argumentText) : block.arguments ?? {},
+          args: this.toolArgs(block),
           argsComplete: message.stopReason !== 'pending',
           failure: failed ? (message.stopReason === 'aborted' ? 'Operation aborted' : message.errorMessage || 'Error') : undefined,
         });
@@ -198,11 +215,11 @@ export class Transcript extends Container {
       // Nested executions are rendered inside their parent, not again at transcript level.
       if (live.parentToolCallId) continue;
       tools.set(live.toolCallId, { ...tools.get(live.toolCallId), name: live.toolName,
-        args: live.args ?? tools.get(live.toolCallId)?.args ?? {}, result: live.result ?? live.partialResult,
+        args: live.args ?? tools.get(live.toolCallId)?.args ?? EMPTY_TOOL_ARGS, result: live.result ?? live.partialResult,
         isPartial: live.type !== 'tool_execution_end', isError: !!live.isError, executionStarted: true, argsComplete: true });
     }
     for (const message of messages) if (message.role === 'toolResult') tools.set(message.toolCallId, {
-      ...tools.get(message.toolCallId), name: message.toolName, args: tools.get(message.toolCallId)?.args ?? {},
+      ...tools.get(message.toolCallId), name: message.toolName, args: tools.get(message.toolCallId)?.args ?? EMPTY_TOOL_ARGS,
       result: message, isPartial: false, isError: !!message.isError, argsComplete: true,
     });
     for (const tool of tools.values()) if (tool.failure && (!tool.result || tool.isPartial)) {
