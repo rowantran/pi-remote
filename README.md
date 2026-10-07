@@ -181,6 +181,18 @@ On attach or refresh, a successful history snapshot replaces completed live mess
 
 The snapshot's optional `historyComplete` marker identifies this contract: `true` means saved history is current through the snapshot boundary; `false` means startup or a session transition is using cached history and an uncheckpointed live buffer. Neither form merges messages by timestamp. Unmarked snapshots from older daemons retain their legacy merge behavior. Both the client and daemon need this update to fix duplicate background notices. Deployment does not update a running daemon; follow the safe upgrade procedure below after its active work has finished.
 
+## Terminal bell and workspace urgency
+
+The local TUI rings the terminal bell (BEL) once when an observed remote run goes from busy to idle. This is built in and enabled by default; no presentation adapter or remote bell extension is needed. Attaching to an idle or busy slot, starting work, retries, and detaching do not ring. A reconnect or snapshot refresh that finds previously busy work idle rings once, as does a busy slot exiting. Duplicate events do not ring again.
+
+Ghostty's default `bell-features = attention,title` behavior adds a 🔔 title marker and requests attention. SketchyBar can mark a workspace urgent when a Ghostty window title starts with `🔔 `. Ghostty clears the marker on focus or keyboard input. Window titles do not aggregate all Ghostty split panes.
+
+Use `--no-bell` with `new` or `attach` to disable the built-in bell for that client. To disable it by default, set `"bell": false` in local `~/.pi/remote-client.json` (or the file selected by `--ui-config`). `/reload-ui` rereads the setting; `--no-bell` always wins. The bell still rings when work settles in a focused window; focus-aware suppression is not implemented.
+
+An invalid local UI config produces a warning and rejects the whole file, even if its `bell` value is valid. At startup, the bell then uses its default (on), unless `--no-bell` was supplied. A failed `/reload-ui` retains the previous bell setting.
+
+Do not also load a terminal-bell presentation adapter unless you want a second bell. Remote Pi's TUI-only `emit-terminal-bel.ts` remains inactive in RPC mode; native Pi can still use it.
+
 ## Extension compatibility and local presentation
 
 The **stock remote harness is unchanged**. Remote Pi loads extension factories normally; their agent hooks, tools, providers, and credentials stay remote. Its RPC UI forwards dialogs, notifications, status text, string-array widgets, terminal title, and editor text. It cannot transfer executable terminal components to the client.
@@ -198,7 +210,8 @@ Use repeatable `--ui-extension PATH` flags, or create **local** `~/.pi/remote-cl
 ```json
 {
   "extensions": ["/absolute/path/to/trusted-ui.ts"],
-  "theme": "dark"
+  "theme": "dark",
+  "bell": true
 }
 ```
 

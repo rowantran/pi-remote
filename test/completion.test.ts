@@ -48,6 +48,20 @@ test('CLI parser accepts equals, repeated presentation adapters, and untouched r
   for (const args of [['--cwd'], ['--cwd', '--json'], ['--host='], ['--unknown']]) assert.throws(() => parseOptions(args));
 });
 
+test('CLI parses and completes --no-bell as a local UI override', async () => {
+  assert.equal(parseOptions([]).ui.bell, undefined);
+  const parsed = parseOptions(['--no-bell']);
+  assert.equal(parsed.ui.bell, false);
+  assert.equal(parsed.flags.has('--no-bell'), true);
+  const forwarded = parseOptions(['--', '--no-bell']);
+  assert.deepEqual(forwarded.piArgs, ['--no-bell']);
+  assert.equal(forwarded.ui.bell, undefined);
+  for (const command of ['attach', 'new']) {
+    const items = await completeWords([command, '--no-b']);
+    assert.ok(items.some(item => item.value === '--no-bell'));
+  }
+});
+
 test('CLI enables recovery only for attached terminal UIs, never headless commands', () => {
   for (const command of ['attach', 'new']) {
     assert.equal(shouldReconnect(command, new Set(), true, true), true);
@@ -81,6 +95,7 @@ test('help separates power-user/debug commands from everyday use', async t => {
   assert.match(advanced, /pi-remote watch \[--host HOST\] SLOT/);
   assert.match(advanced, /pi-remote\/config\.json/);
   assert.match(advanced, /Use attach for normal interactive work/);
+  assert.match(advanced, /--no-bell/);
 });
 
 test('shell completion labels rpc and watch as power-user/debug commands', async () => {

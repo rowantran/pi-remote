@@ -49,10 +49,18 @@ test('presentation configuration is opt-in and exact paths are resolved predicta
   const dir = await mkdtemp(resolve(tmpdir(), 'presentation-'));
   try {
     const path = resolve(dir, 'remote-client.json');
-    assert.deepEqual(await readPresentationConfig(path), { extensions: [], theme: undefined });
+    assert.deepEqual(await readPresentationConfig(path), { extensions: [], theme: undefined, bell: undefined });
     await writeFile(path, JSON.stringify({ extensions: ['./a.ts', './a.ts'], theme: 'dark' }));
     const config = await readPresentationConfig(path, ['./b.ts']);
-    assert.deepEqual(config, { extensions: [resolve(dir, 'a.ts'), resolve('b.ts')], theme: 'dark' });
+    assert.deepEqual(config, { extensions: [resolve(dir, 'a.ts'), resolve('b.ts')], theme: 'dark', bell: undefined });
+    for (const bell of [true, false]) {
+      await writeFile(path, JSON.stringify({ bell }));
+      assert.equal((await readPresentationConfig(path)).bell, bell);
+    }
+    for (const bell of ['false', 0, null, [], {}]) {
+      await writeFile(path, JSON.stringify({ bell }));
+      await assert.rejects(readPresentationConfig(path), /Invalid presentation config/);
+    }
     await writeFile(path, JSON.stringify({ extensions: 'all' }));
     await assert.rejects(readPresentationConfig(path), /Invalid presentation config/);
     const { host } = setup(); await host.start();

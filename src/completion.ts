@@ -8,7 +8,7 @@ import { nodeModuleArgs } from './node-entry.js';
 import type { RemoteConnection, SlotInfo } from './protocol.js';
 
 export const VALUE_OPTIONS = ['--host', '--remote-bin', '--state-dir', '--cwd', '--session', '--ui-extension', '--ui-config', '--theme'] as const;
-export const BOOLEAN_OPTIONS = ['--local', '--json', '--no-attach', '--no-reconnect', '--help'] as const;
+export const BOOLEAN_OPTIONS = ['--local', '--json', '--no-attach', '--no-reconnect', '--no-bell', '--help'] as const;
 export const COMMANDS = ['new', 'ls', 'attach', 'kill', 'watch', 'rpc', 'completion', 'help', 'version'] as const;
 const COMMAND_LABELS: Partial<Record<typeof COMMANDS[number], string>> = {
   rpc: 'Power-user/debug: send a JSON command',
