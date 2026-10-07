@@ -3,7 +3,7 @@ import { Transcript } from './transcript.js';
 import { createRemoteKeybindings } from './keybindings.js';
 import { readLocalClipboard, editLocally } from './local-input.js';
 import { PresentationHost, readPresentationConfig, createPresentationTheme } from './presentation.js';
-import { loadLocalTheme } from './local-theme.js';
+import { loadLocalTheme, readPiThemeSetting, resolveThemeSelection, terminalAppearance } from './local-theme.js';
 import { hostname } from 'node:os';
 import { REMOTE_ICON, detachMessage, remoteSessionEnv } from './remote-session.js';
 import { RemoteAutocompleteProvider, transformPromptWithAttachments } from './editor-completion.js';
@@ -14,7 +14,7 @@ import {
 import {
   type Component, Container, Editor, type Focusable, fuzzyFilter, getKeybindings, Input, isKeyRelease, Key,
   matchesKey, ProcessTerminal, ScrollView, SelectList, type SelectItem, setKeybindings,
-  Text, type Terminal, TuiAltScreen, truncateToWidth, VStack,
+  Text, type Terminal, type TerminalColors, type TerminalColorScheme, TuiAltScreen, truncateToWidth, VStack,
 } from '@earendil-works/pi-tui';
 import {
   errorText,
@@ -28,6 +28,8 @@ const accent = (text: string) => `\x1b[36m${text}\x1b[39m`;
 const muted = (text: string) => `\x1b[2m${text}\x1b[22m`;
 const warning = (text: string) => `\x1b[33m${text}\x1b[39m`;
 const errorColor = (text: string) => `\x1b[31m${text}\x1b[39m`;
+/** Pi's interactive mode waits this long for terminal color replies before it falls back. */
+const TERMINAL_COLOR_TIMEOUT_MS = 100;
 const HELP = `Local Pi remote UI
 Enter: send; while running, queue a steering instruction.
 Alt+Enter: queue a follow-up (wait until the run finishes).
@@ -118,11 +120,18 @@ export class RemoteTui {
   private lifecycle = Promise.resolve();
   private localInputPending = false;
   private externalEditorActive = false;
+  private terminalColors: TerminalColors = {};
+  private terminalColorScheme?: TerminalColorScheme;
+  private themeSelection = 'system';
+  private reloadQueue = Promise.resolve();
 
   constructor(private connection: RemoteConnection, private slotId: string, snapshot: Snapshot,
     terminal: Terminal = new ProcessTerminal(), private options: TuiOptions = {}) {
     setKeybindings(createRemoteKeybindings());
-    initTheme(options.theme, false); // No session, extensions, providers, or remote resources are loaded locally.
+    // No session, extensions, providers, or remote resources are loaded locally.
+    let initial: string | undefined;
+    try { initial = options.theme && resolveThemeSelection(options.theme, terminalAppearance()); } catch { /* Reported by initialize(). */ }
+    initTheme(initial, false);
     this.view = new RemoteView(snapshot);
     this.tui = new TuiAltScreen(terminal, true, undefined, { copySelection: async text => {
       try { await copyToClipboard(text); return true; } catch (error) { return errorText(error); }
@@ -147,6 +156,10 @@ export class RemoteTui {
       localCommands: ['attach', 'clear-attachments', 'detach', 'help', 'model', 'new', 'fork', 'resume', 'session', 'copy', 'name', 'compact', 'thinking', 'export', 'reload-ui', 'theme', 'tool-call', 'paste', 'editor'].map(name => ({ name })),
     });
     this.editor.setAutocompleteProvider(this.completion);
+    // Like Pi, learn whether the terminal is light or dark before building themed content.
+    this.unsubscribe.push(this.tui.onTerminalColorSchemeChange(scheme => this.terminalColorSchemeChanged(scheme)));
+    await this.queryTerminalColors();
+    if (this.detached) return;
     try { await this.reloadPresentation(); }
     catch (error) { this.notify(`Local presentation initialization failed: ${errorText(error)}`); }
     if (this.detached) return;
@@ -155,10 +168,71 @@ export class RemoteTui {
     this.metadataTimer.unref();
   }
 
-  private async reloadPresentation(): Promise<void> {
-    const config = await readPresentationConfig(this.options.presentationConfig, this.options.presentationPaths);
-    const theme = await loadLocalTheme(this.options.theme ?? config.theme);
+  private get appearance(): TerminalColorScheme {
+    return terminalAppearance(this.terminalColors, this.terminalColorScheme);
+  }
+
+  /** Query OSC 10/11/4 colors. Late replies, such as over slow SSH links, still apply. */
+  private async queryTerminalColors(): Promise<void> {
+    let colors: TerminalColors = {};
+    try {
+      colors = await this.tui.queryTerminalColors({ timeoutMs: TERMINAL_COLOR_TIMEOUT_MS, onLateReply: late => this.terminalColorsChanged(late) });
+    } catch { /* A terminal that cannot be queried reports no colors. */ }
+    this.applyTerminalColors(colors);
+  }
+
+  private applyTerminalColors(colors: TerminalColors): void {
+    this.terminalColors = {
+      foreground: colors.foreground ?? this.terminalColors.foreground,
+      background: colors.background ?? this.terminalColors.background,
+      palette: colors.palette ?? this.terminalColors.palette,
+    };
+  }
+
+  private terminalColorsChanged(colors: TerminalColors): void {
     if (this.detached) return;
+    const previous = this.appearance;
+    this.applyTerminalColors(colors);
+    if (this.appearance !== previous) this.reapplyThemeForAppearance();
+  }
+
+  /** The terminal switched light/dark (mode 2031). Its colors changed too, so query them again. */
+  private terminalColorSchemeChanged(scheme: TerminalColorScheme): void {
+    if (this.detached) return;
+    const previous = this.appearance;
+    this.terminalColorScheme = scheme;
+    this.terminalColors = {}; // The old background no longer describes the terminal.
+    void this.queryTerminalColors().then(() => {
+      if (!this.detached && this.appearance !== previous) this.reapplyThemeForAppearance();
+    });
+  }
+
+  /** Switch the member of a `light/dark` theme pair. Single themes keep their own colors. */
+  private reapplyThemeForAppearance(): void {
+    if (!this.themeSelection.includes('/')) return;
+    let name: string;
+    try { name = resolveThemeSelection(this.themeSelection, this.appearance); } catch { return; }
+    if (name === this.localTheme.name) return;
+    void this.reloadPresentation().catch(error => this.notify(`Local theme change failed: ${errorText(error)}`));
+  }
+
+  /** Serialize reloads: appearance changes can arrive while a command reloads the presentation. */
+  private reloadPresentation(): Promise<void> {
+    const next = this.reloadQueue.then(() => this.loadPresentation());
+    this.reloadQueue = next.catch(() => {});
+    return next;
+  }
+
+  private async loadPresentation(): Promise<void> {
+    if (this.detached) return;
+    const config = await readPresentationConfig(this.options.presentationConfig, this.options.presentationPaths);
+    const selection = this.options.theme ?? config.theme ?? await readPiThemeSetting() ?? 'system';
+    const theme = await loadLocalTheme(selection, undefined, this.appearance);
+    if (this.detached) return;
+    this.themeSelection = selection;
+    // Theme pairs follow live terminal light/dark switches. Without Pi's private terminal-color
+    // state, the system theme uses palette indices and default colors, which the terminal adapts itself.
+    this.tui.setTerminalColorSchemeNotifications(selection.includes('/'));
     const previous = this.presentation;
     this.presentation = undefined; // Async shutdown must not rebuild rows against a retiring host.
     this.transcript.reset(); // Stop native renderer timers before disabling the old host.
@@ -621,7 +695,7 @@ export class RemoteTui {
       case '/reload': this.notify('Stock Pi RPC cannot reload its remote harness. Use /reload-ui to reload local presentation only; remote Pi is not restarted.'); return true;
       case '/theme': {
         if (!args) this.notify(`Local theme: ${this.localTheme.name ?? 'system'}. Usage: /theme NAME`);
-        else { const theme = await loadLocalTheme(args); this.options.theme = args; this.localTheme = theme; await this.reloadPresentation(); }
+        else { await loadLocalTheme(args, undefined, this.appearance); this.options.theme = args; await this.reloadPresentation(); }
         return true;
       }
       case '/attach': {

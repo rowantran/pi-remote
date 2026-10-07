@@ -3,17 +3,62 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Theme, initTheme } from '@earendil-works/pi-coding-agent';
+import type { RgbColor, TerminalColors, TerminalColorScheme } from '@earendil-works/pi-tui';
 import { createPresentationTheme } from './presentation.js';
 
 const BACKGROUNDS = new Set('selectedBg searchMatchBg userMessageBg customMessageBg toolPendingBg toolSuccessBg toolErrorBg'.split(' '));
 const OPTIONAL: Record<string, string> = { scrollbarTrack: 'muted', scrollbarThumb: 'text', searchMatchText: 'text', searchMatchBg: 'selectedBg', thinkingMax: 'thinkingXhigh' };
 
-/** Theme data only: no private Pi imports, watchers, settings writes, or resource discovery. */
-export async function loadLocalTheme(selection = 'system', agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi/agent')): Promise<Theme> {
-  // Without terminal appearance metadata choose the dark member, as Pi's documented fallback does.
+const defaultAgentDir = () => process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi/agent');
+
+function relativeLuminance({ r, g, b }: RgbColor): number {
+  const linear = (channel: number) => { const value = channel / 255; return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4; };
+  return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+}
+
+/** Dark or light from COLORFGBG's background palette index, classified like Pi and Vim. */
+export function colorFgBgAppearance(env: NodeJS.ProcessEnv = process.env): TerminalColorScheme | undefined {
+  const bg = env.COLORFGBG?.split(';').at(-1)?.trim();
+  if (!bg || !/^\d{1,2}$/.test(bg) || Number(bg) > 15) return undefined;
+  return Number(bg) <= 6 || Number(bg) === 8 ? 'dark' : 'light';
+}
+
+/**
+ * Whether the local terminal is dark or light, in Pi's order: the reported background (OSC 11),
+ * the terminal's light/dark report (mode 2031), COLORFGBG, then dark.
+ */
+export function terminalAppearance(colors: TerminalColors = {}, scheme?: TerminalColorScheme, env: NodeJS.ProcessEnv = process.env): TerminalColorScheme {
+  const { background, foreground } = colors;
+  if (background) {
+    const bg = relativeLuminance(background);
+    if (foreground) {
+      const fg = relativeLuminance(foreground);
+      if (Math.abs(fg - bg) > 0.02) return fg > bg ? 'dark' : 'light';
+    }
+    // White text has more contrast than black text on a dark background.
+    return (1.05 / (bg + 0.05)) >= ((bg + 0.05) / 0.05) ? 'dark' : 'light';
+  }
+  return scheme ?? colorFgBgAppearance(env) ?? 'dark';
+}
+
+/** Resolve a Pi `light/dark` theme pair to the member for the terminal appearance. */
+export function resolveThemeSelection(selection: string, appearance: TerminalColorScheme): string {
   const parts = selection.split('/');
   if (parts.length > 2 || parts.some(name => !name || !/^[\w.-]+$/.test(name) || name === '.' || name === '..')) throw new Error('Use a theme name, not a path');
-  const name = parts.at(-1)!;
+  return parts.length === 2 && appearance === 'light' ? parts[0]! : parts.at(-1)!;
+}
+
+/** Pi's own `theme` setting, used when no client theme is selected. Missing or invalid settings are ignored. */
+export async function readPiThemeSetting(agentDir = defaultAgentDir()): Promise<string | undefined> {
+  try {
+    const settings = JSON.parse(await readFile(join(agentDir, 'settings.json'), 'utf8'));
+    return typeof settings?.theme === 'string' && settings.theme ? settings.theme : undefined;
+  } catch { return undefined; }
+}
+
+/** Theme data only: no private Pi imports, watchers, settings writes, or resource discovery. */
+export async function loadLocalTheme(selection = 'system', agentDir = defaultAgentDir(), appearance: TerminalColorScheme = terminalAppearance()): Promise<Theme> {
+  const name = resolveThemeSelection(selection, appearance);
   if (name === 'system') { initTheme('system', false); return createPresentationTheme(); }
   let path = join(agentDir, 'themes', `${name}.json`);
   let source: string;

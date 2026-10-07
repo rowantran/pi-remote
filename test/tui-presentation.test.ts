@@ -9,7 +9,7 @@ import { AssistantMessageComponent, ToolExecutionComponent } from '@earendil-wor
 import { stripTerminalSequences, visibleWidth, type Terminal } from '@earendil-works/pi-tui';
 import { RemoteTui } from '../src/tui.js';
 import { createPresentationTheme } from '../src/presentation.js';
-import { loadLocalTheme } from '../src/local-theme.js';
+import { loadLocalTheme, resolveThemeSelection, terminalAppearance } from '../src/local-theme.js';
 import type { RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../src/protocol.js';
 
 class FakeTerminal implements Terminal {
@@ -114,7 +114,11 @@ test('partial shell timers are retired on UI reload, reconnect and detach withou
       const launched = await launch(t, initial, paths); ui = launched.ui;
       ui.tui.renderNow(); assert.equal(active.size, 1);
       const originalTimer = [...active][0];
-      if (action === 'reload') { await launched.submit('/reload-ui'); ui.tui.renderNow(); }
+      if (action === 'reload') {
+        await launched.submit('/reload-ui');
+        for (let i = 0; i < 20 && active.has(originalTimer); i++) await flush();
+        ui.tui.renderNow();
+      }
       if (action === 'async-reload') {
         let entered!: () => void;
         const enteredPromise = new Promise<void>(resolve => { entered = resolve; });
@@ -163,6 +167,45 @@ test('local theme loader resolves variables and rejects cycles without importing
   await writeFile(path, JSON.stringify({ vars: { foreground: 'nested', nested: 'foreground' }, colors }));
   await assert.rejects(loadLocalTheme('test', dir), /Circular/);
   await assert.rejects(loadLocalTheme('../secret', dir), /theme name/);
+});
+
+test('terminal appearance follows reported colors, mode 2031 reports, then COLORFGBG', () => {
+  const white = { r: 255, g: 255, b: 255 }, black = { r: 0, g: 0, b: 0 }, cream = { r: 251, g: 241, b: 199 };
+  assert.equal(terminalAppearance({ background: cream, foreground: { r: 60, g: 56, b: 54 } }, 'dark', {}), 'light');
+  assert.equal(terminalAppearance({ background: black, foreground: white }, 'light', {}), 'dark');
+  assert.equal(terminalAppearance({ background: white }, undefined, {}), 'light');
+  assert.equal(terminalAppearance({}, 'light', { COLORFGBG: '15;0' }), 'light');
+  assert.equal(terminalAppearance({}, undefined, { COLORFGBG: '0;15' }), 'light');
+  assert.equal(terminalAppearance({}, undefined, { COLORFGBG: '15;default;0' }), 'dark');
+  assert.equal(terminalAppearance({}, undefined, {}), 'dark');
+  assert.equal(resolveThemeSelection('gruvbox-light/gruvbox-dark', 'light'), 'gruvbox-light');
+  assert.equal(resolveThemeSelection('gruvbox-light/gruvbox-dark', 'dark'), 'gruvbox-dark');
+  assert.equal(resolveThemeSelection('gruvbox-dark', 'light'), 'gruvbox-dark');
+  assert.throws(() => resolveThemeSelection('a/b/c', 'light'), /theme name/);
+});
+
+test('light/dark theme pairs pick the member for the local terminal and follow live switches', async t => {
+  class ColorTerminal extends FakeTerminal {
+    background = 'ffff/ffff/ffff'; foreground = '0000/0000/0000';
+    override write(data: string) {
+      if (!data.includes('\x1b]11;?')) return;
+      setImmediate(() => {
+        this.input(`\x1b]10;rgb:${this.foreground}\x07`);
+        this.input(`\x1b]11;rgb:${this.background}\x07`);
+        this.input('\x1b[?62c');
+      });
+    }
+  }
+  const terminal = new ColorTerminal();
+  const ui = new RemoteTui(new Connection(), 'slot', snapshot(), terminal, { presentationConfig: absentConfig, theme: 'light/dark' });
+  const finished = ui.run(); t.after(async () => { ui.detach(); await finished; });
+  await ui.initialize(); await flush();
+  const themeName = () => (ui as any).localTheme.name;
+  assert.equal(themeName(), 'light');
+  terminal.background = '0000/0000/0000'; terminal.foreground = 'ffff/ffff/ffff';
+  terminal.input('\x1b[?997;1n');
+  for (let i = 0; i < 50 && themeName() !== 'dark'; i++) await flush();
+  assert.equal(themeName(), 'dark');
 });
 
 test('a second client refreshes completed bash history from a legacy daemon without remote_bash_end', async t => {

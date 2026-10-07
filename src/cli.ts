@@ -38,7 +38,7 @@ Options:
   --no-attach          Create a slot and print its ID without opening the TUI
   --ui-extension PATH  Load a local presentation adapter (repeatable)
   --ui-config PATH     Local presentation configuration
-  --theme NAME         Local UI theme
+  --theme NAME         Local UI theme, or a LIGHT/DARK pair
   --no-reconnect       Disable automatic client reconnection
 
 Configuration:
