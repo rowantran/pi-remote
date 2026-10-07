@@ -82,6 +82,27 @@ export function lineToAnsi(canonical: string): string {
   }).join('') + '\x1b[0m';
 }
 
+/** Compare prompt status separately from the transcript. Only spinner phase is normalized. */
+export function workingDisplay(ansi: string) {
+  const plain = ansi.replace(/\n$/, '').split('\n').map(strip);
+  const canonical = canonicalLines(ansi);
+  const borders = plain.flatMap((line, i) => /^[─━]{2}/u.test(line.trimStart()) ? [i] : []);
+  const editor = borders.at(-2) ?? -1;
+  if (editor < 0) return null;
+  const embedded = /^── [\u2800-\u28ff] Working/.test(plain[editor]);
+  const separate = plain.findIndex((line, i) => i >= editor - 4 && i < editor
+    && /^\s*(?:[\u2800-\u28ff]\s+Working|Working…)\s*$/.test(line)
+    && canonical.slice(i + 1, editor).every(row => row === '[]'));
+  const index = embedded ? editor : separate;
+  if (index < 0) return null;
+  return {
+    placement: embedded ? 'border' : 'separate',
+    line: canonical[index].replace(/[\u2800-\u28ff]/g, '⠋'),
+    blankBefore: canonical[index - 1] === '[]',
+    blankAfter: embedded ? undefined : canonical[index + 1] === '[]',
+  };
+}
+
 export function crop(ansi: string, rows: number) {
   const full = ansi.replace(/\n$/, '').split('\n');
   const plain = full.map(strip);
@@ -95,8 +116,8 @@ export function crop(ansi: string, rows: number) {
   const borders = plain.flatMap((line, i) => i > start && /^[─━]{2}/u.test(line.trimStart()) ? [i] : []);
   let end = borders.at(-2) ?? -1;
   assert.ok(end > start, 'Cannot find editor border after transcript');
-  // Pi's custom-editor spinner and the remote client's working label sit above
-  // the editor border. They are prompt UI, separated from the transcript.
+  // Separate native loaders sit above the editor border in both clients.
+  // Keep recognizing the old remote label when comparing archived captures.
   // Inspect only the prompt edge, allowing up to three blank padding rows.
   // A status-shaped transcript line must never hide later transcript content.
   const working = plain.findIndex((line, i) => i > start + 3 && i < end && end - i <= 4

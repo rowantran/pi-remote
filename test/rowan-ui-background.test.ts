@@ -36,6 +36,14 @@ async function withFakeRendererRepo(run: () => Promise<void>) {
       export function withCompactToolRendering(pi) { return pi; }
     `,
     'codemode/render.ts': 'export function compactCodemodeTool() { return {}; }',
+    // The adapter requires the original factory; timing lifecycle coverage lives in rowan-ui.test.ts.
+    'worked-for.ts': `
+      import { Text } from '@earendil-works/pi-tui';
+      export default function workedFor(pi) {
+        pi.registerEntryRenderer('worked-for', (entry, _options, theme) =>
+          new Text(theme.fg('dim', 'Worked for ' + entry.data.elapsedSeconds + 's'), 1, 0));
+      }
+    `,
     // Any accidental worker or executor import must fail the adapter load.
     'background.ts': 'throw new Error("BACKGROUND WORKER FACTORY MUST NOT LOAD");',
     'background/executors.ts': 'throw new Error("BACKGROUND EXECUTORS MUST NOT LOAD");',

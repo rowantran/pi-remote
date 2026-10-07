@@ -96,7 +96,7 @@ Each pane is captured with **`tmux capture-pane -p -e -N`**. The harness keeps f
 Only these items are excluded or normalized:
 
 - Startup headers and warnings before the first user message.
-- The editor, footer, and the separate working status above the editor (Pi's custom-editor spinner or the remote client's `Working…` label).
+- The editor, footer, and separate working status are excluded from transcript cropping. The working display is compared separately: placement, text, ANSI styles, and adjacent blank rows must match. Only the animated spinner's phase is normalized.
 - Stock's temporary `Tool output: ...` and `Thinking blocks: ...` notifications.
 - Invisible trailing spaces with no background, inverse, underline, or strike style.
 - The numeric value in standalone `Took 0.0s` / `Elapsed 0.0s` Bash clock labels. The short fixture runs below ten seconds. The label and its styles remain compared. Original values remain in the raw captures and text diffs.
@@ -112,6 +112,7 @@ Each checkpoint directory contains:
 | `stock.txt`, `remote.txt` | Human-readable transcript |
 | `stock.canonical`, `remote.canonical` | Compared text/style runs, with clock values normalized |
 | `text.diff` | Unified, unnormalized plain-text diff |
+| `working.json` | Native and remote working-display comparison, with spinner phase normalized |
 | `style.diff` | Unified diff of the compared text/style runs |
 | `side-by-side.txt`, `side-by-side.ansi` | Stock on the left, remote on the right |
 

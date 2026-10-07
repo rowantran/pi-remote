@@ -86,7 +86,7 @@ test('local widgets, commands, shortcuts, metadata and reload leave the remote h
   assert.equal(ui.presentation?.workingMessage, 'agent');
 });
 
-test('custom working messages stay above the editor with a custom footer and respect visibility', async t => {
+test('custom working messages use the editor border with a custom footer and respect visibility', async t => {
   const dir = await mkdtemp(resolve(tmpdir(), 'remote-working-status-'));
   t.after(() => rm(dir, { recursive: true }));
   const fixture = resolve(dir, 'working.ts');
@@ -106,7 +106,7 @@ test('custom working messages stay above the editor with a custom footer and res
   const rows = () => { ui.tui.renderNow(); return ui.tui.getScreenLines().map(stripTerminalSequences); };
   ui.editor.setText('prompt draft');
   const screen = rows();
-  const markers = ['Custom working message', 'above-editor widget', 'prompt draft', 'below-editor widget', 'custom footer'];
+  const markers = ['above-editor widget', 'Custom working message', 'prompt draft', 'below-editor widget', 'custom footer'];
   const positions = markers.map(marker => screen.findIndex(row => row.includes(marker)));
   assert.ok(positions.every(position => position >= 0), screen.join('\n'));
   assert.deepEqual([...positions].sort((a, b) => a - b), positions, screen.join('\n'));
