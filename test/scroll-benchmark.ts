@@ -1,5 +1,6 @@
 /**
- * Reproducible, offline RemoteTui scroll benchmark. No product methods are replaced.
+ * Reproducible, offline RemoteTui scroll benchmark. Default runs leave product methods unchanged.
+ * Explicit --experiment runs are diagnostic idle-only component-caching ablations.
  *
  * Capture once (read-only hello/list/snapshot; refuses to overwrite the private file):
  *   node --import tsx test/scroll-benchmark.ts --capture /tmp/pi-scroll-snapshot.json \
@@ -30,12 +31,17 @@
  * --theme can pin the theme instead of using the config/local Pi theme setting.
  * Trusted UI extensions have normal process privileges: use only offline adapters.
  * Active renderer timers or async hooks that cause extra frames fail the benchmark
- * rather than silently doing uncounted work. This measures CPU/rendering, not SSH,
+ * rather than silently doing uncounted work. --profile records only measured frames;
+ * profile runs should be separate from unprofiled timing comparisons.
+ * This measures CPU/rendering, not SSH,
  * terminal emulator throughput, initial rendering, or sustained provider traffic.
+ * Wheel/PageUp events use pi-tui's 16 ms throttle; renderNow bypasses that scheduler
+ * so this benchmark measures CPU frame cost, not achievable scheduled display FPS.
  */
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { open, readFile, readdir } from 'node:fs/promises';
+import { Session as InspectorSession } from 'node:inspector/promises';
+import { open, readFile, readdir, writeFile } from 'node:fs/promises';
 import { cpus, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -48,6 +54,7 @@ import type { RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../sr
 import { remoteSessionEnv } from '../src/remote-session.js';
 import { RemoteTui } from '../src/tui.js';
 import { transcriptMessages } from '../src/view.js';
+import { installRenderExperiment, RENDER_EXPERIMENTS, type RenderExperiment } from './render-experiments.js';
 
 const HELP = `Usage: node --import tsx test/scroll-benchmark.ts [options]
   --snapshot FILE      Replay a saved Snapshot; no remote connection is opened
@@ -62,6 +69,10 @@ const HELP = `Usage: node --import tsx test/scroll-benchmark.ts [options]
   --iterations NUMBER  Measured frames per scenario (default 40)
   --scenario NAME      Run only idle-scroll, metadata-update-scroll, or
                        assistant-delta-scroll (default: all three)
+  --profile FILE       Save a CPU profile of the measured loop only (single scenario)
+  --experiment NAME    Idle-only diagnostic ablation: none (default), cache-footer,
+                       cache-settled-tools, cache-both, cache-document,
+                       cache-document-and-footer. NOT production behavior.
   --help               Show this help
 Exactly one of --snapshot or --capture is required. Capture performs only the
 transport handshake, list and snapshot, then closes SSH before any replay.
@@ -181,8 +192,9 @@ class FakeConnection implements RemoteConnection {
   emit(event: RemoteEvent) { for (const listener of this.listeners) listener(event); }
 }
 
-// Read-only observation of the actual dispatch queue and rendered document. No
-// method, cache, invalidation callback, timer, snapshot or component is overridden.
+// Read-only observation of the actual dispatch queue and rendered document.
+// Default runs do not replace methods/caches/timers. Explicit experiments are
+// installed separately and disclosed in the result's methodology.
 type ObservedUi = {
   lifecycle: Promise<void>;
   transcript: { render(width: number): string[] };
@@ -208,7 +220,7 @@ function statistics(values: number[]) {
   };
 }
 
-async function replay(snapshot: Snapshot, options: { width: number; rows: number; iterations: number; config: string; extensions: string[]; scenarios: readonly Scenario[]; theme?: string }) {
+async function replay(snapshot: Snapshot, options: { width: number; rows: number; iterations: number; config: string; extensions: string[]; scenarios: readonly Scenario[]; theme?: string; profile?: string; experiment: RenderExperiment }) {
   const terminal = new MemoryTerminal(options.width, options.rows);
   const connection = new FakeConnection(snapshot);
   // Match runTui's local presentation environment, with the same deterministic
@@ -235,6 +247,7 @@ async function replay(snapshot: Snapshot, options: { width: number; rows: number
     if (connection.unexpected.length) throw new Error('Replay attempted a non-metadata request; no remote call was made');
   };
   const finished = ui.run();
+  let restoreExperiment = () => {};
   try {
     await ui.initialize();
     await settle(ui);
@@ -242,6 +255,9 @@ async function replay(snapshot: Snapshot, options: { width: number; rows: number
     await nextTurn();
     assertRequests();
     const initialCounts = counts();
+    restoreExperiment = installRenderExperiment(options.experiment, {
+      document: observe(ui).transcript, footer: ui.presentation?.footer,
+    });
 
     async function frame(step: () => void, requireScroll = true) {
       const before = { bytes: terminal.bytes, frames: terminal.frames, viewport: ui.tui.viewportTop, requests: connection.requests.length };
@@ -293,7 +309,21 @@ async function replay(snapshot: Snapshot, options: { width: number; rows: number
       await frame(() => terminal.input(CTRL_END), false); // Same start position for measurements.
       const before = counts();
       const samples = [];
-      for (let i = 0; i < options.iterations; i++) samples.push(await frame(() => step(i)));
+      const inspector = options.profile ? new InspectorSession() : undefined;
+      if (inspector) {
+        inspector.connect();
+        await inspector.post('Profiler.enable');
+        await inspector.post('Profiler.start');
+      }
+      try {
+        for (let i = 0; i < options.iterations; i++) samples.push(await frame(() => step(i)));
+      } finally {
+        if (inspector) {
+          const { profile } = await inspector.post('Profiler.stop');
+          inspector.disconnect();
+          await writeFile(options.profile!, JSON.stringify(profile), { mode: 0o600, flag: 'wx' });
+        }
+      }
       scenarios.push({
         name, measuredFrames: samples.length, warmupFrames: WARMUP_FRAMES,
         before, after: counts(),
@@ -314,6 +344,7 @@ async function replay(snapshot: Snapshot, options: { width: number; rows: number
       localMetadataRequests: connection.requests, remoteReplayCalls: 0, scenarios,
     };
   } finally {
+    restoreExperiment();
     ui.detach();
     await finished;
     await nextTurn(); // Let detach's own async shutdown run; do not dispatch it twice.
@@ -331,7 +362,8 @@ async function main() {
     'ui-config': { type: 'string' }, 'ui-extension': { type: 'string', multiple: true },
     theme: { type: 'string' }, width: { type: 'string', default: '140' },
     rows: { type: 'string', default: '45' }, iterations: { type: 'string', default: '40' },
-    scenario: { type: 'string' }, help: { type: 'boolean' },
+    scenario: { type: 'string' }, profile: { type: 'string' },
+    experiment: { type: 'string', default: 'none' }, help: { type: 'boolean' },
   } });
   if (values.help) { process.stdout.write(HELP); return; }
   if (Boolean(values.snapshot) === Boolean(values.capture)) throw new Error('Specify exactly one of --snapshot FILE or --capture FILE');
@@ -340,7 +372,11 @@ async function main() {
   if (values.scenario !== undefined && !SCENARIOS.includes(values.scenario as Scenario)) {
     throw new Error('--scenario must be idle-scroll, metadata-update-scroll, or assistant-delta-scroll');
   }
+  if (values.profile && values.scenario === undefined) throw new Error('--profile requires a single --scenario');
+  if (!RENDER_EXPERIMENTS.includes(values.experiment as RenderExperiment)) throw new Error('--experiment is not a supported render ablation');
+  if (values.experiment !== 'none' && values.scenario !== 'idle-scroll') throw new Error('--experiment requires --scenario idle-scroll');
   const options = {
+    profile: values.profile, experiment: values.experiment as RenderExperiment,
     width: integer(values.width!, '--width', 20), rows: integer(values.rows!, '--rows', 10),
     iterations: integer(values.iterations!, '--iterations', 1),
     config: resolve(values['ui-config'] ?? join(homedir(), '.pi/remote-client.json')),
@@ -349,6 +385,9 @@ async function main() {
   };
   const text = values.capture ? await capture(values.capture, values.host!, values.slot!) : await readFile(values.snapshot!, 'utf8');
   const snapshot = parseSnapshot(text);
+  if (options.experiment !== 'none' && (snapshot.live.busy || snapshot.live.compacting || Object.values(snapshot.live.tools).some(tool => tool.type !== 'tool_execution_end'))) {
+    throw new Error('--experiment requires a settled snapshot with no active tools');
+  }
   const config = await readPresentationConfig(options.config, options.extensions);
   const script = fileURLToPath(import.meta.url);
   const root = dirname(dirname(script));
@@ -370,7 +409,9 @@ async function main() {
     methodology: {
       scrolling: 'alternating PageUp/PageDown from transcript end',
       timing: 'event/update + input + awaited presentation hooks/microtasks + renderNow; inter-frame yield excluded',
-      initialRenderIncluded: false, profilerStarted: false, p95: 'nearest rank',
+      initialRenderIncluded: false, profilerStarted: Boolean(options.profile), p95: 'nearest rank',
+      experiment: options.experiment,
+      experimentalBehavior: options.experiment !== 'none' ? 'Idle-only cached-component ablation; not a production fix or normal behavior' : null,
       caveats: [
         'Memory terminal counts bytes but does not model SSH or terminal emulator speed.',
         'Keep node, dependencies, options, terminal environment, theme and imported UI extension files unchanged between variants.',
@@ -388,7 +429,7 @@ async function main() {
 // text. Known benchmark validation failures are safe, everything else is generic.
 main().catch(error => {
   const message = error instanceof Error ? error.message : '';
-  const safe = /^(Specify exactly|--(?:capture|host|width|rows|iterations|scenario)|Invalid snapshot JSON|File must contain|Replay attempted|Extra asynchronous|Background metadata|No viewport movement)/.test(message);
+  const safe = /^(Specify exactly|--(?:capture|host|width|rows|iterations|scenario|profile|experiment)|Invalid snapshot JSON|File must contain|Replay attempted|Extra asynchronous|Background metadata|No viewport movement)/.test(message);
   process.stderr.write(`Scroll benchmark failed: ${safe ? message : 'check input paths, private capture destination, SSH, and trusted UI configuration (details withheld)'}\n`);
   process.exitCode = 1;
 });

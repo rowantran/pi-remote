@@ -320,6 +320,15 @@ Capture uses only read-only slot/history queries. The new snapshot file is priva
 
 For before/after comparisons, use the same snapshot, dimensions, theme and adapter code in both worktrees. Select a worktree-local adapter with `--ui-extension` and an absent `--ui-config` path, rather than a config that points at the other checkout. Compare the reported transcript hashes and renderer-patch flags. Run each scenario separately (`idle-scroll`, `metadata-update-scroll`, `assistant-delta-scroll`) and alternate baseline/fixed runs. Startup is excluded; normal renderer timers remain active. See [`test/scroll-benchmark.ts`](test/scroll-benchmark.ts) for complete commands and limitations.
 
+Compare the actual stock Pi terminal UI using a real, isolated SDK session:
+
+```sh
+npm run test:native-scroll -- --snapshot /tmp/pi-scroll.json --presentation vanilla
+npm run test:native-scroll -- --snapshot /tmp/pi-scroll.json --presentation rowan
+```
+
+Native startup selects compaction-aware history. Use `--history full` for a diagnostic full-history comparison, or [`test/context-scroll-snapshot.ts`](test/context-scroll-snapshot.ts) to select the same compacted entries for remote replay while retaining all entries for footer totals. Pin the same theme in both runners (`--theme-file` for native, `--theme` for remote). Optional `--profile FILE` captures only measured frames; profiling runs should be separate from timing comparisons. The explicit idle-only `--experiment` modes test potential cache savings and are **not production behavior**. CPU frame cost is not delivered FPS: normal wheel/PageUp scrolling uses Pi's 16 ms frame throttle. See [the performance investigation](test/scroll-performance.md) for measurements, source locations and limitations.
+
 ### Power-user / debugging commands
 
 `rpc` and `watch` are optional interfaces for scripts and debugging. **You do not need them for normal interactive use; use `attach` instead.**
