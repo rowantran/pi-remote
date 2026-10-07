@@ -8,7 +8,7 @@ import { nodeModuleArgs } from './node-entry.js';
 import type { RemoteConnection, SlotInfo } from './protocol.js';
 
 export const VALUE_OPTIONS = ['--host', '--remote-bin', '--state-dir', '--cwd', '--session', '--ui-extension', '--ui-config', '--theme'] as const;
-export const BOOLEAN_OPTIONS = ['--local', '--json', '--no-attach', '--no-reconnect', '--no-bell', '--help'] as const;
+export const BOOLEAN_OPTIONS = ['--local', '--json', '--no-attach', '--no-reconnect', '--no-bell', '--all', '--help'] as const;
 export const COMMANDS = ['new', 'ls', 'attach', 'kill', 'watch', 'rpc', 'completion', 'help', 'version'] as const;
 const COMMAND_LABELS: Partial<Record<typeof COMMANDS[number], string>> = {
   rpc: 'Power-user/debug: send a JSON command',
@@ -178,7 +178,8 @@ export async function completeWords(words: string[], dependencies: CompletionDep
       }));
     }
     const slots = numberSlots(await connection.request<NumberedSlot[]>('list'));
-    return slots.filter(slot => context.command === 'kill' ? slot.status !== 'exited' : true).flatMap(slot => {
+    // Every slot command needs a running Pi process, so stopped slots are not offered.
+    return slots.filter(slot => slot.status !== 'exited').flatMap(slot => {
       const number = slotNumber(slot);
       const value = number === undefined ? slot.id : String(number);
       // UUID/prefix remains available if explicitly typed, while the default

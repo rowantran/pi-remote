@@ -230,7 +230,7 @@ export class Supervisor {
     if (sessionFile) this.reservedPaths.add(sessionFile);
     const slot: Slot = { id: randomUUID(), number: this.nextSlotNumber++, cwd, createdAt: new Date().toISOString(), args, sessionFile, status: 'starting', live: emptyLive(), ui: new Map(), timers: new Map(), seq: 0, state: {}, changing: false };
     this.slots.set(slot.id, slot);
-    const launch: PiLaunch = { executable: this.options.executable ?? 'pi', prefixArgs: this.options.prefixArgs, cwd, env: { ...this.options.env, ...remoteSessionEnv({ host: hostname(), slotId: slot.id, slotNumber: slot.number }) }, args: [...args, ...(sessionFile ? ['--session', sessionFile] : ['--session-id', randomUUID()])] };
+    const launch: PiLaunch = { executable: this.options.executable ?? 'pi', prefixArgs: this.options.prefixArgs, cwd, env: { ...this.options.env, ...remoteSessionEnv({ host: hostname(), slotId: slot.id, slotNumber: slot.number }) }, args: [...args, ...(sessionFile ? ['--session', sessionFile] : [])] };
     slot.process = new PiProcess(launch, event => this.recordEvent(slot, event), error => {
       slot.status = 'exited'; slot.error = error.message;
       clearTimeout(slot.startupRetry);

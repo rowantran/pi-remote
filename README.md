@@ -26,7 +26,8 @@ pi-remote new --cwd /remote/project
 Remote Pi loads its normal settings, credentials, providers, extension factories, skills, and trusted project resources. Deployment copies application files, not your local Pi configuration, and does not restart existing daemons or slots.
 
 ```sh
-# List running and stopped slots, including their short numbers.
+# List running slots with their short numbers and session names.
+# Add --all to include stopped slots.
 pi-remote ls
 
 # Attach by number, full UUID, or unique nonnumeric UUID prefix.
@@ -48,7 +49,7 @@ pi-remote new --cwd /remote/project --session /remote/session.jsonl
 pi-remote kill 1
 ```
 
-From an attached client, `/quit` does the same as `pi-remote kill` for the current slot, then closes the client and prints `Stopped slot NUMBER / UUID`. If Pi is running, compacting, running a shell command, or has queued prompts, `/quit` asks for confirmation first, because stopping Pi interrupts that work. The session file stays on disk; open it in a new slot with `--session` to continue. The stopped slot stays in `pi-remote ls`.
+From an attached client, `/quit` does the same as `pi-remote kill` for the current slot, then closes the client and prints `Stopped slot NUMBER / UUID`. If Pi is running, compacting, running a shell command, or has queued prompts, `/quit` asks for confirmation first, because stopping Pi interrupts that work. The session file stays on disk; open it in a new slot with `--session` to continue. The stopped slot stays in `pi-remote ls --all`; plain `pi-remote ls` hides stopped slots and prints how many it hid.
 
 The 0.2 daemon persists stable slot numbers in `slots.json`, including stopped slots. A still-running 0.1 daemon uses insertion-order numeric aliases until a later daemon startup migrates its metadata. UUIDs remain valid in both cases. Numeric input always means a slot number, never a UUID prefix.
 
@@ -57,6 +58,18 @@ The 0.2 daemon persists stable slot numbers in `slots.json`, including stopped s
 Use `--host HOST` with any command to select another SSH host, for example `pi-remote attach --host otherbox 1`. For local testing, use `--local` instead of a host and use a local `--cwd`.
 
 Every command also accepts an unambiguous prefix: `pi-remote n --cwd /remote/project` runs `new`, `pi-remote a 1` runs `attach`, `pi-remote k 1` runs `kill`, and `pi-remote l` runs `ls`. The internal commands `bridge`, `daemon`, `complete`, and `fs` need their full names.
+
+### Session names
+
+`pi-remote ls`, the attach picker, and slot completion show each slot's Pi session name. This is Pi's own session name: the one `/name` sets and `/resume` shows. Set it with `/name NAME` in the attached UI.
+
+To name sessions automatically, install a Pi extension that does this **on the remote host**. Remote Pi loads it like any other extension, and pi-remote shows the name as soon as the extension sets it. For example, [`pi-auto-session-name`](https://github.com/patlux/pi-auto-session-name) names an unnamed session after its first run and keeps names set with `/name`:
+
+```sh
+ssh devbox pi install npm:pi-auto-session-name
+```
+
+Choose a cheap naming model in the remote `~/.pi/agent/extensions/auto-session-name.json`, for example `{"provider": "anthropic", "model": "claude-haiku-4-5"}`. Do not set `"reasoning": "off"` with that extension (version 0.1.1): Anthropic models then reject the request. Leave the option out to use its default. Extensions load when Pi starts, so slots that are already running do not get the extension.
 
 ### Configuration
 

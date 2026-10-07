@@ -14,7 +14,7 @@ const HELP = `pi-remote — local terminal UI, persistent remote Pi RPC processe
 
 Everyday commands:
   pi-remote new [--cwd REMOTE_DIRECTORY] [--host HOST] [--no-attach] [-- PI_OPTIONS...]
-  pi-remote ls [--host HOST] [--json]
+  pi-remote ls [--host HOST] [--all] [--json]
   pi-remote attach [--host HOST] [SLOT]
   pi-remote kill [--host HOST] SLOT
   pi-remote completion fish|zsh|bash
@@ -35,6 +35,7 @@ Options:
   --remote-bin PATH    Remote program (default ~/.local/share/pi-remote/bin/pi-remote)
   --state-dir PATH     Remote daemon state directory (default ~/.pi/remote)
   --session PATH       Resume a session file when creating a new slot
+  --all                ls: include stopped slots (hidden by default)
   --local              No SSH; run against a daemon on this machine
   --json               Machine-readable list/create output
   --no-attach          Create a slot and print its ID without opening the TUI
@@ -146,6 +147,14 @@ export async function resolveSlot(connection: Pick<RemoteConnection, 'request'>,
   if (allowPicker && active.length > 1) return pickSlot(active);
   throw new Error(active.length ? 'Specify a slot number or UUID from ls.' : 'No active slots. Create one with new --cwd DIRECTORY.');
 }
+/** Stopped slots are hidden unless --all is given; say how many so they are not lost. */
+export function formatSlotList(slots: NumberedSlot[], hidden = 0): string {
+  const lines = slots.map(slot => `${String(slotNumber(slot) ?? '-').padStart(3)}  ${slot.id}  ${slot.status.padEnd(7)}  ${slot.clients} client(s)  ${slot.sessionName ?? '(unnamed)'}  ${slot.cwd}${slot.error ? `\n  ${slot.error}` : ''}`);
+  if (!slots.length) lines.push(hidden ? 'No active slots. Create one with new --cwd DIRECTORY.' : 'No slots. Create one with new --cwd DIRECTORY.');
+  if (hidden) lines.push(`${hidden} stopped slot${hidden === 1 ? '' : 's'} hidden. Use ls --all to show ${hidden === 1 ? 'it' : 'them'}.`);
+  return lines.join('\n');
+}
+
 /** Only a live terminal UI owns recovery. Headless commands end on disconnect. */
 export function shouldReconnect(command: string, flags: ReadonlySet<string>, stdinIsTTY = Boolean(process.stdin.isTTY), stdoutIsTTY = Boolean(process.stdout.isTTY)): boolean {
   return stdinIsTTY && stdoutIsTTY && !flags.has('--no-reconnect') && (command === 'attach' || (command === 'new' && !flags.has('--no-attach')));
@@ -182,12 +191,10 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   let removeSignal: (() => void) | undefined;
   try {
     if (command === 'ls') {
-      const slots = numberSlots(await connection.request<NumberedSlot[]>('list'));
+      const all = numberSlots(await connection.request<NumberedSlot[]>('list'));
+      const slots = options.flags.has('--all') ? all : all.filter(slot => slot.status !== 'exited');
       if (options.flags.has('--json')) console.log(JSON.stringify(slots, null, 2));
-      else {
-        if (!slots.length) console.log('No slots. Create one with new --cwd DIRECTORY.');
-        for (const slot of slots) console.log(`${String(slotNumber(slot) ?? '-').padStart(3)}  ${slot.id}  ${slot.status.padEnd(7)}  ${slot.clients} client(s)  ${slot.sessionName ?? '(unnamed)'}  ${slot.cwd}${slot.error ? `\n  ${slot.error}` : ''}`);
-      }
+      else console.log(formatSlotList(slots, all.length - slots.length));
       return;
     }
     let slotId: string;
