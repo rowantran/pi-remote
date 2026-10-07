@@ -189,6 +189,8 @@ Ghostty's default `bell-features = attention,title` behavior adds a 🔔 title m
 
 Use `--no-bell` with `new` or `attach` to disable the built-in bell for that client. To disable it by default, set `"bell": false` in local `~/.pi/remote-client.json` (or the file selected by `--ui-config`). `/reload-ui` rereads the setting; `--no-bell` always wins. The bell still rings when work settles in a focused window; focus-aware suppression is not implemented.
 
+An invalid local UI config produces a warning and rejects the whole file, even if its `bell` value is valid. At startup, the bell then uses its default (on), unless `--no-bell` was supplied. A failed `/reload-ui` retains the previous bell setting.
+
 Do not also load a terminal-bell presentation adapter unless you want a second bell. Remote Pi's TUI-only `emit-terminal-bel.ts` remains inactive in RPC mode; native Pi can still use it.
 
 ## Extension compatibility and local presentation

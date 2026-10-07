@@ -27,11 +27,11 @@ class BellConnection implements RemoteConnection {
   listener?: (event: RemoteEvent) => void;
   reconnected?: (snapshot: Snapshot) => void;
   disconnected?: (error: Error) => void;
-  current: () => Snapshot = snapshot;
+  current: () => Snapshot | Promise<Snapshot> = snapshot;
   requests: string[] = [];
   async request<T>(method: string): Promise<T> {
     this.requests.push(method);
-    return (method === 'snapshot' ? structuredClone(this.current()) : {}) as T;
+    return (method === 'snapshot' ? structuredClone(await this.current()) : {}) as T;
   }
   onEvent(fn: (event: RemoteEvent) => void) { this.listener = fn; return () => { this.listener = undefined; }; }
   onReconnect(fn: (snapshot: Snapshot) => void) { this.reconnected = fn; return () => { this.reconnected = undefined; }; }
@@ -120,6 +120,60 @@ test('reconnect and snapshot settle transitions ring once; later live settle doe
     connection.emit(2, { type: 'agent_settled' }); await flush();
     connection.reconnected?.(snapshot(false, 3)); await flush();
     assert.equal(terminal.bells, 1, 'idle refresh/reconnect and later settle remain quiet');
+  });
+});
+
+test('live settle during an in-flight refresh rings once even when its reply still says busy', async t => {
+  const { ui, terminal, connection } = await launch(t, {}, snapshot(true));
+  let resolve!: (value: Snapshot) => void;
+  const pending = new Promise<Snapshot>(done => { resolve = done; });
+  connection.current = () => pending;
+  connection.emit(1, { type: 'remote_refresh' }); await flush();
+  assert.equal(connection.requests.filter(method => method === 'snapshot').length, 1);
+  assert.equal(terminal.bells, 0);
+
+  connection.emit(2, { type: 'agent_settled' }); await flush();
+  assert.equal(terminal.bells, 1, 'live event rings without waiting for the pending snapshot');
+  // The older snapshot must replay the journaled settle, not restore busy or ring again.
+  connection.current = () => ui.view.snapshot;
+  resolve(snapshot(true, 1)); await flush();
+  assert.equal(ui.view.snapshot.live.busy, false);
+  assert.equal(ui.view.snapshot.seq, 2);
+  assert.equal(terminal.bells, 1);
+  assert.equal(connection.requests.filter(method => method === 'snapshot').length, 2,
+    'the coalesced follow-up refresh must also stay quiet');
+});
+
+test('idle snapshot reply rings once and drops delayed settle events at or before its boundary', async t => {
+  const { ui, terminal, connection } = await launch(t, {}, snapshot(true));
+  let resolve!: (value: Snapshot) => void;
+  const pending = new Promise<Snapshot>(done => { resolve = done; });
+  connection.current = () => pending;
+  connection.emit(1, { type: 'remote_refresh' }); await flush();
+  assert.equal(terminal.bells, 0);
+  connection.current = () => ui.view.snapshot;
+  resolve(snapshot(false, 3)); await flush();
+  assert.equal(terminal.bells, 1);
+  for (const seq of [2, 3]) {
+    connection.emit(seq, { type: 'agent_settled' }); await flush();
+    assert.equal(terminal.bells, 1);
+    assert.equal(ui.view.snapshot.seq, 3);
+  }
+});
+
+test('invalid config uses the startup default but preserves the last setting on reload', async t => {
+  for (const bell of [undefined, false]) await t.test(bell === false ? '--no-bell' : 'default', async t => {
+    const { ui, terminal, config, send } = await launch(t, { bell }, snapshot(true), false);
+    await writeFile(config, JSON.stringify({ bell: false, theme: 5 }));
+    await ui.initialize(); await flush();
+    await send('agent_settled');
+    assert.equal(terminal.bells, bell === false ? 0 : 1);
+    await writeFile(config, JSON.stringify({ bell: false }));
+    await (ui as any).builtin('/reload-ui', '');
+    await writeFile(config, JSON.stringify({ bell: true, theme: 5 }));
+    await assert.rejects((ui as any).builtin('/reload-ui', ''), /Invalid presentation config/);
+    await send('agent_start'); await send('agent_settled');
+    assert.equal(terminal.bells, bell === false ? 0 : 1, 'failed reload preserves the last valid opt-out');
   });
 });
 
