@@ -43,6 +43,9 @@ export function builtinToolRenderers(cwd: string): Map<string, ToolRenderers> {
 
 const EMPTY_TOOL_ARGS: RecordValue = Object.freeze({});
 interface ParsedToolArgs { text: string; args: RecordValue }
+interface Notice { text: string; after: string | null; kind: 'general' | 'connection' }
+interface NoticeScope { slot: string; cwd: string; sessionId?: string; sessionFile?: string }
+const toolNoticeKey = (id: string) => `tool:${id}`;
 
 interface ToolState {
   name: string; args: RecordValue; argsComplete?: boolean; executionStarted?: boolean;
@@ -60,7 +63,9 @@ interface ToolRow {
 export class Transcript extends Container {
   expanded = false;
   thinking = true;
-  readonly notices: string[] = [];
+  private noticeRecords: Notice[] = [];
+  private noticeScope: NoticeScope;
+  get notices(): string[] { return this.noticeRecords.map(notice => notice.text); }
   private dirty = true;
   private host?: PresentationHost;
   private cwd?: string;
@@ -77,13 +82,44 @@ export class Transcript extends Container {
   private readonly widthCache = new WidthCache();
 
   constructor(private view: RemoteView, private ui: TUI,
-    private presentation: () => PresentationHost | undefined = () => undefined) { super(); }
+    private presentation: () => PresentationHost | undefined = () => undefined) {
+    super(); this.noticeScope = this.currentNoticeScope();
+  }
 
+  private currentNoticeScope(): NoticeScope {
+    const { slot, state } = this.view.snapshot;
+    return { slot: slot.id, cwd: slot.cwd, sessionId: state.sessionId,
+      sessionFile: state.sessionFile ?? slot.sessionFile };
+  }
+  private syncNoticeScope(): void {
+    const scope = this.currentNoticeScope(), previous = this.noticeScope;
+    const sameSlot = scope.slot === previous.slot && scope.cwd === previous.cwd;
+    const sameId = scope.sessionId !== undefined && scope.sessionId === previous.sessionId;
+    const idChanged = previous.sessionId !== undefined && scope.sessionId !== undefined && !sameId;
+    const fileChanged = previous.sessionFile !== undefined && scope.sessionFile !== undefined
+      && previous.sessionFile !== scope.sessionFile;
+    if (!sameSlot || idChanged || (!sameId && fileChanged)) {
+      this.noticeScope = scope; this.noticeRecords = []; this.changed();
+    } else {
+      // Starting slots learn their identity later. Keep the last known identity through
+      // incomplete snapshots, and do not mistake adding a session file for a switch.
+      this.noticeScope = { ...scope, sessionId: scope.sessionId ?? previous.sessionId,
+        sessionFile: scope.sessionFile ?? previous.sessionFile };
+    }
+  }
   changed(): void { this.dirty = true; }
   override invalidate(): void { super.invalidate(); this.changed(); }
-  notify(message: string): void {
-    this.notices.push(safeText(message));
-    if (this.notices.length > 50) this.notices.shift();
+  notify(message: string, kind: Notice['kind'] = 'general'): void {
+    this.syncNoticeScope();
+    const messages = transcriptMessages(this.view.snapshot, this.derivedMessages);
+    const last = messages.at(-1);
+    const after = last?.role === 'toolResult' ? toolNoticeKey(last.toolCallId) : last ? messageKey(last) : null;
+    this.noticeRecords.push({ text: safeText(message), after, kind });
+    if (this.noticeRecords.length > 50) this.noticeRecords.shift();
+    this.changed();
+  }
+  clearConnectionNotices(): void {
+    this.noticeRecords = this.noticeRecords.filter(notice => notice.kind !== 'connection');
     this.changed();
   }
   /** Drop per-call renderer state when switching sessions, reconnecting, or reloading UI. */
@@ -198,6 +234,8 @@ export class Transcript extends Container {
   }
 
   private rebuild(): void {
+    // A renderer can emit a notice while rebuilding. Keep that invalidation for the next frame.
+    this.dirty = false;
     this.clear();
     const messages = transcriptMessages(this.view.snapshot, this.derivedMessages);
     const tools = new Map<string, ToolState>();
@@ -229,39 +267,54 @@ export class Transcript extends Container {
     for (const [id, row] of this.tools) if (!tools.has(id)) { this.retire(row); this.tools.delete(id); }
     this.host?.retainToolCalls(tools.keys());
     const used = new Set<string>();
+    const keys = new Set<string>();
+    if (this.host?.header) this.addChild(this.host.header);
+    let hasContent = false;
+    const notices = new Map<string | null, string[]>();
+    for (const notice of this.noticeRecords) {
+      const group = notices.get(notice.after) ?? [];
+      group.push(notice.text); notices.set(notice.after, group);
+    }
+    const appendNotices = (key: string | null) => {
+      for (const text of notices.get(key) ?? []) { this.addChild(new Text(text, 1, 0)); hasContent = true; }
+    };
     const appendTool = (id: string) => {
       if (used.has(id)) return;
       const state = tools.get(id);
-      if (state) { used.add(id); this.addChild(this.tool(id, state)); }
+      if (state) {
+        used.add(id); const key = toolNoticeKey(id); keys.add(key);
+        this.addChild(this.tool(id, state)); appendNotices(key);
+      }
     };
-    if (this.host?.header) this.addChild(this.host.header);
-    let hasContent = false;
-    const keys = new Set<string>();
+    appendNotices(null);
     for (const message of messages) {
-      keys.add(messageKey(message));
-      if (message.role === 'toolResult') { appendTool(message.toolCallId); continue; }
-      if (message.role === 'system') continue;
+      const key = messageKey(message);
+      keys.add(key);
+      if (message.role === 'toolResult') { appendTool(message.toolCallId); appendNotices(key); continue; }
+      if (message.role === 'system') { appendNotices(key); continue; }
       const component = this.message(message);
       // Empty/image-only users and hidden entries add no transcript spacing.
-      if (!(component as Container).children.length) continue;
+      if (!(component as Container).children.length) { appendNotices(key); continue; }
       if (message.role === 'user' && hasContent) this.addChild(new Spacer(1));
       this.addChild(component);
       hasContent = true;
       if (message.role === 'assistant') for (const block of Array.isArray(message.content) ? message.content : []) {
         if (block?.type === 'toolCall') appendTool(block.id);
       }
+      appendNotices(key);
     }
     for (const key of this.messages.keys()) if (!keys.has(key)) this.messages.delete(key);
     for (const id of tools.keys()) appendTool(id);
+    // A history replacement can remove an anchor. Do not move its notices to the tail.
+    this.noticeRecords = this.noticeRecords.filter(notice => notice.after === null || keys.has(notice.after));
     // Older RPC snapshots supply output but not a shell command until completion.
     for (const shell of Object.values(this.view.snapshot.live.bash ?? {})) {
       this.addChild(new Spacer(1)); this.addChild(new Text(`Remote shell\n${safeText(shell.output)}`, 1, 0));
     }
-    for (const notice of this.notices) this.addChild(new Text(notice, 1, 0));
-    this.dirty = false;
   }
 
   override render(width: number): string[] {
+    this.syncNoticeScope();
     const host = this.presentation();
     const cwd = this.view.snapshot.slot.cwd;
     const session = this.view.snapshot.state.sessionFile ?? this.view.snapshot.state.sessionId;

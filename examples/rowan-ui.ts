@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createJiti } from 'jiti';
 import { Text } from '@earendil-works/pi-tui';
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, MessageRenderer } from '@earendil-works/pi-coding-agent';
 
 /** Local presentation adapter. Never loads providers, background workers, or tool executors. */
 export default async function rowanUI(pi: ExtensionAPI) {
@@ -17,11 +17,14 @@ export default async function rowanUI(pi: ExtensionAPI) {
   const background = await loader.import<any>(join(root, 'assistant-background.ts'), { default: true });
   const compact = await loader.import<any>(join(root, 'compact-tools.ts'));
   const codemode = await loader.import<any>(join(root, 'codemode/render.ts'));
+  const { renderBackgroundMessage } = await loader.import<{ renderBackgroundMessage: MessageRenderer }>(join(root, 'background/render.ts'));
   footer(pi);
   caret(pi);
   // The transcript uses the same public Pi classes this original factory decorates.
   background(pi);
   compact.default(pi);
+  // Completion/check-in notices share the renderer without loading background.ts workers.
+  pi.registerMessageRenderer('background', renderBackgroundMessage);
 
   // Capture only the existing render functions. No codemode runtime is instantiated.
   const visualTool = { name: 'codemode', label: 'Codemode', description: '', parameters: { type: 'object', properties: {} } };

@@ -7,7 +7,7 @@ import {
   CompactionSummaryMessageComponent, CustomMessageComponent, UserMessageComponent,
   ToolExecutionComponent, createReadToolDefinition, initTheme,
 } from '@earendil-works/pi-coding-agent';
-import { Container, Spacer, stripTerminalSequences, type TUI } from '@earendil-works/pi-tui';
+import { Container, Spacer, Text, stripTerminalSequences, type TUI } from '@earendil-works/pi-tui';
 import { Transcript, builtinToolRenderers } from '../src/transcript.js';
 import { PresentationHost } from '../src/presentation.js';
 import { RemoteView } from '../src/view.js';
@@ -30,6 +30,137 @@ function setup(messages: RecordValue[], tools: Record<string, RecordValue> = {})
   return { transcript: new Transcript(view, ui), view };
 }
 const plain = (transcript: Transcript) => stripTerminalSequences(transcript.render(100).join('\n'));
+
+test('notices keep their position through new messages, streaming updates and history restoration', () => {
+  const prompt = { role: 'user', timestamp: 1, content: 'FIRST_PROMPT' };
+  const response = assistant([{ type: 'text', text: 'FIRST_RESPONSE' }], { stopReason: 'pending' });
+  const { transcript, view } = setup([prompt, response]);
+  transcript.notify('FIRST_NOTICE'); transcript.notify('SECOND_NOTICE');
+  // An immutable streaming replacement keeps the same message identity.
+  view.snapshot.live.messages[1] = assistant([{ type: 'text', text: 'COMPLETED_RESPONSE' }]);
+  view.snapshot.live.messages.push({ role: 'user', timestamp: 3, content: 'NEXT_PROMPT' });
+  transcript.changed();
+  const check = () => {
+    const output = plain(transcript);
+    const positions = ['COMPLETED_RESPONSE', 'FIRST_NOTICE', 'SECOND_NOTICE', 'NEXT_PROMPT'].map(text => output.indexOf(text));
+    assert.ok(positions.every(position => position >= 0), output);
+    assert.deepEqual([...positions].sort((a, b) => a - b), positions, output);
+  };
+  check();
+  // The remote snapshot moves live messages into persisted entries.
+  const restored = structuredClone(view.snapshot);
+  restored.entries = restored.live.messages.map((message, i) => ({ type: 'message', id: String(i), parentId: i ? String(i - 1) : null, message }));
+  restored.leafId = '2'; restored.live.messages = [];
+  view.replace(restored); transcript.reset(); check();
+  transcript.expanded = true; transcript.thinking = false; check();
+});
+
+test('notices emitted by renderers appear on the next frame without new remote activity', async () => {
+  const { view } = setup([{ role: 'custom', customType: 'fixture', display: true, timestamp: 1, content: 'content' }]);
+  const host = new PresentationHost({ snapshot: () => view.snapshot, tui: ui, notify() {}, invalidate() {} });
+  const transcript = new Transcript(view, ui, () => host);
+  host.messageRenderer = () => () => {
+    transcript.notify('RENDERER_WARNING');
+    return new Text('PRESENTATION_ROW');
+  };
+  try {
+    assert.match(plain(transcript), /PRESENTATION_ROW/);
+    assert.match(plain(transcript), /RENDERER_WARNING/);
+    assert.deepEqual(transcript.notices, ['RENDERER_WARNING']);
+  } finally { transcript.reset(); await host.shutdown(); }
+});
+
+test('startup notices remain before later conversation, including after the first render', () => {
+  const { transcript, view } = setup([]);
+  transcript.notify('STARTUP_WARNING'); plain(transcript);
+  view.snapshot.live.messages.push({ role: 'user', timestamp: 1, content: 'LATER_PROMPT' });
+  transcript.changed();
+  const output = plain(transcript);
+  assert.ok(output.indexOf('STARTUP_WARNING') < output.indexOf('LATER_PROMPT'), output);
+});
+
+test('notices anchored to tool results or invisible records still precede later messages', () => {
+  const response = assistant([{ type: 'toolCall', id: 'call', name: 'unknown', arguments: {} }]);
+  const result = { role: 'toolResult', toolName: 'unknown', toolCallId: 'call', timestamp: 3, content: [{ type: 'text', text: 'TOOL_OUTPUT' }] };
+  const hiddenRecords = [result, { role: 'system', timestamp: 4, content: 'HIDDEN' },
+    { role: 'custom', customType: 'hidden', display: false, timestamp: 4, content: 'HIDDEN' },
+    { role: 'entry', id: 'hidden', customType: 'internal', timestamp: 4 }];
+  for (const record of hiddenRecords) {
+    const { transcript, view } = setup([response, result, ...(record === result ? [] : [record])]);
+    transcript.notify('AFTER_TOOL_NOTICE');
+    view.snapshot.live.messages.push(assistant([{ type: 'text', text: 'NEXT_RESPONSE' }], { timestamp: 5 }));
+    transcript.changed();
+    const output = plain(transcript);
+    assert.ok(output.indexOf('TOOL_OUTPUT') < output.indexOf('AFTER_TOOL_NOTICE'), output);
+    assert.ok(output.indexOf('AFTER_TOOL_NOTICE') < output.indexOf('NEXT_RESPONSE'), output);
+    assert.doesNotMatch(output, /HIDDEN/);
+  }
+});
+
+test('notices after one tool result stay before sibling tool output that completes later', () => {
+  const response = assistant([
+    { type: 'toolCall', id: 'a', name: 'unknown', arguments: {} },
+    { type: 'toolCall', id: 'b', name: 'unknown', arguments: {} },
+  ]);
+  const result = (id: string, timestamp: number) => ({ role: 'toolResult', toolName: 'unknown', toolCallId: id, timestamp,
+    content: [{ type: 'text', text: `OUTPUT_${id.toUpperCase()}` }] });
+  const { transcript, view } = setup([response, result('a', 3)]);
+  transcript.notify('AFTER_A_WARNING'); plain(transcript);
+  view.snapshot.live.messages.push(result('b', 4)); transcript.changed();
+  const output = plain(transcript);
+  const positions = ['OUTPUT_A', 'AFTER_A_WARNING', 'OUTPUT_B'].map(text => output.indexOf(text));
+  assert.ok(positions.every(position => position >= 0), output);
+  assert.deepEqual([...positions].sort((a, b) => a - b), positions, output);
+  assert.equal((output.match(/AFTER_A_WARNING/g) ?? []).length, 1);
+});
+
+test('learning a starting session identity and file preserves startup warnings', () => {
+  for (const state of [{ sessionId: 'session-1' }, { sessionFile: '/remote/session-1.jsonl' }]) {
+    const { transcript, view } = setup([]);
+    transcript.notify('STARTUP_WARNING'); plain(transcript);
+    view.snapshot.state = state; transcript.changed();
+    assert.match(plain(transcript), /STARTUP_WARNING/);
+    view.snapshot.state = { sessionId: 'session-1', sessionFile: '/remote/session-1.jsonl' };
+    transcript.changed();
+    assert.match(plain(transcript), /STARTUP_WARNING/);
+    // Temporarily absent metadata must not erase the last known identity.
+    view.snapshot.state = {}; transcript.changed();
+    assert.match(plain(transcript), /STARTUP_WARNING/);
+    view.snapshot.state = { sessionId: 'session-2', sessionFile: '/remote/session-2.jsonl' };
+    assert.doesNotMatch(plain(transcript), /STARTUP_WARNING/);
+  }
+});
+
+test('renderer resets preserve warnings but removed anchors and session switches discard them', () => {
+  const { transcript, view } = setup([{ role: 'user', timestamp: 1, content: 'PROMPT' }]);
+  view.snapshot.state.sessionId = 'first-session';
+  transcript.notify('KEEP_WARNING'); transcript.reset();
+  assert.match(plain(transcript), /KEEP_WARNING/);
+  view.snapshot.live.messages = []; transcript.changed();
+  assert.doesNotMatch(plain(transcript), /KEEP_WARNING/);
+  transcript.notify('OLD_SESSION_WARNING');
+  view.snapshot.state.sessionId = 'different-session';
+  assert.doesNotMatch(plain(transcript), /OLD_SESSION_WARNING/);
+  // Notify before the first render of a switched session must not keep old warnings.
+  transcript.notify('SECOND_SESSION_WARNING');
+  view.snapshot.state.sessionId = 'third-session'; transcript.notify('NEW_SESSION_WARNING');
+  assert.deepEqual(transcript.notices, ['NEW_SESSION_WARNING']);
+});
+
+test('connection notice cleanup is targeted, bounded, and strips remote terminal controls', () => {
+  const { transcript } = setup([]);
+  transcript.notify('MCP_WARNING\x1b[2J\x00');
+  transcript.notify('Connection lost', 'connection');
+  transcript.notify('Reattached', 'connection');
+  transcript.clearConnectionNotices();
+  assert.deepEqual(transcript.notices, ['MCP_WARNING']);
+  assert.match(plain(transcript), /MCP_WARNING/);
+  assert.doesNotMatch(plain(transcript), /Connection lost|Reattached/);
+  for (let i = 0; i < 51; i++) transcript.notify(`notice-${i}`);
+  assert.equal(transcript.notices.length, 50);
+  assert.equal(transcript.notices[0], 'notice-1');
+  assert.equal(transcript.notices.at(-1), 'notice-50');
+});
 
 test('user, thinking, Markdown and tool rows match public Pi components byte-for-byte', () => {
   const prompt = { role: 'user', timestamp: 1, content: '9. preserve numbers\n\n**Bold** and \\*escaped\\* 世界' };
