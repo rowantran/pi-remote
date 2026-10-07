@@ -63,7 +63,7 @@ Completion installation (prints scripts; never edits shell configuration):
 
 Server-only commands: bridge, daemon. These start automatically.
 Ctrl+D or /detach exits the local UI WITHOUT stopping remote work. Ctrl+C clears the prompt.
-Explicit 'kill' stops remote Pi. SSH authentication uses your existing config.
+Explicit 'kill', or /quit in the UI, stops remote Pi. SSH authentication uses your existing config.
 Requires matching Pi ${PI_VERSION} on both machines.
 `;
 export interface UiOptions { presentationPaths?: string[]; presentationConfig?: string; theme?: string; host?: string }

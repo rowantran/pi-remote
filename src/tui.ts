@@ -6,7 +6,7 @@ import { readLocalClipboard, editLocally } from './local-input.js';
 import { PresentationHost, readPresentationConfig, createPresentationTheme, type PresentationChange } from './presentation.js';
 import { loadLocalTheme, readPiHideThinkingBlock, readPiThemeSetting, resolveThemeSelection, terminalAppearance } from './local-theme.js';
 import { hostname } from 'node:os';
-import { REMOTE_ICON, detachMessage, remoteSessionEnv } from './remote-session.js';
+import { REMOTE_ICON, detachMessage, remoteSessionEnv, stoppedMessage } from './remote-session.js';
 import { RemoteAutocompleteProvider, transformPromptWithAttachments } from './editor-completion.js';
 import {
   copyToClipboard, getSelectListTheme, initTheme,
@@ -39,6 +39,7 @@ Esc: cancel the dialog, or clear the prompt queue then abort; queue text returns
 Ctrl+O: expand/collapse tool output. Ctrl+T: show/hide thinking.
 PageUp/PageDown: transcript scroll. Ctrl+End: follow output. Ctrl+Shift+F: transcript search.
 /detach /help /model /new /fork /resume /session /copy /name <name> /compact [instructions]
+/quit stops the remote Pi process for this slot, then closes the client.
 Connection loss: automatically reattach when enabled; never replay submitted commands.
 @remote/path attaches remote text/images. /attach LOCAL_PATH attaches a local file.
 Ctrl+V /paste: local clipboard files, image, or text. Ctrl+G /editor: local external editor.
@@ -96,6 +97,8 @@ export class RemoteTui {
   private root: VStack;
   private connected = true;
   private detached = false;
+  /** True after /quit stopped the remote Pi process; the client then closed. */
+  private quit = false;
   private commandPending = false;
   private interruptPending = false;
   private refreshPromise?: Promise<void>;
@@ -159,7 +162,7 @@ export class RemoteTui {
     this.completion = new RemoteAutocompleteProvider({
       getCommands: () => this.rpc({ type: 'get_commands' }),
       completePath: prefix => this.connection.request('complete_path', { slotId: this.slotId, prefix }),
-      localCommands: ['attach', 'clear-attachments', 'detach', 'help', 'model', 'new', 'fork', 'resume', 'session', 'copy', 'name', 'compact', 'thinking', 'export', 'reload-ui', 'theme', 'tool-call', 'paste', 'editor'].map(name => ({ name })),
+      localCommands: ['attach', 'clear-attachments', 'detach', 'help', 'model', 'new', 'fork', 'resume', 'session', 'copy', 'name', 'compact', 'thinking', 'export', 'reload-ui', 'theme', 'tool-call', 'paste', 'editor', 'quit'].map(name => ({ name })),
     });
     this.editor.setAutocompleteProvider(this.completion);
     // Like Pi, learn whether the terminal is light or dark before building themed content.
@@ -434,6 +437,9 @@ export class RemoteTui {
       }
     });
   }
+
+  /** True when the client closed because /quit stopped the remote Pi process. */
+  get stoppedSlot(): boolean { return this.quit; }
 
   detach(): void {
     if (this.detached) return;
@@ -765,6 +771,7 @@ export class RemoteTui {
         }
         return true;
       }
+      case '/quit': await this.quitSlot(); return true;
       case '/session': this.notify(JSON.stringify(await this.rpc({ type: 'get_session_stats' }), null, 2)); return true;
       case '/copy': {
         const result = await this.rpc({ type: 'get_last_assistant_text' });
@@ -779,6 +786,24 @@ export class RemoteTui {
         await this.rpc({ type: 'compact', ...(args ? { customInstructions: args } : {}) }); await this.refresh(); return true;
       default: return false;
     }
+  }
+
+  /** Stop the remote Pi process with the daemon's explicit kill, then close the client. */
+  private async quitSlot(): Promise<void> {
+    const live = this.view.snapshot.live;
+    if (this.view.snapshot.slot.status !== 'exited') {
+      if (!this.connected) throw new Error('Disconnected. The remote Pi process was not stopped. Reconnect, then run /quit again');
+      const working = live.busy || live.compacting || this.hasQueue() || this.bashRunning || Object.keys(live.bash ?? {}).length > 0;
+      if (working) {
+        const choice = await this.choose('Stop the remote Pi process? Running work and queued prompts will be lost.', [
+          { value: 'cancel', label: 'Cancel' }, { value: 'stop', label: 'Stop remote Pi' },
+        ]);
+        if (choice !== 'stop' || this.detached) { if (!this.detached) this.notify('Quit cancelled. Remote Pi is still running.'); return; }
+      }
+      await this.connection.request('kill', { slotId: this.slotId });
+    }
+    this.quit = true;
+    this.detach();
   }
 }
 
@@ -796,5 +821,6 @@ export async function runTui(connection: RemoteConnection, slotId: string, initi
   void client.initialize();
   await finished;
   const slot = client.view.snapshot.slot;
-  process.stdout.write(`${detachMessage(slotId, slot.number ?? initialSnapshot.slot.number)}\n`);
+  const number = slot.number ?? initialSnapshot.slot.number;
+  process.stdout.write(`${client.stoppedSlot ? stoppedMessage(slotId, number) : detachMessage(slotId, number)}\n`);
 }
