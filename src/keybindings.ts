@@ -18,6 +18,17 @@ export function createRemoteKeybindings(): KeybindingsManager {
     'app.thinking.toggle': { defaultKeys: 'ctrl+t' },
     'app.tools.expand': { defaultKeys: 'ctrl+o' },
     'app.message.followUp': { defaultKeys: 'alt+enter' },
+    'app.message.copy': { defaultKeys: 'ctrl+x' },
+    'app.tree.foldOrUp': { defaultKeys: ['ctrl+left', 'alt+left'] },
+    'app.tree.unfoldOrDown': { defaultKeys: ['ctrl+right', 'alt+right'] },
+    // Ctrl+D always detaches; use Alt+D for the tree's default filter instead.
+    'app.tree.filter.default': { defaultKeys: 'alt+d' },
+    'app.tree.filter.noTools': { defaultKeys: 'ctrl+t' },
+    'app.tree.filter.userOnly': { defaultKeys: 'ctrl+u' },
+    'app.tree.filter.labeledOnly': { defaultKeys: 'ctrl+l' },
+    'app.tree.filter.all': { defaultKeys: 'ctrl+a' },
+    'app.tree.filter.cycleForward': { defaultKeys: 'ctrl+o' },
+    'app.tree.filter.cycleBackward': { defaultKeys: 'shift+ctrl+o' },
   };
   return new KeybindingsManager({ ...TUI_KEYBINDINGS, ...application });
 }

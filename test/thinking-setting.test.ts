@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { stripTerminalSequences, type Terminal } from '@earendil-works/pi-tui';
-import { readPiHideThinkingBlock } from '../src/local-theme.js';
+import { readPiDoubleEscapeAction, readPiHideThinkingBlock } from '../src/local-theme.js';
 import type { RemoteConnection, Snapshot } from '../src/protocol.js';
 import { RemoteTui } from '../src/tui.js';
 
@@ -38,6 +38,27 @@ test('reads only the global hideThinkingBlock setting; missing or invalid means 
   assert.equal(await readPiHideThinkingBlock(dir), false);
   await writeFile(settings, '{ invalid');
   assert.equal(await readPiHideThinkingBlock(dir), false);
+});
+
+test('reads doubleEscapeAction from the local agent directory without changing settings', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-remote-escape-'));
+  const original = process.env.PI_CODING_AGENT_DIR;
+  t.after(async () => {
+    if (original === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = original;
+    await rm(dir, { recursive: true });
+  });
+  process.env.PI_CODING_AGENT_DIR = dir;
+  const settings = join(dir, 'settings.json');
+  assert.equal(await readPiDoubleEscapeAction(), 'tree');
+  for (const action of ['tree', 'fork', 'none', true, 'invalid', undefined]) {
+    const source = JSON.stringify({ doubleEscapeAction: action });
+    await writeFile(settings, source);
+    assert.equal(await readPiDoubleEscapeAction(), action === 'fork' || action === 'none' ? action : 'tree');
+    assert.equal(await readFile(settings, 'utf8'), source);
+  }
+  await writeFile(settings, '{ invalid');
+  assert.equal(await readPiDoubleEscapeAction(), 'tree');
 });
 
 test('hideThinkingBlock applies to the first frame and Ctrl+T toggles the view', async t => {

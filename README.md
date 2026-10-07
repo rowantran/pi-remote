@@ -106,7 +106,8 @@ For zsh or bash, put `pi-remote` on `PATH` with `npm link`, then install the mat
 | Alt+Enter | Queue a follow-up after the current run finishes |
 | Shift+Enter / Ctrl+J | Newline |
 | Ctrl+C | Clear the prompt (pending attachments stay) |
-| Esc | Cancel the current dialog, or clear queued input then abort; cleared queue text returns to the editor |
+| Esc | Cancel the current dialog, or clear queued input then abort; cleared queue text returns to the editor. In the fork picker, the first Esc clears an active search |
+| Esc Esc | With an empty editor while idle, open the tree-style fork picker. Press twice within 500 ms. Follows local Pi's `doubleEscapeAction`; `tree` and `fork` both open this picker, and `none` disables it |
 | Ctrl+D / `/detach` | Detach only, including while a dialog is open |
 | `/quit` | Stop the remote Pi process for this slot, then close the client. Asks first if work is in progress |
 | Ctrl+O | Expand/collapse tool output |
@@ -118,7 +119,7 @@ For zsh or bash, put `pi-remote` on `PATH` with `npm link`, then install the mat
 | Ctrl+P | Cycle the remote model |
 | `/thinking [LEVEL]` / Shift+Tab | Choose/set the remote thinking level, or cycle it with Shift+Tab |
 | `/new` | Stock Pi `new_session` in the same slot |
-| `/fork` | Pick an earlier user message; Pi forks it and the local editor receives its original text |
+| `/fork` / `/tree` | Browse user and assistant messages in a tree-style picker. Choose a user prompt to fork **before** it into a new session file; its original text returns to the editor |
 | `/resume` | Pick a stored remote session in the slot's workspace; Pi switches to it |
 | `/session` | Show authoritative remote usage and session statistics |
 | `/copy` | Copy the last assistant text to the **local** clipboard |
@@ -133,6 +134,10 @@ For zsh or bash, put `pi-remote` on `PATH` with `npm link`, then install the mat
 | `/reload-ui` | Reload local presentation adapters and theme, not remote Pi |
 | `/theme [NAME]` | Show or change the local theme for this client |
 | `/help` | Show local controls |
+
+The fork picker uses Pi's own tree rows, role colors, selected-row background, search, filters, and branch folding. It starts with tools hidden and the most recent user prompt selected. Use ↑/↓ to move, ←/→ to page, Alt+←/→ to fold/unfold branches, and Ctrl+X to copy the selected message. PageUp/PageDown still scroll the transcript. Ctrl+T/U/L/A toggle the no-tools/user-only/labeled-only/all filters; Ctrl+O and Shift+Ctrl+O cycle filters. Alt+D selects Pi's default filter (shows tools) because Ctrl+D always detaches. Labels are shown but cannot be edited through stock RPC. Assistant messages and other entries are context only, not fork points.
+
+Double-Esc reads `doubleEscapeAction` from your **local** `~/.pi/agent/settings.json` (or `$PI_CODING_AGENT_DIR/settings.json`) at startup; it defaults to `tree`. Esc still cancels dialogs and interrupts remote work before it can count toward a double-Esc. Draft text, a pending command, or a disconnect prevents the shortcut from opening the picker. These controls do not change remote Pi settings.
 
 The editor completes local built-in commands and remote extension/skill/template commands after `/`, and remote paths after `@`. Slash command suggestions use case-insensitive fuzzy matching, so `/pseude` can suggest `/skill:pseudocode`. Unknown slash commands pass to Pi's `prompt` RPC unless an explicitly loaded local adapter handles them. Unsupported built-in TUI commands should not be assumed to work.
 
@@ -231,7 +236,7 @@ For example, a local footer adapter can show `PI_REMOTE_SESSION_HOST` to indicat
 
 - Pi 1.0.4 waits for initial `session_start` hooks before it starts reading RPC stdin. An extension that **awaits a dialog during initial startup** can therefore block startup before its answer can be read. The daemon retains the process and shows its starting state; it does not invent a timeout or patch the harness. Dialogs from commands or running tools were tested successfully.
 - RPC does not report cancellation of a dialog by an extension's abort signal. Explicit timeout expiry and client answers are tracked, but a signal-cancelled dialog can remain displayed until the user dismisses it.
-- In-place `/tree` navigation is unavailable; use `/fork` to branch from an earlier prompt. `/login` and `/settings` are unavailable here; configure the remote harness with normal Pi over SSH.
+- In-place tree navigation is unavailable. `/tree` and double-Esc fall back to the tree-style `/fork` picker: they create a **new session file**, not another branch inside the existing file. Stock RPC can fork only before user prompts, so assistant entries are shown for context but cannot be selected as fork points. `/login` and `/settings` are unavailable here; configure the remote harness with normal Pi over SSH.
 - Remote `/reload` is unavailable through stock RPC. `/reload-ui` reloads only local presentation; it does not reload remote extensions or settings.
 - Custom overlays through `ctx.ui.custom()` and built-in inline image display are not implemented.
 
