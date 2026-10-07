@@ -200,6 +200,21 @@ test('session completion resolves relative files under --cwd and preserves shell
   assert.equal(remote.connections[0].host, 'explicit');
 });
 
+test('session completion falls back to the default cwd, which --cwd and --local override', async () => {
+  const remote = fakeRemote([{ value: 'a.jsonl', label: 'a.jsonl', directory: false }]);
+  const deps = { connect: remote.connect, defaultHost: 'default', defaultCwd: '/default/dir' };
+  await completeWords(['new', '--session', 's'], deps);
+  await completeWords(['new', '--cwd', '/explicit', '--session', 's'], deps);
+  await completeWords(['new', '--local', '--session', 's'], deps);
+  await completeWords(['new', '--cwd', ''], deps);
+  assert.deepEqual(remote.calls.map(call => call.params), [
+    { prefix: 's', cwd: '/default/dir', directoriesOnly: false },
+    { prefix: 's', cwd: '/explicit', directoriesOnly: false },
+    { prefix: 's', directoriesOnly: false },
+    { prefix: '', directoriesOnly: true },
+  ]);
+});
+
 test('completion reads host defaults and connection flags without confusing option values for hosts', async () => {
   const cases = [
     { words: ['new', '--remote-bin', '/a b/pi-remote', '--state-dir=~/state', '--cwd', ''], host: 'default' },
@@ -315,7 +330,7 @@ await appendFile(process.env.PI_REMOTE_TEST_LOG, JSON.stringify(args) + '\\n');
 const shell = args[args.indexOf('--shell') + 1];
 let words = args.includes('--line') ? tokenizeCompletionLine(args[args.indexOf('--line')+1]).slice(1) : args.slice(args.indexOf('--') + 1);
 if (args.includes('--raw-current') && words.length) words[words.length-1] = unquoteWord(words.at(-1), shell);
-let items = await completeWords(words, { defaultHost: process.env.PI_REMOTE_HOST ?? '', connect: async options => ({
+let items = await completeWords(words, { defaultHost: process.env.PI_REMOTE_HOST ?? '', defaultCwd: process.env.PI_REMOTE_CWD ?? '', connect: async options => ({
   close() {},
   request: async (method, params) => {
     await appendFile(process.env.PI_REMOTE_TEST_RPC_LOG, JSON.stringify({method, params, options})+'\\n');
@@ -338,7 +353,7 @@ if (output) process.stdout.write(output+'\\n');
   const executable = join(dir, 'pi-remote');
   await writeFile(executable, `#!/bin/sh\nexec ${shellQuote(process.execPath)} --import tsx ${shellQuote(stub)} "$@"\n`);
   await chmod(executable, 0o700);
-  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, PI_REMOTE_HOST: '', PI_REMOTE_TEST_LOG: join(dir, 'args.jsonl'), PI_REMOTE_TEST_RPC_LOG: join(dir, 'rpc.jsonl'), PI_REMOTE_TEST_DIRECTORY: remote };
+  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, PI_REMOTE_HOST: '', PI_REMOTE_CWD: '', PI_REMOTE_TEST_LOG: join(dir, 'args.jsonl'), PI_REMOTE_TEST_RPC_LOG: join(dir, 'rpc.jsonl'), PI_REMOTE_TEST_DIRECTORY: remote };
   return { dir, remote, names, env };
 }
 const fishPath = process.platform === 'darwin' ? '/opt/homebrew/bin/fish' : '/usr/bin/fish';
@@ -454,7 +469,7 @@ ${silent ? 'return;' : `const data=request.method==='hello'?${JSON.stringify({ p
   const executable = join(dir, 'ssh');
   await writeFile(executable, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(script)} "$@"\n`);
   await chmod(executable, 0o700);
-  return { dir, log, env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, PI_REMOTE_HOST: '', XDG_CONFIG_HOME: join(dir, 'config') } };
+  return { dir, log, env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, PI_REMOTE_HOST: '', PI_REMOTE_CWD: '', XDG_CONFIG_HOME: join(dir, 'config') } };
 }
 
 test('internal complete command uses the standard SSH hello and read-only RPC, with quiet stderr', { timeout: 10000 }, async t => {
@@ -497,6 +512,20 @@ test('CLI takes the default host from the XDG config file, with PI_REMOTE_HOST a
   assert.deepEqual(await hosts(), ['from-config', 'from-env', 'from-flag']);
   await assert.rejects(exec(process.execPath, [...cli, 'ls', 'positional-host'], { env: fixture.env, cwd: root }), /Too many arguments/);
   await assert.rejects(exec(process.execPath, [...cli, 'x'], { env: fixture.env, cwd: root }), /Unknown command 'x'/);
+});
+
+test('CLI new takes the default cwd from the XDG config file, with PI_REMOTE_CWD and --cwd taking precedence', { timeout: 15000 }, async t => {
+  const fixture = await fakeSsh(t);
+  const cli = ['--import', 'tsx', join(root, 'src/cli.ts')];
+  const creates = async () => (await readFile(fixture.log, 'utf8')).trim().split('\n').map(line => JSON.parse(line)).filter(request => request.method === 'create').map(request => request.params.cwd);
+  await assert.rejects(exec(process.execPath, [...cli, 'new', '--host', 'alias', '--no-attach'], { env: fixture.env, cwd: root }), /new requires a remote directory\. Use --cwd DIRECTORY.*pi-remote\/config\.json/s);
+  await mkdir(join(fixture.env.XDG_CONFIG_HOME, 'pi-remote'), { recursive: true });
+  await writeFile(join(fixture.env.XDG_CONFIG_HOME, 'pi-remote/config.json'), JSON.stringify({ host: 'alias', cwd: '~/from-config' }));
+  await exec(process.execPath, [...cli, 'new', '--no-attach'], { env: fixture.env, cwd: root });
+  await exec(process.execPath, [...cli, 'new', '--no-attach'], { env: { ...fixture.env, PI_REMOTE_CWD: '/from-env' }, cwd: root });
+  await exec(process.execPath, [...cli, 'new', '--no-attach', '--cwd', '/from-flag'], { env: { ...fixture.env, PI_REMOTE_CWD: '/from-env' }, cwd: root });
+  assert.deepEqual(await creates(), ['~/from-config', '/from-env', '/from-flag']);
+  await assert.rejects(exec(process.execPath, [...cli, 'new', '--local', '--no-attach'], { env: fixture.env, cwd: root }), /new --local requires --cwd/);
 });
 
 test('internal complete command accepts JSON stdin and rejects malformed inputs quietly', { timeout: 10000 }, async t => {

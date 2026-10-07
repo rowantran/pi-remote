@@ -4,7 +4,7 @@ import { createInterface } from 'node:readline/promises';
 import type { Readable, Writable } from 'node:stream';
 import { BOOLEAN_OPTIONS, VALUE_OPTIONS, completionScript, resolveCommand, runCompletionCommand, selectHost, slotLabel, slotNumber, numberSlots, type NumberedSlot } from './completion.js';
 import { runDaemon, defaultStateDir } from './daemon.js';
-import { configPath, defaultHost } from './config.js';
+import { configPath, defaultCwd, defaultHost } from './config.js';
 import { bridge } from './client.js';
 import { connectCompatibleLocal, connectCompatibleSsh } from './compat-client.js';
 import { ReconnectingConnection } from './reconnect.js';
@@ -13,7 +13,7 @@ import { PI_VERSION, PROTOCOL_VERSION, type SlotInfo, type Snapshot, type Remote
 const HELP = `pi-remote — local terminal UI, persistent remote Pi RPC processes
 
 Everyday commands:
-  pi-remote new --cwd REMOTE_DIRECTORY [--host HOST] [--no-attach] [-- PI_OPTIONS...]
+  pi-remote new [--cwd REMOTE_DIRECTORY] [--host HOST] [--no-attach] [-- PI_OPTIONS...]
   pi-remote ls [--host HOST] [--json]
   pi-remote attach [--host HOST] [SLOT]
   pi-remote kill [--host HOST] SLOT
@@ -30,6 +30,8 @@ Any unambiguous command prefix works: n = new, a = attach, k = kill, l = ls.
 
 Options:
   --host HOST          SSH host (default: PI_REMOTE_HOST, then the config file)
+  --cwd PATH           Remote working directory for new (default: PI_REMOTE_CWD,
+                       then the config file)
   --remote-bin PATH    Remote program (default ~/.local/share/pi-remote/bin/pi-remote)
   --state-dir PATH     Remote daemon state directory (default ~/.pi/remote)
   --session PATH       Resume a session file when creating a new slot
@@ -43,13 +45,15 @@ Options:
 
 Configuration:
   $XDG_CONFIG_HOME/pi-remote/config.json (default ~/.config/pi-remote/config.json)
-  sets the default SSH host: {"host": "devbox"}
+  sets the default SSH host and remote directory:
+    {"host": "devbox", "cwd": "~/project"}
   Host precedence: --host, then PI_REMOTE_HOST, then the config file.
+  Directory precedence: --cwd, then PI_REMOTE_CWD, then the config file.
 
 SLOT is a stable number from ls, a full UUID, or a unique UUID prefix.
 attach without SLOT opens a local picker when several active slots exist.
---local ignores SSH host defaults. Remote ~ and relative completion paths use
-remote home; --session completion uses --cwd when supplied.
+--local ignores the host and directory defaults. Remote ~ and relative completion paths use
+remote home; --session completion uses --cwd, or the default directory.
 Quote remote '~' paths so your shell does not expand them to LOCAL home.
 
 Completion installation (prints scripts; never edits shell configuration):
@@ -183,8 +187,8 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     }
     let slotId: string;
     if (command === 'new') {
-      const cwd = options.values.get('--cwd');
-      if (!cwd) throw new Error('new requires --cwd with a remote directory');
+      const cwd = options.values.get('--cwd') ?? (local ? undefined : defaultCwd());
+      if (!cwd) throw new Error(local ? 'new --local requires --cwd with a directory' : `new requires a remote directory. Use --cwd DIRECTORY, set PI_REMOTE_CWD, or add {"cwd": "DIRECTORY"} to ${configPath()}.`);
       const slot = await connection.request<SlotInfo>('create', { cwd, args: options.piArgs, sessionPath: options.values.get('--session') });
       slotId = slot.id;
       if (options.flags.has('--no-attach') || !process.stdin.isTTY || !process.stdout.isTTY) {

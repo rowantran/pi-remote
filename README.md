@@ -60,13 +60,17 @@ Every command also accepts an unambiguous prefix: `pi-remote n --cwd /remote/pro
 
 ### Configuration
 
-The local client reads `$XDG_CONFIG_HOME/pi-remote/config.json`. If `XDG_CONFIG_HOME` is unset or not an absolute path, it reads `~/.config/pi-remote/config.json`. The file is optional and supports one key:
+The local client reads `$XDG_CONFIG_HOME/pi-remote/config.json`. If `XDG_CONFIG_HOME` is unset or not an absolute path, it reads `~/.config/pi-remote/config.json`. The file is optional and supports two keys, both optional:
 
 ```json
-{ "host": "devbox" }
+{ "host": "devbox", "cwd": "~/workplace/project" }
 ```
 
-The host comes from the first of these that is set: `--host`, the `PI_REMOTE_HOST` environment variable, then the config file. `--local` ignores all three. Invalid JSON or unknown keys cause an error, so a typo does not go unnoticed. This file is separate from the presentation config `~/.pi/remote-client.json` described below.
+The host comes from the first of these that is set: `--host`, the `PI_REMOTE_HOST` environment variable, then the config file. `--local` ignores all three.
+
+`cwd` is the default remote working directory for `pi-remote new`. It comes from the first of these that is set: `--cwd`, the `PI_REMOTE_CWD` environment variable, then the config file. With a default, `pi-remote new` needs no `--cwd`. The value is a path on the remote host: `~` means the remote home, and the remote daemon checks that the directory exists. The default applies to every host, including one selected with `--host`. `--local` ignores it, so `new --local` still needs `--cwd`. `--session` completion also uses this default as its base when `--cwd` is not given.
+
+Invalid JSON or unknown keys cause an error, so a typo does not go unnoticed. This file is separate from the presentation config `~/.pi/remote-client.json` described below.
 
 ### Shell completion (fish, zsh, bash)
 
@@ -85,9 +89,9 @@ mkdir -p ~/.config/fish/completions
 pi-remote completion fish > ~/.config/fish/completions/pi-remote.fish
 ```
 
-Choose one setup method. Remove a previously installed completion file if you switch to the config line. Completion uses the same default host as the CLI (`--host`, `PI_REMOTE_HOST`, then the config file).
+Choose one setup method. Remove a previously installed completion file if you switch to the config line. Completion uses the same default host as the CLI (`--host`, `PI_REMOTE_HOST`, then the config file), and the same default directory for `--session` (`--cwd`, `PI_REMOTE_CWD`, then the config file).
 
-Type `pi-remote new --cwd /remote/` and press Tab to list **remote directories**, not local ones. Slot completion after `pi-remote attach ` includes numbers, status, session name, and workspace. `--session` completes remote files and directories, relative to `--cwd` when supplied.
+Type `pi-remote new --cwd /remote/` and press Tab to list **remote directories**, not local ones. Slot completion after `pi-remote attach ` includes numbers, status, session name, and workspace. `--session` completes remote files and directories, relative to `--cwd` or the default directory when one is set.
 
 Remote `~` and relative completion prefixes use the remote home directory unless a completion base is supplied. Quote remote tilde paths, for example `--cwd '~/workplace/project'`, so your shell does not expand them to your **local** home. Prefer absolute paths for `--session` when launching. Completion is read-only: it may start the on-demand daemon, but never creates or attaches a Pi slot, sends a prompt, or runs an agent tool. An unavailable host produces no suggestions.
 
@@ -373,7 +377,7 @@ pi-remote watch 1
 - `src/files.ts`, `src/local-input.ts`, `src/editor-completion.ts`: attachments, clipboard/editor integration, and remote editor completion.
 - `src/remote-session.ts`: environment variables that identify a pi-remote session, and the detach message.
 - `src/cli.ts`, `src/completion.ts`, `completions/`: launch options, command prefixes, slot selection, and shell completion.
-- `src/config.ts`: XDG config file and default host.
+- `src/config.ts`: XDG config file, default host, and default remote directory.
 - `bin/pi-remote`, `src/node-entry.ts`: launcher that runs `src/` via tsx in a checkout or `dist/` in a release, and Node arguments for child processes started from either.
 - `examples/rowan-ui.ts`: selective, user-specific presentation adapter.
 
