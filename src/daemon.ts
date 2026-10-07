@@ -1,13 +1,14 @@
 import { createServer, type Server, type Socket } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, realpath, rename, rm, stat, writeFile, chmod, lstat } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readJsonl, writeJsonl } from './jsonl.js';
 import { emptyLive, applyLiveEvent } from './live.js';
 import { PiProcess, type PiLaunch } from './pi-process.js';
+import { remoteSessionEnv } from './remote-session.js';
 import { PI_VERSION, PROTOCOL_VERSION, errorText, type CreateOptions, type LiveState, type RecordValue, type Request, type SlotInfo, type Snapshot } from './protocol.js';
 
 const exec = promisify(execFile);
@@ -229,7 +230,7 @@ export class Supervisor {
     if (sessionFile) this.reservedPaths.add(sessionFile);
     const slot: Slot = { id: randomUUID(), number: this.nextSlotNumber++, cwd, createdAt: new Date().toISOString(), args, sessionFile, status: 'starting', live: emptyLive(), ui: new Map(), timers: new Map(), seq: 0, state: {}, changing: false };
     this.slots.set(slot.id, slot);
-    const launch: PiLaunch = { executable: this.options.executable ?? 'pi', prefixArgs: this.options.prefixArgs, cwd, env: this.options.env, args: [...args, ...(sessionFile ? ['--session', sessionFile] : ['--session-id', randomUUID()])] };
+    const launch: PiLaunch = { executable: this.options.executable ?? 'pi', prefixArgs: this.options.prefixArgs, cwd, env: { ...this.options.env, ...remoteSessionEnv({ host: hostname(), slotId: slot.id, slotNumber: slot.number }) }, args: [...args, ...(sessionFile ? ['--session', sessionFile] : ['--session-id', randomUUID()])] };
     slot.process = new PiProcess(launch, event => this.recordEvent(slot, event), error => {
       slot.status = 'exited'; slot.error = error.message;
       clearTimeout(slot.startupRetry);

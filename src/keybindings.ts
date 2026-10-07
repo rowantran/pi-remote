@@ -8,6 +8,7 @@ import { KeybindingsManager, TUI_KEYBINDINGS, type KeybindingDefinitions } from 
 export function createRemoteKeybindings(): KeybindingsManager {
   const application: KeybindingDefinitions = {
     'app.interrupt': { defaultKeys: 'escape' },
+    'app.clear': { defaultKeys: 'ctrl+c' },
     'app.exit': { defaultKeys: 'ctrl+d' },
     'app.editor.external': { defaultKeys: 'ctrl+g' },
     'app.clipboard.pasteImage': { defaultKeys: 'ctrl+v' },

@@ -62,11 +62,11 @@ Completion installation (prints scripts; never edits shell configuration):
         Source that file from your shell configuration.
 
 Server-only commands: bridge, daemon. These start automatically.
-Ctrl+D or /detach exits the local UI WITHOUT stopping remote work.
+Ctrl+D or /detach exits the local UI WITHOUT stopping remote work. Ctrl+C clears the prompt.
 Explicit 'kill' stops remote Pi. SSH authentication uses your existing config.
 Requires matching Pi ${PI_VERSION} on both machines.
 `;
-export interface UiOptions { presentationPaths?: string[]; presentationConfig?: string; theme?: string }
+export interface UiOptions { presentationPaths?: string[]; presentationConfig?: string; theme?: string; host?: string }
 export interface Options { positionals: string[]; piArgs: string[]; values: Map<string,string>; flags: Set<string>; ui: UiOptions }
 export function parseOptions(args: string[]): Options {
   const options: Options = { positionals: [], piArgs: [], values: new Map(), flags: new Set(), ui: {} };
@@ -219,7 +219,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('attach needs a local terminal. Use watch or rpc for headless access.');
     const { runTui } = await import('./tui.js');
     const startTui: (connection: RemoteConnection, slotId: string, snapshot: Snapshot, options?: UiOptions) => Promise<void> = runTui;
-    await startTui(connection, slotId, snapshot, options.ui);
+    await startTui(connection, slotId, snapshot, { ...options.ui, ...(host ? { host } : {}) });
   } finally { removeSignal?.(); connection.close(); }
 }
 
