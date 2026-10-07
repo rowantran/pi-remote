@@ -1,5 +1,5 @@
-import type {
-  AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions, SlashCommand,
+import {
+  fuzzyFilter, type AutocompleteItem, type AutocompleteProvider, type AutocompleteSuggestions, type SlashCommand,
 } from '@earendil-works/pi-tui';
 import type { Attachment, AttachmentImage, PathCompletionResult } from './files.js';
 
@@ -136,7 +136,7 @@ export class RemoteAutocompleteProvider implements AutocompleteProvider {
     if (/^\/[^\s/]*$/.test(before)) {
       const commands = await this.getCommands();
       if (signal.aborted) return null;
-      const items = commands.filter(command => command.name.startsWith(before.slice(1))).map(command => ({
+      const items = fuzzyFilter(commands, before.slice(1), command => command.name).map(command => ({
         value: `/${command.name}`, label: `/${command.name}`,
         description: command.description?.replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, ' '),
       }));
