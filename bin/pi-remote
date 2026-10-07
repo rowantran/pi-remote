@@ -1,2 +1,20 @@
 #!/usr/bin/env node
-import('../dist/cli.js').then(m => m.main()).catch(error => { console.error(error.message); process.exitCode = 1; });
+// A git checkout runs src/ through the local tsx devDependency, so edits apply
+// without a build. Deployed releases ship no src/ and run the compiled dist/.
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+async function load() {
+  const source = new URL('../src/cli.ts', import.meta.url);
+  if (!existsSync(source)) return import('../dist/cli.js');
+  // Pin this checkout's tsconfig; a tsconfig in the caller's cwd must not apply.
+  // Child processes started from source read the same path from the environment.
+  process.env.TSX_TSCONFIG_PATH = fileURLToPath(new URL('../tsconfig.json', import.meta.url));
+  const { register } = await import('tsx/esm/api').catch(() => {
+    throw new Error('Running from a source checkout needs devDependencies; run `npm install` in the checkout.');
+  });
+  register({ tsconfig: process.env.TSX_TSCONFIG_PATH });
+  return import(source.href);
+}
+
+load().then(m => m.main()).catch(error => { console.error(error.message); process.exitCode = 1; });

@@ -4,9 +4,9 @@ import type { Readable, Writable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { readJsonl, writeJsonl } from './jsonl.js';
+import { nodeModuleArgs } from './node-entry.js';
 import { defaultStateDir, socketPath } from './daemon.js';
 import { PI_VERSION, PROTOCOL_VERSION, type RecordValue, type RemoteConnection, type RemoteEvent, type Result } from './protocol.js';
 
@@ -142,9 +142,8 @@ async function launchDaemon(absolute: string): Promise<void> {
   try {
     const metadata = await log.stat();
     if (!metadata.isFile() || metadata.uid !== process.getuid?.() || (metadata.mode & 0o7777) !== 0o600 || metadata.nlink !== 1) throw new Error('daemon.log must be an owner-private regular file with mode 0600 and no hard links');
-    const cli = join(dirname(fileURLToPath(import.meta.url)), 'cli.js');
     await new Promise<void>((accept, reject) => {
-      const child = spawn(process.execPath, [cli, 'daemon', '--state-dir', absolute], { detached: true, stdio: ['ignore', log.fd, log.fd], env: process.env });
+      const child = spawn(process.execPath, [...nodeModuleArgs(import.meta.url, 'cli'), 'daemon', '--state-dir', absolute], { detached: true, stdio: ['ignore', log.fd, log.fd], env: process.env });
       child.once('error', reject);
       child.once('spawn', () => { child.unref(); accept(); });
     });

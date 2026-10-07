@@ -12,7 +12,7 @@ From this checkout on your local machine:
 
 ```sh
 npm ci --ignore-scripts
-npm run build
+npm link            # puts pi-remote on PATH, linked to this checkout
 ./scripts/deploy.sh devbox
 
 # Set the default SSH host once (see "Configuration" below).
@@ -20,32 +20,32 @@ mkdir -p ~/.config/pi-remote
 echo '{"host": "devbox"}' > ~/.config/pi-remote/config.json
 
 # Start an independent remote Pi process and attach the local terminal UI.
-./bin/pi-remote new --cwd /remote/project
+pi-remote new --cwd /remote/project
 ```
 
 Remote Pi loads its normal settings, credentials, providers, extension factories, skills, and trusted project resources. Deployment copies application files, not your local Pi configuration, and does not restart existing daemons or slots.
 
 ```sh
 # List running and stopped slots, including their short numbers.
-./bin/pi-remote ls
+pi-remote ls
 
 # Attach by number, full UUID, or unique nonnumeric UUID prefix.
-./bin/pi-remote attach 1
+pi-remote attach 1
 
 # Omit the slot: attach to the only active slot, or open a local picker.
-./bin/pi-remote attach
+pi-remote attach
 
 # Create without opening the UI.
-./bin/pi-remote new --cwd /remote/project --no-attach
+pi-remote new --cwd /remote/project --no-attach
 
 # Pi options after -- are forwarded to the stock remote CLI.
-./bin/pi-remote new --cwd /remote/project -- --model PROVIDER/MODEL
+pi-remote new --cwd /remote/project -- --model PROVIDER/MODEL
 
 # Resume a stored Pi session in a NEW slot.
-./bin/pi-remote new --cwd /remote/project --session /remote/session.jsonl
+pi-remote new --cwd /remote/project --session /remote/session.jsonl
 
 # Explicitly stop a remote Pi process. Ordinary detach never does this.
-./bin/pi-remote kill 1
+pi-remote kill 1
 ```
 
 The 0.2 daemon persists stable slot numbers in `slots.json`, including stopped slots. A still-running 0.1 daemon uses insertion-order numeric aliases until a later daemon startup migrates its metadata. UUIDs remain valid in both cases. Numeric input always means a slot number, never a UUID prefix.
@@ -68,7 +68,7 @@ The host comes from the first of these that is set: `--host`, the `PI_REMOTE_HOS
 
 ### Shell completion (fish, zsh, bash)
 
-Put `pi-remote` on `PATH` first (for example, run `fish_add_path (pwd)/bin` once from the checkout). Then add this line to **`~/.config/fish/config.fish`**, after your PATH setup:
+Put `pi-remote` on `PATH` first (run `npm link` once from the checkout). Then add this line to **`~/.config/fish/config.fish`**, after your PATH setup:
 
 ```fish
 pi-remote completion fish | source
@@ -89,7 +89,7 @@ Type `pi-remote new --cwd /remote/` and press Tab to list **remote directories**
 
 Remote `~` and relative completion prefixes use the remote home directory unless a completion base is supplied. Quote remote tilde paths, for example `--cwd '~/workplace/project'`, so your shell does not expand them to your **local** home. Prefer absolute paths for `--session` when launching. Completion is read-only: it may start the on-demand daemon, but never creates or attaches a Pi slot, sends a prompt, or runs an agent tool. An unavailable host produces no suggestions.
 
-For zsh or bash, put this checkout's `bin` directory on `PATH`, then install the matching script:
+For zsh or bash, put `pi-remote` on `PATH` with `npm link`, then install the matching script:
 
 - **zsh:** `mkdir -p ~/.zsh/completions; pi-remote completion zsh > ~/.zsh/completions/_pi-remote`. Add `fpath=(~/.zsh/completions $fpath)` before `autoload -Uz compinit; compinit` in `~/.zshrc`.
 - **bash:** `pi-remote completion bash > ~/.pi-remote-completion.bash`, then add `source ~/.pi-remote-completion.bash` to `~/.bashrc`.
@@ -184,8 +184,8 @@ Use repeatable `--ui-extension PATH` flags, or create **local** `~/.pi/remote-cl
 `--ui-config PATH` selects another config file. Config-relative extension paths resolve beside that file; command-line paths resolve from the local working directory. `~/` means local home here. CLI extension paths are added to the config allowlist and deduplicated. Only exact files are selected: the client does **not** automatically load local Pi extension directories, project resources, or packages. Explicit adapters can still import other modules.
 
 ```sh
-./bin/pi-remote attach 1 --ui-extension ./my-ui.ts --theme dark
-./bin/pi-remote attach 1 --ui-config ./remote-ui.json --no-reconnect
+pi-remote attach 1 --ui-extension ./my-ui.ts --theme dark
+pi-remote attach 1 --ui-config ./remote-ui.json --no-reconnect
 ```
 
 `--theme NAME` overrides the config theme. Available themes include `system`, `dark`, `light`, and JSON themes from local `~/.pi/agent/themes/` (or `$PI_CODING_AGENT_DIR/themes/`). Use `/theme NAME` to change the current client and `/reload-ui` to reread its selected adapters/config. Neither command changes remote settings or restarts Pi; theme files are not watched automatically.
@@ -248,6 +248,8 @@ Keep the old daemon running while its slots are active. To adopt new daemon code
 
 ## Development and verification
 
+Locally, `pi-remote` runs from `src/` through the `tsx` devDependency, so source edits take effect on the next run without `npm run build`. `npm link` creates a symlink to this checkout in npm's global bin directory; `npm unlink -g pi-remote` removes it. Deployed releases contain no `src/` and run the compiled `dist/`; `deploy.sh` builds it.
+
 ```sh
 npm run verify
 
@@ -280,8 +282,8 @@ The remote smoke tests use separate `/tmp/pi-remote-{smoke,features,terminal}.*`
 - `watch` prints the current session snapshot, then streams live events as JSON. It does not submit prompts or answer dialogs.
 
 ```sh
-./bin/pi-remote rpc 1 '{"type":"get_state"}'
-./bin/pi-remote watch 1
+pi-remote rpc 1 '{"type":"get_state"}'
+pi-remote watch 1
 ```
 
 `rpc` waits for command acceptance/result, not necessarily agent completion. In `watch` output, `agent_settled` means Pi has no automatic work left. Ctrl+C stops watching without stopping Pi. Neither command reconnects automatically.
@@ -298,6 +300,7 @@ The remote smoke tests use separate `/tmp/pi-remote-{smoke,features,terminal}.*`
 - `src/files.ts`, `src/local-input.ts`, `src/editor-completion.ts`: attachments, clipboard/editor integration, and remote editor completion.
 - `src/cli.ts`, `src/completion.ts`, `completions/`: launch options, command prefixes, slot selection, and shell completion.
 - `src/config.ts`: XDG config file and default host.
+- `bin/pi-remote`, `src/node-entry.ts`: launcher that runs `src/` via tsx in a checkout or `dist/` in a release, and Node arguments for child processes started from either.
 - `examples/rowan-ui.ts`: selective, user-specific presentation adapter.
 
 Pi references: [RPC](https://pi.dev/docs/latest/rpc), [extension UI](https://pi.dev/docs/latest/rpc-extension-ui), [JSON events](https://pi.dev/docs/latest/json).

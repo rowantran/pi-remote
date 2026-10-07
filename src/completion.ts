@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { basename, resolve } from 'node:path';
 import { connectCompatibleLocal, connectCompatibleSsh } from './compat-client.js';
 import { defaultHost as configuredDefaultHost } from './config.js';
+import { nodeModuleArgs } from './node-entry.js';
 import type { RemoteConnection, SlotInfo } from './protocol.js';
 
 export const VALUE_OPTIONS = ['--host', '--remote-bin', '--state-dir', '--cwd', '--session', '--ui-extension', '--ui-config', '--theme'] as const;
@@ -204,7 +205,7 @@ export function formatCompletions(items: CompletionItem[], shell: CompletionShel
 export function boundedCompletions(words: string[], timeoutMs = 1800): Promise<CompletionItem[]> {
   return new Promise(resolveResult => {
     const detached = process.platform !== 'win32';
-    const child = spawn(process.execPath, [...process.execArgv, fileURLToPath(import.meta.url), '--worker', JSON.stringify(words)], { detached, stdio: ['ignore', 'pipe', 'ignore'] });
+    const child = spawn(process.execPath, [...nodeModuleArgs(import.meta.url, 'completion'), '--worker', JSON.stringify(words)], { detached, stdio: ['ignore', 'pipe', 'ignore'] });
     let output = '', done = false;
     const stop = () => {
       if (!child.pid) return;
