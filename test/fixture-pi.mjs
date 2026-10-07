@@ -27,6 +27,8 @@ let sessionName = option('--name');
 let streaming = false;
 let compacting = false;
 let boundaryArmed = false;
+let backgroundAssistant;
+let failStateAfterEntries = false;
 let failStateCount = 0;
 let failEntriesCount = Number(option('--fixture-fail-entries', '0'));
 let switchAfterStates = 0;
@@ -65,12 +67,14 @@ function newSession(sameFile = false) {
   writeFileSync(sessionFile, JSON.stringify({ type: 'session', version: 3,
     id: sessionId, timestamp: new Date().toISOString(), cwd: process.cwd() }) + '\n');
 }
-function append(message) {
-  const entry = { type: 'message', id: randomUUID().slice(0, 8), parentId: entries.at(-1)?.id ?? null,
-    timestamp: new Date().toISOString(), message };
+function appendEntry(value) {
+  const entry = { id: randomUUID().slice(0, 8), parentId: entries.at(-1)?.id ?? null,
+    timestamp: new Date().toISOString(), ...value };
   entries.push(entry);
   appendFileSync(sessionFile, JSON.stringify(entry) + '\n');
+  return entry;
 }
+function append(message) { appendEntry({ type: 'message', message }); }
 const state = () => ({ sessionId, sessionFile, sessionName, isStreaming: streaming, isCompacting: compacting,
   thinkingLevel: 'off', steeringMode: 'all', followUpMode: 'one-at-a-time', autoCompactionEnabled: false,
   messageCount: entries.filter(entry => entry.type === 'message').length, pendingMessageCount: 0 });
@@ -111,6 +115,44 @@ function prompt(command) {
     sessionName = 'mutation applied before refresh failed';
     failStateCount = 1;
     send(response(command, { disposition: 'handled' }));
+    return;
+  }
+  if (command.message === '/fail-next-entries') {
+    failEntriesCount++;
+    send(response(command, { disposition: 'handled' }));
+    return;
+  }
+  if (command.message === '/fail-snapshot-validation') {
+    failStateAfterEntries = true;
+    send(response(command, { disposition: 'handled' }));
+    return;
+  }
+  if (command.message === '/background-tail') {
+    streaming = true;
+    const timestamp = Date.now() - 60_000;
+    send({ type: 'agent_start' });
+    for (let i = 0; i < 13; i++) {
+      // The final two notices are identical, including both their live and saved times.
+      const occurrence = Math.min(i, 11);
+      const message = { role: 'custom', customType: 'background', display: true,
+        timestamp: timestamp + occurrence, content: `BACKGROUND_${occurrence}`,
+        details: { id: `task-${occurrence}`, state: 'completed' } };
+      const { role, timestamp: createdAt, ...stored } = message;
+      appendEntry({ type: 'custom_message', ...stored, timestamp: new Date(createdAt + 60_000).toISOString() });
+      send({ type: 'message_start', message }, { type: 'message_end', message });
+    }
+    backgroundAssistant = assistant('PARTIAL_BACKGROUND_ANSWER', timestamp + 14);
+    send({ type: 'message_start', message: backgroundAssistant }, response(command, { disposition: 'handled' }));
+    return;
+  }
+  if (command.message === '/finish-background-tail') {
+    const message = { ...backgroundAssistant, stopReason: 'stop', content: [{ type: 'text', text: 'FINAL_BACKGROUND_ANSWER' }] };
+    append(message);
+    const timing = appendEntry({ type: 'custom', customType: 'worked-for', data: { elapsedSeconds: 538 } });
+    streaming = false;
+    send({ type: 'message_end', message }, { type: 'entry_appended', entry: timing },
+      { type: 'agent_end', messages: [message], willRetry: false }, { type: 'agent_settled' },
+      response(command, { disposition: 'handled' }));
     return;
   }
   if (command.message === '/seed-live') {
@@ -207,6 +249,7 @@ function handle(command) {
           delta('boundary complete'), { type: 'message_end', message },
           { type: 'agent_end', messages: [message], willRetry: false }, { type: 'agent_settled' });
       } else send(result);
+      if (failStateAfterEntries) { failStateAfterEntries = false; failStateCount++; }
       break;
     }
     case 'get_messages': send(response(command, { messages: entries.filter(entry => entry.type === 'message').map(entry => entry.message) })); break;

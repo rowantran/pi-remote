@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readJsonl, writeJsonl } from './jsonl.js';
-import { emptyLive, applyLiveEvent } from './live.js';
+import { emptyLive, applyLiveEvent, captureLiveSnapshot } from './live.js';
 import { PiProcess, type PiLaunch } from './pi-process.js';
 import { remoteSessionEnv } from './remote-session.js';
 import { PI_VERSION, PROTOCOL_VERSION, errorText, type CreateOptions, type LiveState, type RecordValue, type Request, type SlotInfo, type Snapshot } from './protocol.js';
@@ -25,7 +25,7 @@ interface Slot extends StoredSlot {
   error?: string;
   stateRequest?: Promise<RecordValue>;
   startupRetry?: NodeJS.Timeout;
-  history?: { sessionId: string; entries: RecordValue[]; leafId: string | null };
+  history?: { sessionId: string; entries: RecordValue[]; leafId: string | null; seq: number };
   live: LiveState;
   ui: Map<string, RecordValue>;
   timers: Map<string, NodeJS.Timeout>;
@@ -253,13 +253,16 @@ export class Supervisor {
   private async snapshot(slot: Slot, retries = 2): Promise<Snapshot> {
     // A transition may be awaiting an extension dialog. Permit attachment using the last
     // verified history so disconnection cannot make that dialog impossible to answer.
-    if (slot.status === 'starting' || slot.changing) return { slot: this.info(slot), state: slot.state, entries: slot.history?.entries ?? [], leafId: slot.history?.leafId ?? null, live: structuredClone(slot.live), ui: structuredClone([...slot.ui.values()]), seq: slot.seq };
+    if (slot.status === 'starting' || slot.changing) return { slot: this.info(slot), state: slot.state, entries: slot.history?.entries ?? [], leafId: slot.history?.leafId ?? null, live: structuredClone(slot.live), ui: structuredClone([...slot.ui.values()]), seq: slot.seq, historyComplete: false };
     const state = await this.refreshState(slot);
+    let retire = () => {};
     const snapshot = await slot.process!.command<Snapshot>({ type: 'get_entries' }, 30_000, data => {
       const entries = data.entries as RecordValue[];
       const leafId = data.leafId as string | null;
-      slot.history = { sessionId: state.sessionId, entries, leafId };
-      return { slot: this.info(slot), state, entries, leafId, live: structuredClone(slot.live), ui: structuredClone([...slot.ui.values()]), seq: slot.seq };
+      const tail = captureLiveSnapshot(slot.live);
+      retire = tail.retire;
+      return { slot: this.info(slot), state, entries, leafId, live: tail.state,
+        ui: structuredClone([...slot.ui.values()]), seq: slot.seq, historyComplete: true };
     });
     // Extension commands can switch sessions without a switch_session RPC. Check identity
     // again; never combine one session's history with another one's state/live messages.
@@ -267,6 +270,11 @@ export class Supervisor {
     if (after.sessionId !== state.sessionId || slot.changing) {
       if (retries === 0) throw new Error('Session changed repeatedly during snapshot; attach again');
       return this.snapshot(slot, retries - 1);
+    }
+    // Overlapping readers must not roll the cached baseline back behind an already retired tail.
+    if (!slot.history || slot.history.seq <= snapshot.seq) {
+      slot.history = { sessionId: state.sessionId, entries: snapshot.entries, leafId: snapshot.leafId, seq: snapshot.seq };
+      retire();
     }
     return snapshot;
   }

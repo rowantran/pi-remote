@@ -59,6 +59,23 @@ class FakeConnection implements RemoteConnection {
   emit(value: RemoteEvent) { for (const listener of this.events) listener(value); }
   disconnect() { for (const listener of this.disconnects) listener(new Error('network lost')); }
 }
+class ReconnectingFakeConnection extends FakeConnection {
+  reconnected?: (snapshot: Snapshot) => void;
+  onReconnect(listener: (snapshot: Snapshot) => void) {
+    this.reconnected = listener; return () => { this.reconnected = undefined; };
+  }
+}
+function backgroundNotice(timestamp: number): RecordValue {
+  return { role: 'custom', customType: 'background', timestamp, display: true, content: 'BACKGROUND_NOTICE',
+    details: { id: 'worker', kind: 'shell', event: 'completion', state: 'completed', exitCode: 0 } };
+}
+function savedCustomEntry(message: RecordValue, id: string, parentId: string | null, timestamp = message.timestamp + 50): RecordValue {
+  const { role: _role, ...stored } = message;
+  return { ...stored, type: 'custom_message', id, parentId, timestamp: new Date(timestamp).toISOString() };
+}
+function screen(ui: RemoteTui): string {
+  ui.tui.renderNow(); return stripTerminalSequences(ui.tui.getScreenLines().join('\n'));
+}
 function launch(t: any, initial = snapshot(), connection = new FakeConnection(), options: TuiOptions = {}) {
   const terminal = new FakeTerminal();
   const ui = new RemoteTui(connection, 'slot', initial, terminal, options);
@@ -220,12 +237,6 @@ test('starting-slot refresh preserves MCP warnings while learning the initial se
 });
 
 test('repeated reconnects clear obsolete connection notices, preserve warnings and do not replay commands', async t => {
-  class ReconnectingFakeConnection extends FakeConnection {
-    reconnected?: (snapshot: Snapshot) => void;
-    onReconnect(listener: (snapshot: Snapshot) => void) {
-      this.reconnected = listener; return () => { this.reconnected = undefined; };
-    }
-  }
   const initial = snapshot({ ui: [{ id: 'dialog', method: 'input', title: 'Preserved question' }] });
   initial.live.messages = [{ role: 'user', timestamp: 1, content: 'EARLIER_PROMPT' }];
   const connection = new ReconnectingFakeConnection();
@@ -445,19 +456,182 @@ test('initial synchronous event backlog respects the initial snapshot sequence',
   assert.equal(ui.view.snapshot.live.messages[0].content[0].text, 'prefix suffix');
 });
 
-test('snapshot refresh replays events received after the cut before the await continuation', async t => {
-  const initial = snapshot(); initial.live.busy = true; initial.live.messages = [message()];
+test('authoritative refresh replaces a completed custom message with its later-timestamp saved copy', async t => {
+  const notice = backgroundNotice(Date.parse('2026-04-01T00:00:00.000Z'));
+  const { ui, connection } = launch(t);
+  connection.emit(event(1, { type: 'message_start', message: notice }));
+  connection.emit(event(2, { type: 'message_end', message: notice }));
+  assert.equal((screen(ui).match(/BACKGROUND_NOTICE/g) ?? []).length, 1);
+  const saved = savedCustomEntry(notice, 'saved-notice', null);
+  const authoritative = snapshot({ historyComplete: true, seq: 3, entries: [saved], leafId: saved.id });
+  connection.handler = method => method === 'snapshot' ? authoritative : {};
+  connection.emit(event(3, { type: 'remote_refresh' })); await flush();
+  assert.deepEqual(ui.view.snapshot.live.messages, []);
+  const messages = transcriptMessages(ui.view.snapshot);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].id, saved.id);
+  assert.equal(messages[0].timestamp, notice.timestamp + 50);
+  assert.equal((screen(ui).match(/BACKGROUND_NOTICE/g) ?? []).length, 1);
+  assert.deepEqual(authoritative.live.messages, [], 'Rendering must not populate the daemon snapshot');
+});
+
+test('authoritative refresh preserves two legitimate identical background notices', async t => {
+  const notices = [backgroundNotice(100), backgroundNotice(100)];
+  const { ui, connection } = launch(t, snapshot({ historyComplete: true }));
+  notices.forEach((notice, index) => {
+    connection.emit(event(index * 2 + 1, { type: 'message_start', message: notice }));
+    connection.emit(event(index * 2 + 2, { type: 'message_end', message: notice }));
+  });
+  assert.equal((screen(ui).match(/BACKGROUND_NOTICE/g) ?? []).length, 2);
+  const entries = [savedCustomEntry(notices[0], 'first', null), savedCustomEntry(notices[1], 'second', 'first')];
+  connection.handler = method => method === 'snapshot' ? snapshot({ historyComplete: true, seq: 5, entries, leafId: 'second' }) : {};
+  connection.emit(event(5, { type: 'remote_refresh' })); await flush();
+  const messages = transcriptMessages(ui.view.snapshot);
+  assert.deepEqual(messages.map(message => message.id), ['first', 'second']);
+  assert.equal(messages[0].content, messages[1].content);
+  assert.deepEqual(messages[0].details, messages[1].details);
+  assert.deepEqual(ui.view.snapshot.live.messages, []);
+  assert.equal((screen(ui).match(/BACKGROUND_NOTICE/g) ?? []).length, 2);
+});
+
+test('incomplete snapshots keep identical cached notices and the whole uncheckpointed tail', async t => {
+  const notice = backgroundNotice(100), tail = backgroundNotice(200);
+  const entries = [savedCustomEntry(notice, 'first', null), savedCustomEntry(notice, 'second', 'first')];
+  const initial = snapshot({ historyComplete: true, entries, leafId: 'second' });
+  const { ui, terminal, connection } = launch(t, initial);
+  terminal.rows = 60; terminal.resize(); // Keep all four generic panels visible for the render assertion.
+  connection.emit(event(1, { type: 'message_start', message: tail }));
+  connection.emit(event(2, { type: 'message_end', message: tail }));
+  const incomplete = snapshot({ historyComplete: false, seq: 3, entries, leafId: 'second' });
+  incomplete.live.messages = [tail];
+  connection.handler = method => method === 'snapshot' ? incomplete : {};
+  connection.emit(event(3, { type: 'remote_refresh' })); await flush();
+  assert.deepEqual(transcriptMessages(ui.view.snapshot).map(message => message.id), ['first', 'second', undefined]);
+  assert.equal((screen(ui).match(/BACKGROUND_NOTICE/g) ?? []).length, 3);
+  assert.deepEqual(ui.view.snapshot.live.messages, [tail]);
+  // No lifecycle bookkeeping travels with completed messages in an incomplete snapshot.
+  // A later identical start/end pair must still create a separate occurrence.
+  connection.emit(event(4, { type: 'message_start', message: tail }));
+  connection.emit(event(5, { type: 'message_end', message: tail }));
+  assert.equal(transcriptMessages(ui.view.snapshot).length, 4);
+  assert.equal((screen(ui).match(/BACKGROUND_NOTICE/g) ?? []).length, 4);
+  assert.deepEqual(ui.view.snapshot.live.messages, [tail, tail]);
+});
+
+test('authoritative refresh leaves the saved final answer and worked-for entry at the end', async t => {
+  const notice = backgroundNotice(100);
+  const answer = { ...message('assistant', 200), stopReason: 'stop', content: [{ type: 'text', text: 'FINAL_ANSWER' }] };
+  const initial = snapshot({ entries: [
+    savedCustomEntry(notice, 'notice', null),
+    { type: 'message', id: 'answer', parentId: 'notice', message: answer },
+    { type: 'custom', id: 'timing', parentId: 'answer', customType: 'worked-for', data: { elapsedSeconds: 2 } },
+  ], leafId: 'timing' });
+  // Before a successful refresh, the client's event buffer can still contain completed messages.
+  initial.live.messages = [notice, answer];
   const { ui, connection } = launch(t, initial);
-  const pending = deferred<Snapshot>(); connection.handler = () => pending.promise;
+  const authoritative = structuredClone(initial); authoritative.historyComplete = true;
+  authoritative.seq = 1; authoritative.live.messages = [];
+  connection.handler = method => method === 'snapshot' ? authoritative : {};
+  connection.emit(event(1, { type: 'remote_refresh' })); await flush();
+  const messages = transcriptMessages(ui.view.snapshot);
+  assert.deepEqual(messages.map(message => message.role), ['custom', 'assistant', 'entry']);
+  assert.deepEqual(messages.at(-2), answer);
+  assert.equal(messages.at(-1)?.id, 'timing');
+  assert.equal(messages.at(-1)?.customType, 'worked-for');
+  assert.deepEqual(messages.at(-1)?.data, { elapsedSeconds: 2 });
+  assert.deepEqual(ui.view.snapshot.live.messages, []);
+  const output = screen(ui);
+  assert.equal((output.match(/BACKGROUND_NOTICE/g) ?? []).length, 1);
+  assert.equal((output.match(/FINAL_ANSWER/g) ?? []).length, 1);
+  assert.ok(output.indexOf('BACKGROUND_NOTICE') < output.indexOf('FINAL_ANSWER'), output);
+});
+
+test('snapshot refresh replaces prior messages and replays only events after the cut exactly once', async t => {
+  const initial = snapshot(); initial.live.busy = true;
+  const stale = backgroundNotice(100); initial.live.messages = [stale];
+  const { ui, connection } = launch(t, initial);
+  const pending = deferred<Snapshot>(); connection.handler = method => method === 'snapshot' ? pending.promise : {};
   connection.emit(event(1, { type: 'remote_refresh' }));
-  connection.emit(event(2, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'hello' } }));
-  const cut = structuredClone(initial); cut.seq = 1;
+  const notice = backgroundNotice(200);
+  connection.emit(event(2, { type: 'message_end', message: notice }));
+  const partial = { ...message('assistant', 300), content: [{ type: 'text', text: 'prefix' }] };
+  connection.emit(event(3, { type: 'message_start', message: partial }));
+  const cut = snapshot({ historyComplete: true, seq: 3, entries: [savedCustomEntry(notice, 'saved-notice', null)], leafId: 'saved-notice' });
+  cut.live.busy = true; cut.live.messages = [partial];
+  const delta = event(4, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: ' hello' } });
+  connection.emit(delta); connection.emit(delta);
   pending.resolve(cut);
-  connection.emit(event(3, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: ' world' } }));
+  connection.emit(event(5, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: ' world' } }));
   await flush();
-  assert.equal(ui.view.snapshot.seq, 3);
-  assert.equal(ui.view.snapshot.live.messages[0].content[0].text, 'hello world');
-  assert.equal(connection.requests[0].method, 'snapshot');
+  assert.equal(ui.view.snapshot.seq, 5);
+  assert.equal(ui.view.snapshot.live.messages.length, 1);
+  assert.equal(ui.view.snapshot.live.messages[0].content[0].text, 'prefix hello world');
+  assert.deepEqual(transcriptMessages(ui.view.snapshot).map(message => message.role), ['custom', 'assistant']);
+  assert.equal((screen(ui).match(/BACKGROUND_NOTICE/g) ?? []).length, 1);
+  assert.deepEqual(cut.live.messages, [partial], 'Replay must not mutate the supplied snapshot');
+  assert.deepEqual(connection.requests.filter(request => request.method === 'snapshot').map(request => request.method), ['snapshot']);
+  connection.emit(event(6, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: ' after' } }));
+  assert.equal(ui.view.snapshot.live.messages[0].content[0].text, 'prefix hello world after');
+});
+
+test('failed snapshot refresh keeps completed live messages until a later success repairs the display', async t => {
+  const notice = backgroundNotice(100);
+  const answer = { ...message('assistant', 200), stopReason: 'stop', content: [{ type: 'text', text: 'FINAL_ANSWER' }] };
+  const { ui, connection } = launch(t);
+  connection.emit(event(1, { type: 'message_end', message: notice }));
+  connection.emit(event(2, { type: 'message_end', message: answer }));
+  const pending = deferred<Snapshot>(); connection.handler = method => method === 'snapshot' ? pending.promise : {};
+  connection.emit(event(3, { type: 'remote_refresh' }));
+  const later = backgroundNotice(300);
+  connection.emit(event(4, { type: 'message_end', message: later }));
+  pending.reject(new Error('snapshot unavailable')); await flush();
+  assert.deepEqual(ui.view.snapshot.live.messages, [notice, answer, later]);
+  const failedOutput = screen(ui);
+  assert.equal((failedOutput.match(/BACKGROUND_NOTICE/g) ?? []).length, 2);
+  assert.equal((failedOutput.match(/FINAL_ANSWER/g) ?? []).length, 1);
+  assert.match(failedOutput, /Snapshot refresh failed: snapshot unavailable/);
+  const repaired = snapshot({ historyComplete: true, seq: 5, entries: [
+    savedCustomEntry(notice, 'first', null), savedCustomEntry(later, 'second', 'first'),
+    { type: 'message', id: 'answer', parentId: 'second', message: answer },
+  ], leafId: 'answer' });
+  connection.handler = method => method === 'snapshot' ? repaired : {};
+  connection.emit(event(5, { type: 'remote_refresh' })); await flush();
+  assert.deepEqual(ui.view.snapshot.live.messages, []);
+  assert.deepEqual(transcriptMessages(ui.view.snapshot).map(message => message.role), ['custom', 'custom', 'assistant']);
+  const output = screen(ui);
+  assert.equal((output.match(/BACKGROUND_NOTICE/g) ?? []).length, 2);
+  assert.equal((output.match(/FINAL_ANSWER/g) ?? []).length, 1);
+  assert.ok(output.lastIndexOf('BACKGROUND_NOTICE') < output.indexOf('FINAL_ANSWER'), output);
+  assert.equal(connection.requests.filter(request => request.method === 'snapshot').length, 2);
+});
+
+test('reconnect replaces the live buffer with saved history and ignores an obsolete refresh', async t => {
+  const notice = backgroundNotice(100);
+  const initial = snapshot(); initial.live.messages = [notice];
+  const connection = new ReconnectingFakeConnection();
+  const { ui } = launch(t, initial, connection);
+  const pending = deferred<Snapshot>(); connection.handler = method => method === 'snapshot' ? pending.promise : {};
+  connection.emit(event(1, { type: 'remote_refresh' }));
+  connection.disconnect();
+  const restored = snapshot({ historyComplete: true, seq: 10, entries: [savedCustomEntry(notice, 'saved-notice', null)], leafId: 'saved-notice' });
+  const partial = { ...message('assistant', 200), content: [{ type: 'text', text: 'RECONNECTED_STREAM' }] };
+  restored.live.busy = true; restored.live.messages = [partial];
+  connection.reconnected?.(restored);
+  connection.emit(event(10, { type: 'message_end', message: notice }));
+  const delta = event(11, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: ' suffix' } });
+  connection.emit(delta); connection.emit(delta);
+  pending.resolve(snapshot({ seq: 1 })); await flush();
+  assert.equal(ui.view.snapshot.seq, 11);
+  assert.equal(ui.view.snapshot.live.messages.length, 1);
+  assert.equal(ui.view.snapshot.live.messages[0].content[0].text, 'RECONNECTED_STREAM suffix');
+  assert.equal(transcriptMessages(ui.view.snapshot)[0].id, 'saved-notice');
+  const output = screen(ui);
+  assert.equal((output.match(/BACKGROUND_NOTICE/g) ?? []).length, 1);
+  assert.equal((output.match(/RECONNECTED_STREAM suffix/g) ?? []).length, 1);
+  assert.doesNotMatch(output, /Connection lost/);
+  assert.ok(connection.requests.every(request => request.method === 'snapshot'
+    || request.method === 'filesystem_metadata'
+    || ['get_available_models', 'get_session_stats'].includes(request.params?.command?.type)), JSON.stringify(connection.requests));
 });
 
 test('session transition /new handles remote confirmation while the command is still pending', async t => {

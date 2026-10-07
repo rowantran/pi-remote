@@ -9,6 +9,8 @@ import { fileURLToPath } from 'node:url';
 import test, { type TestContext } from 'node:test';
 import { Supervisor, socketPath } from '../src/daemon.js';
 import { readJsonl, writeJsonl } from '../src/jsonl.js';
+import { RemoteView, transcriptMessages } from '../src/view.js';
+import { applyLiveEvent, emptyLive } from '../src/live.js';
 import type { RecordValue, RemoteEvent, Result, SlotInfo, Snapshot } from '../src/protocol.js';
 
 const fixture = fileURLToPath(new URL('./fixture-pi.mjs', import.meta.url));
@@ -126,6 +128,41 @@ async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {
   return { dir, supervisor, peer, connect, create, slot, versionFile, versionLog, envLog };
 }
 const textOf = (message: RecordValue) => message.content.filter((block: RecordValue) => block.type === 'text').map((block: RecordValue) => block.text).join('');
+
+test('an older concurrent snapshot cannot roll the cached baseline behind the retired tail', async () => {
+  const supervisor = new Supervisor({ stateDir: '/tmp/unused-snapshot-test' });
+  const live = emptyLive(), state = { sessionId: 'session' };
+  const notices = [1, 2].map(timestamp => ({ role: 'custom', customType: 'background', timestamp, content: `notice-${timestamp}` }));
+  const entries = notices.map((message, i) => ({ type: 'custom_message', id: String(i + 1), parentId: i ? String(i) : null,
+    timestamp: new Date(message.timestamp + 100).toISOString(), customType: message.customType, content: message.content }));
+  let reads = 0, checks = 0;
+  let validationStarted!: () => void, finishValidation!: (state: RecordValue) => void;
+  const waiting = new Promise<void>(resolve => { validationStarted = resolve; });
+  const blocked = new Promise<RecordValue>(resolve => { finishValidation = resolve; });
+  const slot: RecordValue = { id: 'slot', cwd: '/tmp', status: 'running', seq: 0, state, live, ui: new Map(), changing: false,
+    process: { child: { pid: 1 }, command: async (_command: RecordValue, _timeout: number, atResponse: (data: RecordValue) => Snapshot) => {
+      applyLiveEvent(live, { type: 'message_end', message: notices[reads] });
+      slot.seq = ++reads;
+      return atResponse({ entries: entries.slice(0, reads), leafId: String(reads) });
+    } } };
+  // Deterministically hold the older snapshot's final identity check while a newer reader commits.
+  (supervisor as any).refreshState = async () => {
+    if (++checks === 2) { validationStarted(); return blocked; }
+    return state;
+  };
+  const older = (supervisor as any).snapshot(slot) as Promise<Snapshot>;
+  await waiting;
+  const newer = await (supervisor as any).snapshot(slot) as Snapshot;
+  assert.equal(newer.seq, 2);
+  assert.deepEqual(live.messages, []);
+  finishValidation(state);
+  assert.equal((await older).seq, 1);
+  slot.changing = true;
+  const fallback = await (supervisor as any).snapshot(slot) as Snapshot;
+  assert.equal(fallback.historyComplete, false);
+  assert.deepEqual(fallback.entries, entries);
+  assert.equal(transcriptMessages(fallback).length, 2, 'No entry can be lost by rolling back a retired baseline');
+});
 
 test('private Unix socket, strict hello, and reserved launch arguments', { timeout: 10_000 }, async t => {
   const { dir, peer, connect } = await setup(t);
@@ -257,6 +294,86 @@ test('snapshot cut precedes events in the same get_entries stdout chunk and atta
   const recovered = await attaching.request<Snapshot>('snapshot', { slotId: info.id });
   assert.equal(textOf(recovered.entries[0].message), 'boundary complete');
   assert.equal(recovered.live.busy, false);
+  assert.equal(recovered.historyComplete, true);
+  assert.deepEqual(recovered.live.messages, [], 'Completed post-cut events are covered by the next snapshot');
+});
+
+test('snapshots replace thirteen earlier background completions with saved history and preserve partial work', { timeout: 10_000 }, async t => {
+  const { peer, connect, slot } = await setup(t);
+  const { info, snapshot: initial } = await slot();
+  const view = new RemoteView(initial), from = peer.records.length;
+  await peer.request('rpc', { slotId: info.id, command: { type: 'prompt', message: '/background-tail' } });
+  for (const record of peer.records.slice(from)) if (record.type === 'event') view.apply(record);
+  const liveNotices = view.snapshot.live.messages.filter(message => message.role === 'custom');
+  assert.equal(liveNotices.length, 13, 'Identical live notices are separate occurrences');
+  assert.equal(transcriptMessages(view.snapshot).length, 14);
+  const partial = await peer.request<Snapshot>('snapshot', { slotId: info.id });
+  assert.equal(partial.historyComplete, true);
+  assert.equal(partial.live.busy, true);
+  assert.equal(partial.entries.length, 13);
+  assert.deepEqual(partial.live.messages.map(textOf), ['PARTIAL_BACKGROUND_ANSWER']);
+  assert.equal(Date.parse(partial.entries[0].timestamp) - liveNotices[0].timestamp, 60_000,
+    'Custom message creation and persistence timestamps need not match');
+  view.replace(partial);
+  const messages = transcriptMessages(view.snapshot);
+  assert.equal(messages.filter(message => message.role === 'custom').length, 13);
+  assert.equal(messages.filter(message => message.content === 'BACKGROUND_11').length, 2);
+  assert.equal(textOf(messages.at(-1)!), 'PARTIAL_BACKGROUND_ANSWER');
+  await peer.request('rpc', { slotId: info.id, command: { type: 'prompt', message: '/finish-background-tail' } });
+  const complete = await peer.request<Snapshot>('snapshot', { slotId: info.id });
+  assert.deepEqual(complete.live.messages, []);
+  view.replace(complete);
+  const final = transcriptMessages(view.snapshot);
+  assert.equal(final.filter(message => message.role === 'custom').length, 13);
+  assert.equal(final.length, 15);
+  assert.equal(textOf(final.at(-2)!), 'FINAL_BACKGROUND_ANSWER');
+  assert.equal(final.at(-1)!.customType, 'worked-for');
+  const reattached = await connect();
+  const restored = await reattached.request<Snapshot>('attach', { slotId: info.id });
+  assert.equal(restored.historyComplete, true);
+  assert.deepEqual(restored.live.messages, []);
+  assert.deepEqual(transcriptMessages(restored), final);
+});
+
+test('an incomplete transition preserves identical notices in its cached baseline', { timeout: 10_000 }, async t => {
+  const { peer, slot } = await setup(t);
+  const { info } = await slot(['--fixture-new-session-dialog']);
+  await peer.request('rpc', { slotId: info.id, command: { type: 'prompt', message: '/background-tail' } });
+  const verified = await peer.request<Snapshot>('snapshot', { slotId: info.id });
+  assert.equal(transcriptMessages(verified).filter(message => message.role === 'custom').length, 13);
+  const changing = peer.request('rpc', { slotId: info.id, command: { type: 'new_session' } });
+  const dialog = (await peer.event('extension_ui_request')).event;
+  const incomplete = await peer.request<Snapshot>('snapshot', { slotId: info.id });
+  assert.equal(transcriptMessages(incomplete).filter(message => message.role === 'custom').length, 13);
+  assert.equal(transcriptMessages(incomplete).length, 14);
+  await peer.request('answer', { slotId: info.id, response: { id: dialog.id, cancelled: true } });
+  await changing;
+});
+
+test('failed snapshots and incomplete session transitions do not retire the live tail', { timeout: 15_000 }, async t => {
+  for (const failure of ['/fail-next-entries', '/fail-snapshot-validation']) await t.test(failure, async t => {
+    const { peer, slot } = await setup(t);
+    const { info } = await slot(['--fixture-new-session-dialog']);
+    await peer.request('rpc', { slotId: info.id, command: { type: 'prompt', message: '/background-tail' } });
+    await peer.request('rpc', { slotId: info.id, command: { type: 'prompt', message: failure } });
+    await assert.rejects(peer.request('snapshot', { slotId: info.id }), /Fixture get_(entries|state) failure/);
+    // While the transition waits on a dialog, inspection returns the last verified baseline
+    // plus the untouched tail. Neither a failed query nor this incomplete snapshot may retire it.
+    const changing = peer.request('rpc', { slotId: info.id, command: { type: 'new_session' } });
+    const dialog = (await peer.event('extension_ui_request')).event;
+    const incomplete = await peer.request<Snapshot>('snapshot', { slotId: info.id });
+    assert.equal(incomplete.historyComplete, false);
+    assert.deepEqual(incomplete.entries, []);
+    assert.equal(incomplete.live.messages.filter(message => message.role === 'custom').length, 13);
+    assert.equal(incomplete.live.messages.length, 14);
+    await peer.request('answer', { slotId: info.id, response: { id: dialog.id, cancelled: true } });
+    await changing;
+    const repaired = await peer.request<Snapshot>('snapshot', { slotId: info.id });
+    assert.equal(repaired.historyComplete, true);
+    assert.equal(repaired.entries.length, 13);
+    assert.deepEqual(repaired.live.messages.map(textOf), ['PARTIAL_BACKGROUND_ANSWER']);
+    assert.equal(transcriptMessages(repaired).length, 14);
+  });
 });
 
 test('slots isolate streams and reject cross-slot RPC and dialog answers', { timeout: 10_000 }, async t => {
@@ -510,6 +627,7 @@ test('slow startup returns starting after the grace period, preserves Pi, and ex
   assert.doesNotThrow(() => process.kill(info.pid!, 0));
   const starting = await peer.request<Snapshot>('attach', { slotId: info.id });
   assert.equal(starting.slot.status, 'starting');
+  assert.equal(starting.historyComplete, false);
   assert.ok(starting.ui.some(request => request.method === 'setStatus' && request.statusText === 'Starting fixture'));
   await peer.waitFor(record => record.type === 'event' && record.event.type === 'remote_state' && Boolean(record.event.state.sessionId));
   const ready = await peer.request<Snapshot>('snapshot', { slotId: info.id });
@@ -532,6 +650,7 @@ test('new_session awaiting an extension hook dialog remains answerable after dis
   const reattached = await connect();
   const waiting = await reattached.request<Snapshot>('attach', { slotId: info.id });
   assert.equal(waiting.state.sessionId, original.state.sessionId);
+  assert.equal(waiting.historyComplete, false);
   assert.ok(waiting.ui.some(request => request.id === dialog.id));
   const from = reattached.records.length;
   await reattached.request('answer', { slotId: info.id, response: { id: dialog.id, confirmed: true } });

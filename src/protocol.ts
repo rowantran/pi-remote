@@ -36,6 +36,10 @@ export interface Snapshot {
   live: LiveState;
   ui: RecordValue[];
   seq: number;
+  /** Baseline/tail separation: true covers completed messages through seq, leaving only unfinished
+   * live messages. False preserves a cached baseline and uncheckpointed tail during a transition.
+   * Only legacy daemons omit this marker. */
+  historyComplete?: boolean;
   presentation?: { models?: RecordValue[]; stats?: RecordValue; gitBranch?: string; homeDir?: string; [key: string]: any };
 }
 export interface CreateOptions { cwd: string; args?: string[]; sessionPath?: string }
