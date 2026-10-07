@@ -56,6 +56,13 @@ test('golden crop excludes native and remote working status without masking tran
     const body = ['GOLDEN_USER', 'answer', '', '', '', status, ''];
     assert.equal(crop(screen(body), 160).text, 'GOLDEN_USER\nanswer\n');
     assert.match(crop(screen(['GOLDEN_USER', status, 'answer']), 160).text, /Working/);
+    const first = crop(screen(['GOLDEN_USER', '', '', '', status, 'answer A']), 160);
+    const second = crop(screen(['GOLDEN_USER', '', '', '', status, 'answer B']), 160);
+    assert.match(first.text, /Working/);
+    assert.match(first.text, /answer A/);
+    assert.notEqual(first.canonical, second.canonical, 'status-shaped transcript text must not mask different answers');
+    const distant = crop(screen(['GOLDEN_USER', '', '', '', status, '', '', '', '', '']), 160);
+    assert.match(distant.text, /Working/, 'transcript status text outside the prompt edge must remain');
   }
 });
 
