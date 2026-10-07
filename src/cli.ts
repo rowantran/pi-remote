@@ -11,13 +11,19 @@ import { PI_VERSION, PROTOCOL_VERSION, type SlotInfo, type Snapshot, type Remote
 
 const HELP = `pi-remote — local terminal UI, persistent remote Pi RPC processes
 
+Everyday commands:
   pi-remote new HOST --cwd REMOTE_DIRECTORY [--no-attach] [-- PI_OPTIONS...]
   pi-remote ls HOST [--json]
   pi-remote attach HOST [SLOT]
   pi-remote kill HOST SLOT
-  pi-remote rpc HOST SLOT '{"type":"get_state"}'
-  pi-remote watch HOST SLOT
   pi-remote completion fish|zsh|bash
+
+Power-user / debugging commands:
+  pi-remote rpc HOST SLOT '{"type":"get_state"}'
+    Send one JSON command and print its response.
+  pi-remote watch HOST SLOT
+    Print a session snapshot, then stream live events as JSON.
+  These are for scripts and debugging. Use attach for normal interactive work.
 
 Options:
   --host HOST          Alternative to positional SSH host (or PI_REMOTE_HOST)
@@ -184,6 +190,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (command === 'kill') { await connection.request('kill', { slotId }); console.log(`Stopped ${slotId}`); return; }
     if (!['new', 'attach', 'rpc', 'watch'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
     const snapshot = await connection.request<Snapshot>('attach', { slotId, protocol: PROTOCOL_VERSION, piVersion: PI_VERSION });
+    // Power-user/debug interface: one explicit JSON command, not an interactive session.
     if (command === 'rpc') {
       const json = options.positionals.shift();
       if (!json) throw new Error('rpc requires a JSON Pi RPC command');
@@ -191,6 +198,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       console.log(JSON.stringify(result ?? null));
       return;
     }
+    // Power-user/debug observer: snapshot and event JSON, without terminal controls.
     if (command === 'watch') {
       console.log(JSON.stringify({ type: 'snapshot', ...snapshot }));
       const unsubscribe = connection.onEvent(event => { if (event.seq > snapshot.seq) console.log(JSON.stringify(event)); });

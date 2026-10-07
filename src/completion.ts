@@ -8,6 +8,10 @@ import type { RemoteConnection, SlotInfo } from './protocol.js';
 export const VALUE_OPTIONS = ['--host', '--remote-bin', '--state-dir', '--cwd', '--session', '--ui-extension', '--ui-config', '--theme'] as const;
 export const BOOLEAN_OPTIONS = ['--local', '--json', '--no-attach', '--no-reconnect', '--help'] as const;
 export const COMMANDS = ['new', 'ls', 'attach', 'kill', 'watch', 'rpc', 'completion', 'help', 'version'] as const;
+const COMMAND_LABELS: Partial<Record<typeof COMMANDS[number], string>> = {
+  rpc: 'Power-user/debug: send a JSON command',
+  watch: 'Power-user/debug: stream session events as JSON',
+};
 const SLOT_COMMANDS = new Set(['attach', 'kill', 'watch', 'rpc']);
 export type NumberedSlot = SlotInfo & { number?: number };
 export interface CompletionItem { value: string; label: string; directory: boolean }
@@ -120,7 +124,7 @@ export interface CompletionDependencies {
 export async function completeWords(words: string[], dependencies: CompletionDependencies = {}): Promise<CompletionItem[]> {
   // Accept both a full shell word array and command arguments without argv[0].
   if (words[0] && basename(words[0]) === 'pi-remote') words = words.slice(1);
-  if (words.length <= 1) return COMMANDS.filter(value => value.startsWith(words[0] ?? '')).map(value => ({ value, label: 'Command', directory: false }));
+  if (words.length <= 1) return COMMANDS.filter(value => value.startsWith(words[0] ?? '')).map(value => ({ value, label: COMMAND_LABELS[value] ?? 'Command', directory: false }));
   const context = completionContext(words);
   if (context.forwarded || !(COMMANDS as readonly string[]).includes(context.command)) return [];
   if (context.command === 'completion') return ['fish', 'zsh', 'bash'].filter(value => value.startsWith(context.prefix)).map(value => ({ value, label: 'Print shell completion script', directory: false }));

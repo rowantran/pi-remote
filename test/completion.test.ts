@@ -69,6 +69,25 @@ test('CLI version reports 0.2.0 without opening a connection', async t => {
   assert.deepEqual(output, [`pi-remote 0.2.0 (Pi ${PI_VERSION}, protocol ${PROTOCOL_VERSION})`]);
 });
 
+test('help separates power-user/debug commands from everyday use', async t => {
+  const output: string[] = [];
+  t.mock.method(console, 'log', (value: string) => { output.push(value); });
+  await main(['--help']);
+  const [everyday, advanced] = output.join('\n').split('Power-user / debugging commands:');
+  assert.match(everyday, /Everyday commands:/);
+  assert.match(everyday, /pi-remote attach HOST/);
+  assert.doesNotMatch(everyday, /pi-remote (?:rpc|watch) HOST/);
+  assert.match(advanced, /pi-remote rpc HOST SLOT/);
+  assert.match(advanced, /pi-remote watch HOST SLOT/);
+  assert.match(advanced, /Use attach for normal interactive work/);
+});
+
+test('shell completion labels rpc and watch as power-user/debug commands', async () => {
+  const items = await completeWords(['']);
+  for (const command of ['rpc', 'watch']) assert.match(items.find(item => item.value === command)!.label, /^Power-user\/debug:/);
+  assert.equal(items.find(item => item.value === 'attach')!.label, 'Command');
+});
+
 test('host precedence supports positional aliases, explicit --host, defaults, and local mode', () => {
   assert.deepEqual(selectHost('new', ['other-host'], { defaultHost: 'default' }), { host: 'other-host', positionals: [] });
   assert.deepEqual(selectHost('ls', [], { defaultHost: 'default' }), { host: 'default', positionals: [] });

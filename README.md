@@ -46,7 +46,7 @@ Remote Pi loads its normal settings, credentials, providers, extension factories
 
 The 0.2 daemon persists stable slot numbers in `slots.json`, including stopped slots. A still-running 0.1 daemon uses insertion-order numeric aliases until a later daemon startup migrates its metadata. UUIDs remain valid in both cases. Numeric input always means a slot number, never a UUID prefix.
 
-`Ctrl+D` or `/detach` closes only the client. An attached terminal UI automatically reconnects to the same slot after transport loss; use `--no-reconnect` to disable this. Headless `rpc` and `watch` do not reconnect. Accepted or uncertain commands are **never replayed automatically**. Check the restored session before resending an uncertain request.
+`Ctrl+D` or `/detach` closes only the client. An attached terminal UI automatically reconnects to the same slot after transport loss; use `--no-reconnect` to disable this. The power-user/debug commands `rpc` and `watch` do not reconnect. Accepted or uncertain commands are **never replayed automatically**. Check the restored session before resending an uncertain request.
 
 For local testing, replace the host with `--local` and use a local `--cwd`. `PI_REMOTE_HOST` supplies a default SSH host. With that variable set, `attach 1` uses the default; use `attach --host devbox` for a host-only picker. `--host` takes precedence over the environment, and an explicit `HOST SLOT` pair also overrides the default.
 
@@ -256,14 +256,19 @@ PI_REMOTE_TEST_HOST=devbox node --import tsx test/terminal-smoke.ts
 
 The remote smoke tests use separate `/tmp/pi-remote-{smoke,features,terminal}.*` state directories, start only their own slots, and stop those slots and their daemons afterward. The terminal test uses the separate `pi-remote-test` tmux server. It leaves test files/logs for inspection. It does not change global Pi settings or credentials.
 
-Headless inspection:
+### Power-user / debugging commands
+
+`rpc` and `watch` are optional interfaces for scripts and debugging. **You do not need them for normal interactive use; use `attach` instead.**
+
+- `rpc` sends one JSON command to an existing Pi process, prints its response, and exits. It supports both queries and actions.
+- `watch` prints the current session snapshot, then streams live events as JSON. It does not submit prompts or answer dialogs.
 
 ```sh
 ./bin/pi-remote rpc devbox 1 '{"type":"get_state"}'
 ./bin/pi-remote watch devbox 1
 ```
 
-`rpc` waits for command acceptance/result, not necessarily agent completion. `watch` prints a snapshot followed by events; `agent_settled` means Pi has no automatic work left.
+`rpc` waits for command acceptance/result, not necessarily agent completion. In `watch` output, `agent_settled` means Pi has no automatic work left. Ctrl+C stops watching without stopping Pi. Neither command reconnects automatically.
 
 ### Source map
 
