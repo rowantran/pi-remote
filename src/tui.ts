@@ -4,6 +4,8 @@ import { createRemoteKeybindings } from './keybindings.js';
 import { readLocalClipboard, editLocally } from './local-input.js';
 import { PresentationHost, readPresentationConfig, createPresentationTheme } from './presentation.js';
 import { loadLocalTheme } from './local-theme.js';
+import { hostname } from 'node:os';
+import { REMOTE_ICON, detachMessage, remoteSessionEnv } from './remote-session.js';
 import { RemoteAutocompleteProvider, transformPromptWithAttachments } from './editor-completion.js';
 import {
   copyToClipboard, getSelectListTheme, initTheme,
@@ -29,7 +31,7 @@ const errorColor = (text: string) => `\x1b[31m${text}\x1b[39m`;
 const HELP = `Local Pi remote UI
 Enter: send; while running, queue a steering instruction.
 Alt+Enter: queue a follow-up (wait until the run finishes).
-Shift+Enter / Ctrl+J: newline. Ctrl+D: detach, even in a dialog.
+Shift+Enter / Ctrl+J: newline. Ctrl+C: clear the prompt. Ctrl+D: detach, even in a dialog.
 Esc: cancel the dialog, or clear the prompt queue then abort; queue text returns to the editor.
 Ctrl+O: expand/collapse tool output. Ctrl+T: show/hide thinking.
 PageUp/PageDown: transcript scroll. Ctrl+End: follow output. Ctrl+Shift+F: transcript search.
@@ -71,7 +73,11 @@ class Dialog extends Container implements Focusable {
   handleInput(data: string): void { if (this.inputHandler) this.inputHandler(data); else this.control.handleInput?.(data); }
 }
 
-export interface TuiOptions { presentationPaths?: string[]; presentationConfig?: string; theme?: string }
+export interface TuiOptions {
+  presentationPaths?: string[]; presentationConfig?: string; theme?: string;
+  /** Remote host label for the footer, such as the SSH host alias. */
+  host?: string;
+}
 
 /** Exported for terminal-adapter tests; uses only the public pi-tui API. */
 export class RemoteTui {
@@ -316,6 +322,10 @@ export class RemoteTui {
           else if (this.view.snapshot.live.busy || this.view.snapshot.live.compacting || this.hasQueue() || this.bashRunning || Object.keys(this.view.snapshot.live.bash ?? {}).length) void this.interrupt();
           return { consume: true };
         }
+        if (!this.activeRemote && !this.localDialog && matchesKey(data, Key.ctrl('c'))) {
+          // Like Pi's app.clear. Pending attachments stay; /clear-attachments removes them.
+          this.editor.setText(''); this.tui.requestRender(); return { consume: true };
+        }
         if (!this.activeRemote && !this.localDialog && matchesKey(data, Key.alt('enter'))) {
           void this.submit(this.editor.getExpandedText(), 'followUp'); return { consume: true };
         }
@@ -499,7 +509,6 @@ export class RemoteTui {
     if (this.view.snapshot.live.busy && this.presentation?.workingVisible !== false) {
       this.bottom.addChild(new Text(this.presentation?.workingMessage ?? muted('Working…'), 0, 0));
     }
-    this.bottom.addChild(new Text(muted('Enter steer · Alt+Enter follow-up · Esc cancel/abort · Ctrl+D detach · /help'), 0, 0));
     this.tui.setFocus(control); this.tui.requestRender();
   }
 
@@ -523,7 +532,8 @@ export class RemoteTui {
     const window = s.state.model?.contextWindow;
     const cost = messages.reduce((total, message) => total + (message.usage?.cost?.total ?? 0), 0);
     const statuses = s.ui.filter(record => record.method === 'setStatus' && record.statusText).map(record => safeText(record.statusText));
-    return muted([status, s.state.sessionName ?? s.slot.sessionName ?? this.slotId, s.slot.cwd,
+    return muted([status, s.state.sessionName ?? s.slot.sessionName ?? this.slotId,
+      this.options.host ? `${REMOTE_ICON} ${this.options.host}` : undefined, s.slot.cwd,
       s.state.model?.id ?? assistant?.model, s.state.thinkingLevel,
       context !== undefined ? `${context.toLocaleString()} tokens${window ? ` / ${Math.round(context / window * 100)}%` : ''}` : undefined,
       cost ? `$${cost.toFixed(3)} (message usage)` : undefined, ...statuses].filter(Boolean).map(value => safeText(value).replace(/\n/g, ' ')).join(' · '));
@@ -692,9 +702,15 @@ export class RemoteTui {
 /** Attach is the caller's responsibility. Closing this UI only closes the local transport. */
 export async function runTui(connection: RemoteConnection, slotId: string, initialSnapshot: Snapshot, options: TuiOptions = {}): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('The remote terminal UI requires a terminal for stdin and stdout.');
-  const client = new RemoteTui(connection, slotId, initialSnapshot, new ProcessTerminal(), options);
+  const host = options.host ?? hostname();
+  // Presentation extensions run in this process. They read the same pi-remote session
+  // variables that the daemon gives the remote Pi process.
+  Object.assign(process.env, remoteSessionEnv({ host, slotId, slotNumber: initialSnapshot.slot.number }));
+  const client = new RemoteTui(connection, slotId, initialSnapshot, new ProcessTerminal(), { ...options, host });
   // Start input and outstanding startup dialogs before any trusted extension factory can await.
   const finished = client.run();
   void client.initialize();
   await finished;
+  const slot = client.view.snapshot.slot;
+  process.stdout.write(`${detachMessage(slotId, slot.number ?? initialSnapshot.slot.number)}\n`);
 }

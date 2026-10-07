@@ -50,7 +50,7 @@ pi-remote kill 1
 
 The 0.2 daemon persists stable slot numbers in `slots.json`, including stopped slots. A still-running 0.1 daemon uses insertion-order numeric aliases until a later daemon startup migrates its metadata. UUIDs remain valid in both cases. Numeric input always means a slot number, never a UUID prefix.
 
-`Ctrl+D` or `/detach` closes only the client. An attached terminal UI automatically reconnects to the same slot after transport loss; use `--no-reconnect` to disable this. The power-user/debug commands `rpc` and `watch` do not reconnect. Accepted or uncertain commands are **never replayed automatically**. Check the restored session before resending an uncertain request.
+`Ctrl+D` or `/detach` closes only the client and prints `Detached from slot NUMBER / UUID`. An attached terminal UI automatically reconnects to the same slot after transport loss; use `--no-reconnect` to disable this. The power-user/debug commands `rpc` and `watch` do not reconnect. Accepted or uncertain commands are **never replayed automatically**. Check the restored session before resending an uncertain request.
 
 Use `--host HOST` with any command to select another SSH host, for example `pi-remote attach --host otherbox 1`. For local testing, use `--local` instead of a host and use a local `--cwd`.
 
@@ -103,6 +103,7 @@ For zsh or bash, put `pi-remote` on `PATH` with `npm link`, then install the mat
 | Enter | Send a prompt; during a run, queue steering for the next tool boundary |
 | Alt+Enter | Queue a follow-up after the current run finishes |
 | Shift+Enter / Ctrl+J | Newline |
+| Ctrl+C | Clear the prompt (pending attachments stay) |
 | Esc | Cancel the current dialog, or clear queued input then abort; cleared queue text returns to the editor |
 | Ctrl+D / `/detach` | Detach only, including while a dialog is open |
 | Ctrl+O | Expand/collapse tool output |
@@ -203,6 +204,19 @@ pi-remote attach 1 --ui-config ./remote-ui.json --no-reconnect
 The presentation API omits tool execution, provider registration, credential lookup, remote session mutation, and `ctx.ui.custom()`/local dialogs. Blocked API calls are a **compatibility guard, not a security boundary**; they do not constrain arbitrary JavaScript or custom-editor submission. Tool registration retains rendering fields, not executors. Select visual modules deliberately rather than running every remote extension factory again locally.
 
 Remote RPC still ignores terminal-only hooks such as footer/editor factories, and remote extensions see `ctx.mode === "rpc"`. Local presentation support does not make remote TUI-only code run or provide complete `ExtensionAPI` compatibility.
+
+### Detect a pi-remote session
+
+Extensions can read these environment variables to detect pi-remote. The daemon sets them on each remote Pi process. The local client sets the same variables in its own process before it loads presentation adapters.
+
+| Variable | Value |
+|---|---|
+| `PI_REMOTE_SESSION` | `1` |
+| `PI_REMOTE_SESSION_HOST` | Remote host name. Remote Pi gets the remote `hostname`; the local client uses the SSH host, or the local hostname with `--local`. |
+| `PI_REMOTE_SESSION_SLOT` | Slot UUID |
+| `PI_REMOTE_SESSION_SLOT_NUMBER` | Stable slot number, or empty when unknown |
+
+For example, a local footer adapter can show `PI_REMOTE_SESSION_HOST` to indicate a remote session. The built-in footer shows the host after the Nerd Fonts remote glyph (`nf-cod-remote`, U+EB3A). `PI_REMOTE_HOST` is a different variable: it selects the CLI's default SSH host.
 
 ### Upstream RPC limitations
 
@@ -316,6 +330,7 @@ pi-remote watch 1
 - `src/transcript.ts`, `src/keybindings.ts`: public Pi transcript components and application shortcut hints.
 - `src/presentation.ts`, `src/local-theme.ts`: explicit adapter loading and local themes.
 - `src/files.ts`, `src/local-input.ts`, `src/editor-completion.ts`: attachments, clipboard/editor integration, and remote editor completion.
+- `src/remote-session.ts`: environment variables that identify a pi-remote session, and the detach message.
 - `src/cli.ts`, `src/completion.ts`, `completions/`: launch options, command prefixes, slot selection, and shell completion.
 - `src/config.ts`: XDG config file and default host.
 - `bin/pi-remote`, `src/node-entry.ts`: launcher that runs `src/` via tsx in a checkout or `dist/` in a release, and Node arguments for child processes started from either.

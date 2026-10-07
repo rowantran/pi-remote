@@ -3,7 +3,8 @@ import test from 'node:test';
 import type { Terminal } from '@earendil-works/pi-tui';
 import { stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
 import type { RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../src/protocol.js';
-import { RemoteTui } from '../src/tui.js';
+import { RemoteTui, type TuiOptions } from '../src/tui.js';
+import { detachMessage } from '../src/remote-session.js';
 import { activeBranch, applyAssistantDelta, RemoteView, restoredQueueText, safeText, toolText, transcriptMessages } from '../src/view.js';
 
 function snapshot(overrides: Partial<Snapshot> = {}): Snapshot {
@@ -58,9 +59,9 @@ class FakeConnection implements RemoteConnection {
   emit(value: RemoteEvent) { for (const listener of this.events) listener(value); }
   disconnect() { for (const listener of this.disconnects) listener(new Error('network lost')); }
 }
-function launch(t: any, initial = snapshot(), connection = new FakeConnection()) {
+function launch(t: any, initial = snapshot(), connection = new FakeConnection(), options: TuiOptions = {}) {
   const terminal = new FakeTerminal();
-  const ui = new RemoteTui(connection, 'slot', initial, terminal);
+  const ui = new RemoteTui(connection, 'slot', initial, terminal, options);
   const finished = ui.run();
   t.after(() => ui.detach());
   const submit = (text: string) => { ui.editor.setText(text); terminal.input('\r'); };
@@ -209,6 +210,38 @@ test('local help and detach are never sent to Pi', async t => {
   submit('/help'); await flush(); assert.equal(connection.requests.length, 0);
   submit('/detach'); await finished; assert.equal(connection.requests.length, 0);
   assert.equal(terminal.stopped, true);
+});
+
+test('Ctrl+C clears the prompt locally and sends nothing', async t => {
+  const initial = snapshot(); initial.live.busy = true;
+  const { ui, terminal, connection } = launch(t, initial);
+  ui.editor.setText('draft\nsecond line'); terminal.input('\x03'); await flush();
+  assert.equal(ui.editor.getExpandedText(), '');
+  terminal.input('\x03'); await flush();
+  assert.equal(ui.editor.getExpandedText(), '');
+  assert.deepEqual(connection.requests, []); assert.equal(terminal.stopped, false);
+});
+
+test('Ctrl+C in a remote dialog keeps the prompt draft and uses the dialog cancel', async t => {
+  const initial = snapshot({ ui: [{ id: 'dialog', method: 'input', title: 'Value' }] });
+  const { ui, terminal, connection } = launch(t, initial);
+  ui.editor.setText('draft'); terminal.input('\x03'); await flush();
+  assert.equal(ui.editor.getExpandedText(), 'draft');
+  // pi-tui's Input treats Ctrl+C like Esc, as in stock Pi dialogs.
+  assert.deepEqual(connection.requests.map(request => request.method), ['answer']);
+});
+
+test('footer shows the remote host and no key-hint line', async t => {
+  const { terminal } = launch(t, snapshot(), new FakeConnection(), { host: 'devbox' });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const screen = stripTerminalSequences(terminal.output);
+  assert.match(screen, /\uEB3A devbox/);
+  assert.doesNotMatch(screen, /Alt\+Enter follow-up/);
+});
+
+test('detach message includes the slot number when known', () => {
+  assert.equal(detachMessage('uuid', 3), 'Detached from slot 3 / uuid');
+  assert.equal(detachMessage('uuid'), 'Detached from slot uuid');
 });
 
 test('Esc clears the queue BEFORE abort and restores returned text plus draft', async t => {

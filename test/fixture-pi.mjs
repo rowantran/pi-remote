@@ -18,6 +18,7 @@ if (args.includes('--version')) {
   process.exit(0);
 }
 if (option('--mode') !== 'rpc') throw new Error('Fixture requires --mode rpc');
+if (process.env.PI_FIXTURE_ENV_LOG) appendFileSync(process.env.PI_FIXTURE_ENV_LOG, JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('PI_REMOTE_SESSION')))) + '\n');
 let sessionId = option('--session-id', randomUUID());
 const sessionDir = resolve(option('--session-dir', join(process.cwd(), '.fixture-sessions')));
 let sessionFile = resolve(option('--session', join(sessionDir, `${sessionId}.jsonl`)));

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
 import { mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createConnection, type Socket } from 'node:net';
+import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -93,10 +94,11 @@ async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {
   const dir = await realpath(await mkdtemp('/tmp/pi-remote-test-'));
   const versionFile = join(dir, 'fixture-version');
   const versionLog = join(dir, 'fixture-version-log');
+  const envLog = join(dir, 'fixture-env-log');
   await writeFile(versionFile, hello.piVersion + '\n');
   const supervisor = new Supervisor({ stateDir: dir, executable: process.execPath,
     prefixArgs: [fixture], skipVersionCheck: options.skipVersionCheck ?? true,
-    env: { PI_OFFLINE: '1', PI_FIXTURE_VERSION_FILE: versionFile, PI_FIXTURE_VERSION_LOG: versionLog } });
+    env: { PI_OFFLINE: '1', PI_FIXTURE_VERSION_FILE: versionFile, PI_FIXTURE_VERSION_LOG: versionLog, PI_FIXTURE_ENV_LOG: envLog } });
   const peers: Peer[] = [];
   t.after(async () => {
     await Promise.all(peers.map(peer => peer.close()));
@@ -121,7 +123,7 @@ async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {
     const snapshot = await peer.request<Snapshot>('attach', { slotId: info.id });
     return { info, snapshot };
   };
-  return { dir, supervisor, peer, connect, create, slot, versionFile, versionLog };
+  return { dir, supervisor, peer, connect, create, slot, versionFile, versionLog, envLog };
 }
 const textOf = (message: RecordValue) => message.content.filter((block: RecordValue) => block.type === 'text').map((block: RecordValue) => block.text).join('');
 
@@ -139,6 +141,17 @@ test('private Unix socket, strict hello, and reserved launch arguments', { timeo
     await assert.rejects(peer.request('create', { cwd: dir, args }), /daemon session options/);
   }
   assert.deepEqual(await peer.request('list'), []);
+});
+
+test('each Pi process receives the pi-remote session environment', { timeout: 10_000 }, async t => {
+  const { slot, envLog } = await setup(t);
+  const first = await slot();
+  const second = await slot();
+  const env = (await readFile(envLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(env, [first.info, second.info].map(info => ({
+    PI_REMOTE_SESSION: '1', PI_REMOTE_SESSION_HOST: hostname(),
+    PI_REMOTE_SESSION_SLOT: info.id, PI_REMOTE_SESSION_SLOT_NUMBER: String(info.number),
+  })));
 });
 
 test('disconnect during streaming preserves partial state and completed session history', { timeout: 10_000 }, async t => {
