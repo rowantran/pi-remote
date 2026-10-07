@@ -359,9 +359,9 @@ export class RemoteTui {
   private makeEditor(): Editor {
     return new Editor(this.tui, { borderColor: accent, selectList: getSelectListTheme() }, { paddingX: 0 });
   }
-  private notify(text: string): void {
+  private notify(text: string, kind: 'general' | 'connection' = 'general'): void {
     if (this.detached) return;
-    this.transcript.notify(text); this.tui.requestRender();
+    this.transcript.notify(text, kind); this.tui.requestRender();
   }
   private rpc<T = RecordValue>(command: RecordValue): Promise<T> {
     if (this.detached || !this.connected || this.view.snapshot.slot.status === 'exited') {
@@ -383,10 +383,11 @@ export class RemoteTui {
         this.view.snapshot.presentation = { ...presentation, ...snapshot.presentation };
         this.metadataPending.clear();
         this.transcript.reset();
+        this.transcript.clearConnectionNotices();
         this.displayEvent({ type: 'session_switch', reason: 'reconnect' });
         this.answering.clear();
         this.transcript.invalidate(); this.syncBottom();
-        this.notify('Reattached. Remote history restored; no submitted commands were replayed.');
+        this.notify('Reattached. Remote history restored; no submitted commands were replayed.', 'connection');
         void this.refreshPresentationData();
       }));
       // ReconnectingConnection drains its backlog from onEvent; install snapshot replacement first.
@@ -395,7 +396,7 @@ export class RemoteTui {
         if (this.detached) return;
         this.connected = false; this.generation++;
         // Do not resolve remote dialogs, clear the queue, abort, or replay requests.
-        this.notify(`Connection lost: ${errorText(error)}. Remote work and dialogs remain active. ${this.connection.onReconnect ? 'Reconnecting automatically.' : 'Run attach again to reconnect.'} No commands will be replayed. Ctrl+D detaches.`);
+        this.notify(`Connection lost: ${errorText(error)}. Remote work and dialogs remain active. ${this.connection.onReconnect ? 'Reconnecting automatically.' : 'Run attach again to reconnect.'} No commands will be replayed. Ctrl+D detaches.`, 'connection');
         this.syncBottom();
       }));
       this.unsubscribe.push(this.tui.addInputListener(data => {

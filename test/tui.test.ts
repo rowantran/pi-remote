@@ -191,6 +191,56 @@ test('disconnect preserves remote dialogs and sends no automatic commands; Ctrl+
   terminal.input('\x04'); await finished;
 });
 
+test('starting-slot refresh preserves MCP warnings while learning the initial session identity', async t => {
+  const initial = snapshot(); initial.slot.status = 'starting';
+  const { ui, connection } = launch(t, initial);
+  const rows = () => { ui.tui.renderNow(); return stripTerminalSequences(ui.tui.getScreenLines().join('\n')); };
+  connection.emit(event(1, { type: 'extension_ui_request', method: 'notify', message: 'MCP_STARTUP_WARNING' }));
+  assert.match(rows(), /MCP_STARTUP_WARNING/);
+  const ready = snapshot({ seq: 2, state: { sessionId: 'first-session' } });
+  connection.handler = method => method === 'snapshot' ? ready : {};
+  connection.emit(event(2, { type: 'remote_refresh' })); await flush();
+  assert.match(rows(), /MCP_STARTUP_WARNING/);
+  ready.seq = 3; ready.state.sessionFile = '/remote/first-session.jsonl';
+  connection.emit(event(3, { type: 'remote_refresh' })); await flush();
+  assert.match(rows(), /MCP_STARTUP_WARNING/);
+  ready.seq = 4; ready.state = { sessionId: 'next-session', sessionFile: '/remote/next-session.jsonl' };
+  connection.emit(event(4, { type: 'remote_refresh' })); await flush();
+  assert.doesNotMatch(rows(), /MCP_STARTUP_WARNING/);
+});
+
+test('repeated reconnects clear obsolete connection notices, preserve warnings and do not replay commands', async t => {
+  class ReconnectingFakeConnection extends FakeConnection {
+    reconnected?: (snapshot: Snapshot) => void;
+    onReconnect(listener: (snapshot: Snapshot) => void) {
+      this.reconnected = listener; return () => { this.reconnected = undefined; };
+    }
+  }
+  const initial = snapshot({ ui: [{ id: 'dialog', method: 'input', title: 'Preserved question' }] });
+  initial.live.messages = [{ role: 'user', timestamp: 1, content: 'EARLIER_PROMPT' }];
+  const connection = new ReconnectingFakeConnection();
+  const { ui } = launch(t, initial, connection);
+  const rows = () => { ui.tui.renderNow(); return stripTerminalSequences(ui.tui.getScreenLines().join('\n')); };
+  connection.emit(event(1, { type: 'extension_ui_request', method: 'notify', message: 'MCP_WARNING' }));
+  const restored = structuredClone(initial); restored.seq = 1;
+  restored.live.messages.push({ role: 'user', timestamp: 2, content: 'LATER_PROMPT' });
+  for (let i = 0; i < 3; i++) {
+    connection.disconnect();
+    assert.match(rows(), /Connection lost/);
+    connection.reconnected?.(restored); await flush();
+    const output = rows();
+    assert.doesNotMatch(output, /Connection lost/);
+    assert.equal((output.match(/Reattached\./g) ?? []).length, 1, output);
+    assert.ok(output.indexOf('MCP_WARNING') < output.indexOf('LATER_PROMPT'), output);
+    assert.equal(ui.view.snapshot.ui[0].id, 'dialog');
+  }
+  assert.ok(connection.requests.every(request => request.method === 'filesystem_metadata'
+    || ['get_available_models', 'get_session_stats'].includes(request.params?.command?.type)), JSON.stringify(connection.requests));
+  connection.emit(event(2, { type: 'message_start', message: { role: 'user', timestamp: 3, content: 'NEW_CONVERSATION' } }));
+  const output = rows();
+  assert.ok(output.indexOf('Reattached.') < output.indexOf('NEW_CONVERSATION'), output);
+});
+
 test('Enter and Alt+Enter send steer and followUp, and extension slash commands are prompts', async t => {
   const initial = snapshot(); initial.live.busy = true;
   const { ui, terminal, connection, submit } = launch(t, initial);
