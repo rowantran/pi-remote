@@ -8,6 +8,8 @@ export interface RemoteEvent { type: "event"; slotId: string; seq: number; event
 export type ServerRecord = Result | RemoteEvent;
 export interface SlotInfo {
   id: string;
+  /** Stable positive integer within one daemon's persisted slot catalogue. */
+  number?: number;
   cwd: string;
   createdAt: string;
   pid?: number;
@@ -24,6 +26,7 @@ export interface LiveState {
   tools: Record<string, RecordValue>;
   steering: string[];
   followUp: string[];
+  bash?: Record<string, RecordValue>;
 }
 export interface Snapshot {
   slot: SlotInfo;
@@ -33,12 +36,14 @@ export interface Snapshot {
   live: LiveState;
   ui: RecordValue[];
   seq: number;
+  presentation?: { models?: RecordValue[]; stats?: RecordValue; gitBranch?: string; homeDir?: string; [key: string]: any };
 }
 export interface CreateOptions { cwd: string; args?: string[]; sessionPath?: string }
 export interface RemoteConnection {
   request<T = any>(method: string, params?: RecordValue): Promise<T>;
   onEvent(listener: (event: RemoteEvent) => void): () => void;
   onDisconnect(listener: (error: Error) => void): () => void;
+  onReconnect?(listener: (snapshot: Snapshot) => void): () => void;
   close(): void;
 }
 export function errorText(error: unknown): string {

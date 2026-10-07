@@ -15,6 +15,16 @@ function putMessage(live: LiveState, message: RecordValue) {
 /** Display-only state. Never feeds reconstructed messages back into Pi. */
 export function applyLiveEvent(live: LiveState, event: RecordValue): void {
   switch (event.type) {
+    case 'bash_execution_update': {
+      const id = typeof event.id === 'string' ? event.id : 'bash';
+      if (typeof event.delta !== 'string') break;
+      live.bash ??= {};
+      const current = Object.hasOwn(live.bash, id) ? live.bash[id] : {output: ''};
+      const output = (current.output + event.delta).slice(-131072);
+      Object.defineProperty(live.bash, id, {value: {output}, writable: true, configurable: true, enumerable: true});
+      break;
+    }
+    case 'remote_bash_end': live.bash = {}; break;
     case 'agent_start':
       if (!live.busy) live.messages = [];
       live.busy = true;
@@ -31,8 +41,10 @@ export function applyLiveEvent(live: LiveState, event: RecordValue): void {
       if (!message) break;
       message.usage = event.usage ?? message.usage;
       const update = event.assistantMessageEvent;
+      if (!update || typeof update !== 'object' || typeof update.type !== 'string') break;
       const index = update.contentIndex;
-      if (typeof index !== 'number') break;
+      if (!Number.isInteger(index) || index < 0 || index > 10_000) break;
+      if (update.type.endsWith('_delta') && typeof update.delta !== 'string') break;
       const content = message.content as RecordValue[];
       switch (update.type) {
         case 'text_start': content[index] = { type: 'text', text: '' }; break;
@@ -55,9 +67,14 @@ export function applyLiveEvent(live: LiveState, event: RecordValue): void {
       }
       break;
     }
-    case 'tool_execution_start': case 'tool_execution_update':
-      live.tools[event.toolCallId] = structuredClone(event);
+    case 'tool_execution_start': case 'tool_execution_update': {
+      const id = event.toolCallId;
+      if (typeof id !== 'string') break;
+      Object.defineProperty(live.tools, id, {value: structuredClone(event), writable: true, configurable: true, enumerable: true});
       break;
-    case 'tool_execution_end': delete live.tools[event.toolCallId]; break;
+    }
+    case 'tool_execution_end':
+      if (typeof event.toolCallId === 'string' && Object.hasOwn(live.tools, event.toolCallId)) delete live.tools[event.toolCallId];
+      break;
   }
 }

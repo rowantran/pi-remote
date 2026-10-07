@@ -1,6 +1,6 @@
 {
   "name": "pi-remote",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Local terminal client for persistent, unmodified remote Pi RPC processes",
   "type": "module",
@@ -14,7 +14,8 @@
   "engines": { "node": ">=22.19" },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "1.0.4",
-    "@earendil-works/pi-tui": "1.0.4"
+    "@earendil-works/pi-tui": "1.0.4",
+    "jiti": "2.7.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

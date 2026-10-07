@@ -1,0 +1,26 @@
+#compdef pi-remote
+# Install in a directory in $fpath, then run compinit. No shell config is edited.
+_pi_remote() {
+    local -a tokens values labels directories directory_labels
+    local line value label
+    # (Q) removes quoting only; it does not evaluate command substitutions.
+    tokens=("${(@Q)words[2,CURRENT]}")
+    # (Q) leaves an unfinished quote intact; the CLI handles the raw prefix.
+    tokens[-1]="$PREFIX"
+    while IFS= read -r line; do
+        value=${line%%$'\t'*}
+        label=${line#*$'\t'}
+        if [[ $value == */ ]]; then
+            directories+=("$value")
+            directory_labels+=("$value  $label")
+        else
+            values+=("$value")
+            labels+=("$value  $label")
+        fi
+    done < <(command "${words[1]}" complete --shell zsh --raw-current -- "${tokens[@]}" 2>/dev/null)
+    # Do not use compadd -Q: zsh must quote spaces and shell metacharacters.
+    (( ${#directories} )) && compadd -S '' -d directory_labels -a directories
+    (( ${#values} )) && compadd -d labels -a values
+    return 0
+}
+_pi_remote "$@"

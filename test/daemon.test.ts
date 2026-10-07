@@ -107,7 +107,11 @@ async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {
   const connect = async (verify = true) => {
     const peer = await Peer.connect(socketPath(dir));
     peers.push(peer);
-    if (verify) assert.deepEqual(await peer.request('hello', hello), { ...hello, pid: process.pid });
+    if (verify) {
+      const response = await peer.request('hello', hello);
+      assert.deepEqual({protocol: response.protocol, piVersion: response.piVersion, pid: response.pid}, { ...hello, pid: process.pid });
+      assert.deepEqual(response.capabilities, ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata']);
+    }
     return peer;
   };
   const peer = await connect();

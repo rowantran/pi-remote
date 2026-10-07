@@ -17,7 +17,7 @@ const RESERVED_ARGS = new Set(['--mode', '--print', '-p', '--session', '--sessio
 const QUERY_COMMANDS = new Set(['get_state', 'get_entries', 'get_tree', 'get_messages', 'get_available_models', 'get_session_stats', 'get_fork_messages', 'get_last_assistant_text', 'get_commands', 'get_available_thinking_levels']);
 const RPC_COMMANDS = new Set([...QUERY_COMMANDS, ...SESSION_CHANGES, 'prompt', 'steer', 'follow_up', 'abort', 'clear_queue', 'set_model', 'cycle_model', 'set_thinking_level', 'cycle_thinking_level', 'set_steering_mode', 'set_follow_up_mode', 'compact', 'set_auto_compaction', 'set_auto_retry', 'abort_retry', 'bash', 'abort_bash', 'export_html', 'set_session_name']);
 
-interface StoredSlot { id: string; cwd: string; createdAt: string; args: string[]; sessionFile?: string; sessionName?: string }
+interface StoredSlot { id: string; number?: number; cwd: string; createdAt: string; args: string[]; sessionFile?: string; sessionName?: string }
 interface Slot extends StoredSlot {
   process?: PiProcess;
   status: 'starting' | 'running' | 'exited';
@@ -52,6 +52,7 @@ function expandHome(path: string): string { return path === '~' ? homedir() : pa
 
 export class Supervisor {
   private slots = new Map<string, Slot>();
+  private nextSlotNumber = 1;
   private peers = new Set<Peer>();
   private reservedPaths = new Set<string>();
   private server?: Server;
@@ -65,7 +66,19 @@ export class Supervisor {
     await this.checkVersion();
     try {
       const stored = JSON.parse(await readFile(join(this.stateDir, 'slots.json'), 'utf8')) as StoredSlot[];
-      for (const metadata of stored) this.slots.set(metadata.id, { ...metadata, status: 'exited', error: 'Daemon restarted. Work stopped; session history is on disk. Resume explicitly.', live: emptyLive(), ui: new Map(), timers: new Map(), seq: 0, state: {}, changing: false });
+      const reserved = new Set(stored.filter(slot => Number.isSafeInteger(slot.number) && slot.number! > 0).map(slot => slot.number!));
+      const assigned = new Set<number>();
+      let candidate = 1;
+      for (const metadata of stored) {
+        let number = metadata.number;
+        if (!Number.isSafeInteger(number) || number! <= 0 || assigned.has(number!)) {
+          while (reserved.has(candidate) || assigned.has(candidate)) candidate++;
+          number = candidate++;
+        }
+        assigned.add(number!);
+        this.nextSlotNumber = Math.max(this.nextSlotNumber, number! + 1);
+        this.slots.set(metadata.id, { ...metadata, number, status: 'exited', error: 'Daemon restarted. Work stopped; session history is on disk. Resume explicitly.', live: emptyLive(), ui: new Map(), timers: new Map(), seq: 0, state: {}, changing: false });
+      }
     } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
     this.server = createServer(socket => this.connect(socket));
     await new Promise<void>((accept, reject) => {
@@ -97,7 +110,7 @@ export class Supervisor {
     catch { peer.socket.destroy(); }
   }
   private info(slot: Slot): SlotInfo {
-    return { id: slot.id, cwd: slot.cwd, createdAt: slot.createdAt, pid: slot.status !== 'exited' ? slot.process?.child.pid : undefined, status: slot.status, sessionFile: slot.sessionFile, sessionName: slot.sessionName, error: slot.error, clients: [...this.peers].filter(p => p.slotId === slot.id).length };
+    return { id: slot.id, number: slot.number, cwd: slot.cwd, createdAt: slot.createdAt, pid: slot.status !== 'exited' ? slot.process?.child.pid : undefined, status: slot.status, sessionFile: slot.sessionFile, sessionName: slot.sessionName, error: slot.error, clients: [...this.peers].filter(p => p.slotId === slot.id).length };
   }
   private slot(id: any): Slot {
     const slot = this.slots.get(string(id, 'slotId'));
@@ -177,7 +190,7 @@ export class Supervisor {
     }
   }
   private save(): Promise<void> {
-    const stored: StoredSlot[] = [...this.slots.values()].map(({id,cwd,createdAt,args,sessionFile,sessionName}) => ({id,cwd,createdAt,args,sessionFile,sessionName}));
+    const stored: StoredSlot[] = [...this.slots.values()].map(({id,number,cwd,createdAt,args,sessionFile,sessionName}) => ({id,number,cwd,createdAt,args,sessionFile,sessionName}));
     this.saves = this.saves.catch(() => {}).then(async () => {
       const temp = join(this.stateDir, 'slots.json.tmp');
       await writeFile(temp, JSON.stringify(stored, null, 2) + '\n', { mode: 0o600 });
@@ -214,7 +227,7 @@ export class Supervisor {
     for (const arg of args) if (RESERVED_ARGS.has(arg.split('=')[0]) || arg === '--') throw new Error(`Use daemon session options instead of ${arg}; credentials belong in the remote Pi configuration`);
     const sessionFile = options.sessionPath ? await this.checkPath(options.sessionPath) : undefined;
     if (sessionFile) this.reservedPaths.add(sessionFile);
-    const slot: Slot = { id: randomUUID(), cwd, createdAt: new Date().toISOString(), args, sessionFile, status: 'starting', live: emptyLive(), ui: new Map(), timers: new Map(), seq: 0, state: {}, changing: false };
+    const slot: Slot = { id: randomUUID(), number: this.nextSlotNumber++, cwd, createdAt: new Date().toISOString(), args, sessionFile, status: 'starting', live: emptyLive(), ui: new Map(), timers: new Map(), seq: 0, state: {}, changing: false };
     this.slots.set(slot.id, slot);
     const launch: PiLaunch = { executable: this.options.executable ?? 'pi', prefixArgs: this.options.prefixArgs, cwd, env: this.options.env, args: [...args, ...(sessionFile ? ['--session', sessionFile] : ['--session-id', randomUUID()])] };
     slot.process = new PiProcess(launch, event => this.recordEvent(slot, event), error => {
@@ -268,11 +281,17 @@ export class Supervisor {
       if (request.method === 'hello') {
         if (params.protocol !== PROTOCOL_VERSION || params.piVersion !== PI_VERSION) throw new Error(`Version mismatch: daemon protocol ${PROTOCOL_VERSION}, Pi ${PI_VERSION}`);
         peer.verified = true;
-        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid };
+        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata'] };
       } else {
         if (!peer.verified) throw new Error('Send hello with matching versions first');
         switch (request.method) {
           case 'list': data = [...this.slots.values()].map(slot => this.info(slot)); break;
+          case 'complete_path': case 'read_attachment': case 'filesystem_metadata': {
+            const { serveFileRequest } = await import('./files.js');
+            const cwd = params.slotId ? this.slot(params.slotId).cwd : params.cwd;
+            data = await serveFileRequest(request.method, { ...params, cwd });
+            break;
+          }
           case 'create': data = await this.create(params as CreateOptions); break;
           case 'attach': {
             const slot = this.running(params.slotId);
@@ -319,6 +338,10 @@ export class Supervisor {
                 command.sessionPath = reserved;
               }
               data = await slot.process!.command(command, QUERY_COMMANDS.has(command.type) ? 30_000 : undefined);
+              if (command.type === 'bash' || command.type === 'abort_bash') {
+                this.recordEvent(slot, {type: 'remote_bash_end'});
+                this.publish(slot, {type: 'remote_refresh'});
+              }
               if (!QUERY_COMMANDS.has(command.type)) {
                 // Inspection failure must not turn an accepted mutation into a failure:
                 // otherwise a user may retry a prompt that Pi has already accepted.

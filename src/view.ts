@@ -57,12 +57,14 @@ export function transcriptMessages(snapshot: Snapshot): RecordValue[] {
 
 /** Never sends reconstructed content back to Pi. Completed blocks replace buffered deltas. */
 export function applyAssistantDelta(message: RecordValue, update: RecordValue, usage?: RecordValue): RecordValue {
+  if (!update || typeof update !== 'object' || typeof update.type !== 'string') return message;
   if (update.type === 'done' && update.message) return structuredClone(update.message);
   if (update.type === 'error' && update.error && typeof update.error === 'object') return structuredClone(update.error);
   const next: RecordValue = { ...message, content: [...(Array.isArray(message.content) ? message.content : [])] };
   if (usage) next.usage = structuredClone(usage);
   const index = update.contentIndex;
   if (!Number.isInteger(index) || index < 0 || index > 10000) return next;
+  if (update.type.endsWith('_delta') && typeof update.delta !== 'string') return next;
   const old = next.content[index] ?? {};
   switch (update.type) {
     case 'text_start': next.content[index] = { type: 'text', text: '' }; break;
@@ -104,6 +106,15 @@ export class RemoteView {
     const event = remote.event;
     const live = s.live;
     switch (event.type) {
+      case 'bash_execution_update': {
+        live.bash ??= {};
+        const id = typeof event.id === 'string' ? event.id : 'bash';
+        if (typeof event.delta !== 'string') break;
+        const previous = Object.hasOwn(live.bash, id) ? live.bash[id].output : '';
+        Object.defineProperty(live.bash, id, {value: {output: (previous + event.delta).slice(-131072)}, writable: true, configurable: true, enumerable: true});
+        break;
+      }
+      case 'remote_bash_end': live.bash = {}; break;
       case 'agent_start': live.busy = true; break;
       // agent_end is NOT idle: automatic retries and queued prompts can continue.
       case 'agent_settled': live.busy = false; break;
@@ -125,9 +136,13 @@ export class RemoteView {
         }
         break;
       }
-      case 'tool_execution_start': case 'tool_execution_update': case 'tool_execution_end':
-        live.tools[event.toolCallId] = { ...live.tools[event.toolCallId], ...structuredClone(event) };
+      case 'tool_execution_start': case 'tool_execution_update': case 'tool_execution_end': {
+        const id = event.toolCallId;
+        if (typeof id !== 'string') break;
+        const previous = Object.hasOwn(live.tools, id) ? live.tools[id] : undefined;
+        Object.defineProperty(live.tools, id, {value: { ...previous, ...structuredClone(event) }, writable: true, configurable: true, enumerable: true});
         break;
+      }
       case 'entry_appended':
         if (event.entry && !s.entries.some(entry => entry.id === event.entry.id)) {
           s.entries.push(structuredClone(event.entry));

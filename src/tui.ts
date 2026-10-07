@@ -1,9 +1,14 @@
+import { readAttachment } from './files.js';
+import { readLocalClipboard, editLocally } from './local-input.js';
+import { PresentationHost, readPresentationConfig, createPresentationTheme, type PresentationToolContext } from './presentation.js';
+import { loadLocalTheme } from './local-theme.js';
+import { RemoteAutocompleteProvider, transformPromptWithAttachments } from './editor-completion.js';
 import {
   copyToClipboard, getMarkdownTheme, getSelectListTheme, initTheme,
-  type SessionInfo,
+  type SessionInfo, type Theme,
 } from '@earendil-works/pi-coding-agent';
 import {
-  type Component, Container, Editor, type Focusable, fuzzyFilter, Input, isKeyRelease, Key,
+  type Component, Container, Editor, type Focusable, fuzzyFilter, getKeybindings, Input, isKeyRelease, Key,
   Markdown, matchesKey, ProcessTerminal, ScrollView, SelectList, type SelectItem,
   Text, type Terminal, TuiAltScreen, truncateToWidth, VStack, wrapTextWithAnsi,
 } from '@earendil-works/pi-tui';
@@ -27,9 +32,13 @@ Esc: cancel the dialog, or clear the prompt queue then abort; queue text returns
 Ctrl+O: expand/collapse tool output. Ctrl+T: show/hide thinking.
 PageUp/PageDown: transcript scroll. Ctrl+End: follow output. Ctrl+Shift+F: transcript search.
 /detach /help /model /new /fork /resume /session /copy /name <name> /compact [instructions]
-After connection loss: Ctrl+D, then run the same CLI attach command again.
+Connection loss: automatically reattach when enabled; never replay submitted commands.
+@remote/path attaches remote text/images. /attach LOCAL_PATH attaches a local file.
+Ctrl+V /paste: local clipboard files, image, or text. Ctrl+G /editor: local external editor.
+!command runs on the remote host; !!command excludes its output from model context.
+/thinking /export [remote path] /reload-ui /theme NAME are local client commands.
 Unknown slash commands go to remote Pi (extensions, skills, templates).
-Display-only local extension loading and custom renderers are a later milestone.
+Trusted local presentation extensions are opt-in with --ui-extension or --ui-config.
 No commands are restarted or replayed after a disconnect.`;
 
 /** Keep the full document on detach; a zero transcript basis applies only to the viewport. */
@@ -62,28 +71,55 @@ class Dialog extends Container implements Focusable {
 
 class MessageDisplay implements Component {
   private children: Component[] = [];
-  constructor(message: RecordValue, expanded: boolean, thinking: boolean) {
+  constructor(message: RecordValue, expanded: boolean, thinking: boolean, host?: PresentationHost,
+    tool?: (id: string) => Component | undefined, usedTools = new Set<string>()) {
     const text = (value: unknown, color = (s: string) => s) => this.children.push(new Text(color(safeText(value)), 0, 0));
-    const markdown = (value: unknown) => this.children.push(new Markdown(safeText(value), 0, 0, getMarkdownTheme()));
+    const markdown = (value: unknown, messageType: 'user' | 'assistant' | 'assistant-thinking' = 'assistant') => {
+      let component: Markdown | undefined; let lastWidth: number | undefined;
+      this.children.push({ render(width) {
+        if (!component || lastWidth !== width) {
+          const source = safeText(value);
+          const transformed = host?.transformMarkdown(source, { messageType, isStreaming: message.stopReason === 'pending', availableWidth: width }) ?? source;
+          component = new Markdown(transformed, 0, 0, getMarkdownTheme()); lastWidth = width;
+        }
+        return component.render(width);
+      }, invalidate() { component = undefined; } });
+    };
+    const appendTool = (id: string): boolean => {
+      if (usedTools.has(id)) return true;
+      const component = tool?.(id);
+      if (!component) return false;
+      usedTools.add(id); this.children.push(component); return true;
+    };
     switch (message.role) {
       case 'system': return;
-      case 'custom': if (message.display === false) return;
+      case 'entry': {
+        const component = host?.renderEntry(message, { expanded });
+        if (component) { this.children.push(component); break; }
+        text(message.content ?? `Session entry: ${message.customType ?? 'custom'} (renderer not loaded)`, muted); break;
+      }
+      case 'custom': {
+        if (message.display === false) return;
+        const component = host?.renderMessage(message, { expanded, outputPad: 0 });
+        if (component) { this.children.push(component); break; }
         text(`[${message.customType ?? 'extension'}]`, accent); markdown(contentText(message.content)); break;
-      case 'user': text('You', accent); text(contentText(message.content)); break;
+      }
+      case 'user': text('You', accent); markdown(contentText(message.content), 'user'); break;
       case 'assistant':
         text('Pi', accent);
         for (const block of Array.isArray(message.content) ? message.content : []) {
           if (!block) continue;
           if (block.type === 'text') markdown(block.text);
           else if (block.type === 'thinking') {
-            if (thinking) text(block.thinking || '[redacted thinking]', muted);
-            else text('Thinking (Ctrl+T to show)', muted);
-          } else if (block.type === 'toolCall') text(toolHeading(block.name, block.arguments, block.argumentText), muted);
+            if (thinking) markdown(block.thinking || '[redacted thinking]', 'assistant-thinking');
+            else text(host?.hiddenThinkingLabel ?? 'Thinking (Ctrl+T to show)', muted);
+          } else if (block.type === 'toolCall' && !appendTool(block.id)) text(toolHeading(block.name, block.arguments, block.argumentText), muted);
         }
         if (message.errorMessage) text(message.errorMessage, errorColor);
         if (message.stopReason === 'aborted') text('Aborted', warning);
         break;
       case 'toolResult':
+        if (appendTool(message.toolCallId)) break;
         text(`${message.isError ? '✗' : '✓'} ${message.toolName ?? 'tool'}`, message.isError ? errorColor : muted);
         this.children.push(new ToolOutput(toolText(message), expanded)); break;
       case 'bashExecution':
@@ -126,31 +162,52 @@ class ToolOutput implements Component {
 }
 
 class Transcript implements Component {
-  private cache = new WeakMap<RecordValue, MessageDisplay>();
   private cachedLines?: string[];
   private cachedWidth?: number;
   expanded = false;
   thinking = false;
   readonly notices: string[] = [];
-  constructor(private view: RemoteView) {}
+  constructor(private view: RemoteView, private presentation: () => PresentationHost | undefined = () => undefined) {}
   changed(): void { this.cachedLines = undefined; }
-  invalidate(): void { this.cache = new WeakMap(); this.changed(); }
+  invalidate(): void { this.changed(); }
   notify(message: string): void { this.notices.push(safeText(message)); if (this.notices.length > 50) this.notices.shift(); this.changed(); }
   render(width: number): string[] {
     if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
     const messages = transcriptMessages(this.view.snapshot);
-    const lines: string[] = [];
+    const host = this.presentation();
+    const tools = new Map<string, RecordValue>();
     for (const message of messages) {
-      let component = this.cache.get(message);
-      if (!component) { component = new MessageDisplay(message, this.expanded, this.thinking); this.cache.set(message, component); }
-      lines.push(...component.render(width));
+      if (message.role === 'assistant') for (const block of Array.isArray(message.content) ? message.content : []) {
+        if (block?.type === 'toolCall' && block.id) tools.set(block.id, { name: block.name, args: block.arguments, argsComplete: message.stopReason !== 'pending' });
+      }
     }
-    const finished = new Set(messages.filter(message => message.role === 'toolResult').map(message => message.toolCallId));
-    for (const tool of Object.values(this.view.snapshot.live.tools)) {
-      if (finished.has(tool.toolCallId)) continue;
-      const ended = tool.type === 'tool_execution_end';
-      lines.push(truncateToWidth(muted(`${ended ? (tool.isError ? '✗' : '✓') : '⋯'} ${toolHeading(tool.toolName, tool.args)}`), width, ''));
-      lines.push(...new ToolOutput(toolText(tool.result ?? tool.partialResult), this.expanded).render(width));
+    for (const live of Object.values(this.view.snapshot.live.tools)) tools.set(live.toolCallId, {
+      ...tools.get(live.toolCallId), name: live.toolName, args: live.args ?? tools.get(live.toolCallId)?.args,
+      result: live.result ?? live.partialResult, isPartial: live.type !== 'tool_execution_end', isError: !!live.isError, executionStarted: true, argsComplete: true,
+    });
+    for (const message of messages) if (message.role === 'toolResult') tools.set(message.toolCallId, {
+      ...tools.get(message.toolCallId), name: message.toolName, result: message, isPartial: false, isError: !!message.isError, executionStarted: true, argsComplete: true,
+    });
+    host?.retainToolCalls(tools.keys());
+    const used = new Set<string>();
+    const displayTool = (id: string): Component | undefined => {
+      const tool = tools.get(id); if (!tool) return undefined;
+      const context: PresentationToolContext = { toolCallId: id, args: tool.args ?? {}, expanded: this.expanded,
+        isPartial: tool.isPartial ?? !tool.result, isError: !!tool.isError, executionStarted: !!tool.executionStarted, argsComplete: !!tool.argsComplete };
+      // Build both slots before rendering either: compact result renderers update shared call state.
+      const call = host?.renderCall(tool.name, context.args, context);
+      const result = tool.result && host?.renderResult(tool.name, tool.result, { expanded: this.expanded, isPartial: !!context.isPartial }, context);
+      const children: Component[] = [call ?? new Text(muted(`${tool.isError ? '✗' : tool.result && !context.isPartial ? '✓' : '⋯'} ${toolHeading(tool.name, tool.args)}`), 0, 0)];
+      if (result) children.push(result);
+      else if (tool.result) children.push(new ToolOutput(toolText(tool.result), this.expanded));
+      return { render: width => children.flatMap(child => child.render(width)), invalidate: () => children.forEach(child => child.invalidate()) };
+    };
+    const lines: string[] = host?.header?.render(width) ?? [];
+    for (const message of messages) lines.push(...new MessageDisplay(message, this.expanded, this.thinking, host, displayTool, used).render(width));
+    for (const id of tools.keys()) if (!used.has(id)) lines.push(...(displayTool(id)?.render(width) ?? []));
+    for (const shell of Object.values(this.view.snapshot.live.bash ?? {})) {
+      lines.push(muted('⋯ Remote shell'));
+      lines.push(...new ToolOutput(safeText(shell.output), this.expanded).render(width));
     }
     for (const notice of this.notices) lines.push(...wrapTextWithAnsi(warning(notice), Math.max(1, width)));
     this.cachedWidth = width;
@@ -158,10 +215,12 @@ class Transcript implements Component {
   }
 }
 
+export interface TuiOptions { presentationPaths?: string[]; presentationConfig?: string; theme?: string }
+
 /** Exported for terminal-adapter tests; uses only the public pi-tui API. */
 export class RemoteTui {
   readonly view: RemoteView;
-  readonly editor: Editor;
+  editor: Editor;
   readonly tui: TuiAltScreen;
   private transcript: Transcript;
   private bottom = new VStack();
@@ -183,22 +242,164 @@ export class RemoteTui {
   private started = false;
   private appliedEditorId?: string;
   private appliedTitle?: string;
+  private bashRunning = false;
+  private pendingAttachments: Awaited<ReturnType<typeof readAttachment>>[] = [];
+  private editorHistory: string[] = [];
+  private completion?: RemoteAutocompleteProvider;
+  private metadataTimer?: NodeJS.Timeout;
+  presentation?: PresentationHost;
+  private localTheme: Theme = createPresentationTheme();
+  private initialized = false;
+  private presentationQueued = false;
+  private appliedEditorFactory?: PresentationHost['editorFactory'];
+  private metadataPending = new Set<string>();
+  private lifecycle = Promise.resolve();
+  private localInputPending = false;
+  private externalEditorActive = false;
 
   constructor(private connection: RemoteConnection, private slotId: string, snapshot: Snapshot,
-    terminal: Terminal = new ProcessTerminal()) {
-    initTheme(undefined, false); // No session, extensions, providers, or remote resources are loaded locally.
+    terminal: Terminal = new ProcessTerminal(), private options: TuiOptions = {}) {
+    initTheme(options.theme, false); // No session, extensions, providers, or remote resources are loaded locally.
     this.view = new RemoteView(snapshot);
     this.tui = new TuiAltScreen(terminal, true, undefined, { copySelection: async text => {
       try { await copyToClipboard(text); return true; } catch (error) { return errorText(error); }
     } });
     this.editor = this.makeEditor();
     this.editor.onSubmit = text => { void this.submit(text, 'steer'); };
-    this.transcript = new Transcript(this.view);
+    this.transcript = new Transcript(this.view, () => this.presentation);
     this.root = new DocumentLayout([
       { component: new ScrollView(this.transcript, { primary: true, follow: 'end', scrollbar: 'auto' }), basis: 0, grow: 1, minSize: 1 },
       { component: this.bottom, basis: 'auto', shrink: 1, minSize: 1 },
     ]);
     this.tui.setLayoutRoot(this.root);
+  }
+
+  /** Local module loading only. Remote metadata reads are deliberately not awaited. */
+  async initialize(): Promise<void> {
+    if (this.initialized || this.detached) return;
+    this.initialized = true;
+    this.completion = new RemoteAutocompleteProvider({
+      getCommands: () => this.rpc({ type: 'get_commands' }),
+      completePath: prefix => this.connection.request('complete_path', { slotId: this.slotId, prefix }),
+      localCommands: ['attach', 'clear-attachments', 'detach', 'help', 'model', 'new', 'fork', 'resume', 'session', 'copy', 'name', 'compact', 'thinking', 'export', 'reload-ui', 'theme', 'tool-call', 'paste', 'editor'].map(name => ({ name })),
+    });
+    this.editor.setAutocompleteProvider(this.completion);
+    try { await this.reloadPresentation(); }
+    catch (error) { this.notify(`Local presentation initialization failed: ${errorText(error)}`); }
+    if (this.detached) return;
+    this.refreshPresentationData();
+    this.metadataTimer = setInterval(() => this.refreshPresentationData(), 15_000);
+    this.metadataTimer.unref();
+  }
+
+  private async reloadPresentation(): Promise<void> {
+    const config = await readPresentationConfig(this.options.presentationConfig, this.options.presentationPaths);
+    const theme = await loadLocalTheme(this.options.theme ?? config.theme);
+    if (this.detached) return;
+    await this.presentation?.shutdown();
+    this.localTheme = theme;
+    this.appliedEditorFactory = undefined;
+    const host = new PresentationHost({
+      snapshot: () => this.view.snapshot, tui: this.tui, theme: () => this.localTheme,
+      notify: message => this.notify(message), invalidate: () => this.presentationChanged(),
+      getEditorText: () => this.editor.getExpandedText(), setEditorText: text => this.editor.setText(text),
+      getToolsExpanded: () => this.transcript.expanded,
+      setToolsExpanded: expanded => { this.transcript.expanded = expanded; },
+      setTitle: title => this.tui.terminal.setTitle(safeText(title).replace(/\n/g, ' ')),
+    });
+    this.presentation = host;
+    await host.load(config.extensions);
+    if (this.detached) { await host.shutdown(); return; }
+    await host.start();
+    if (this.view.snapshot.live.busy) await host.dispatch({ type: 'agent_start' });
+    this.installEditor(true);
+    this.completion?.invalidateCommands();
+    this.presentationChanged();
+  }
+
+  private installEditor(force = false): void {
+    const factory = this.presentation?.editorFactory;
+    if (!force && factory === this.appliedEditorFactory) return;
+    const previous = this.editor;
+    const text = previous.getExpandedText();
+    const next = factory?.(this.tui, { borderColor: text => this.localTheme.fg('borderMuted', text), selectList: getSelectListTheme() }, getKeybindings() as unknown as Parameters<NonNullable<PresentationHost['editorFactory']>>[2]) ?? this.makeEditor();
+    // Pi's public editor contract is supported; the selected stable extension subclasses Editor.
+    this.editor = next as Editor;
+    this.editor.setText(text);
+    for (const item of this.editorHistory) this.editor.addToHistory(item);
+    this.editor.onSubmit = value => { void this.submit(value, 'steer'); };
+    if (this.completion) this.editor.setAutocompleteProvider(this.completion);
+    this.appliedEditorFactory = factory;
+    if (previous !== next) (previous as Editor & { dispose?(): void }).dispose?.();
+  }
+
+  private presentationChanged(): void {
+    this.transcript.invalidate();
+    if (this.presentationQueued || this.detached) return;
+    this.presentationQueued = true;
+    queueMicrotask(() => {
+      this.presentationQueued = false;
+      if (this.detached) return;
+      this.installEditor(); this.syncBottom();
+    });
+  }
+
+  private displayEvent(event: RecordValue): void {
+    const host = this.presentation;
+    if (!host) return;
+    host.update(this.view.snapshot);
+    this.lifecycle = this.lifecycle.then(() => host.dispatch(event)).catch(error => this.notify(`Presentation event: ${errorText(error)}`));
+  }
+
+  /** Separate best-effort reads: an unavailable model catalogue cannot delay branch or usage data. */
+  private refreshPresentationData(): void {
+    if (!this.initialized || this.detached || !this.connected) return;
+    const generation = this.generation;
+    const read = (key: string, request: () => Promise<any>, apply: (value: any) => void) => {
+      if (this.metadataPending.has(key)) return;
+      this.metadataPending.add(key);
+      void request().then(value => {
+        if (this.detached || generation !== this.generation) return;
+        this.view.snapshot.presentation ??= {};
+        apply(value); this.presentation?.update(this.view.snapshot);
+      }).catch(() => { /* Optional display metadata must never interfere with remote work. */ })
+        .finally(() => this.metadataPending.delete(key));
+    };
+    read('stats', () => this.rpc({ type: 'get_session_stats' }), value => { this.view.snapshot.presentation!.stats = value; });
+    if (!this.view.snapshot.presentation?.models?.length) read('models', () => this.rpc({ type: 'get_available_models' }), value => {
+      if (Array.isArray(value.models)) this.view.snapshot.presentation!.models = value.models;
+    });
+    read('filesystem', () => this.connection.request('filesystem_metadata', { slotId: this.slotId }), value => {
+      if ('gitBranch' in value) this.view.snapshot.presentation!.gitBranch = value.gitBranch;
+      if (typeof value.homeDir === 'string') this.view.snapshot.presentation!.homeDir = value.homeDir;
+    });
+  }
+
+  private async pasteLocal(): Promise<void> {
+    if (this.localInputPending || this.activeRemote || this.localDialog || this.detached) return;
+    this.localInputPending = true;
+    try {
+      const paste = await readLocalClipboard();
+      if (this.detached) return;
+      if (this.pendingAttachments.length + paste.attachments.length > 8) throw new Error('At most eight pending attachments');
+      this.pendingAttachments.push(...paste.attachments);
+      if (paste.text) this.editor.setText(this.editor.getExpandedText() + paste.text);
+      this.syncBottom();
+    } catch (error) { this.notify(`Local paste failed: ${errorText(error)}`); }
+    finally { this.localInputPending = false; }
+  }
+
+  private async externalEditor(): Promise<void> {
+    if (this.localInputPending || this.activeRemote || this.localDialog || this.detached) return;
+    this.localInputPending = true; this.externalEditorActive = true;
+    const draft = this.editor.getExpandedText();
+    this.tui.stop();
+    try { const text = await editLocally(draft); if (!this.detached) this.editor.setText(text); }
+    catch (error) { this.notify(`Local editor failed: ${errorText(error)}`); }
+    finally {
+      this.externalEditorActive = false; this.localInputPending = false;
+      if (!this.detached) { this.syncBottom(); this.tui.start(); }
+    }
   }
 
   private makeEditor(): Editor {
@@ -220,12 +421,27 @@ export class RemoteTui {
     this.started = true;
     return new Promise<void>((resolve, reject) => {
       this.finish = resolve;
+      if (this.connection.onReconnect) this.unsubscribe.push(this.connection.onReconnect(snapshot => {
+        if (this.detached) return;
+        this.connected = true; this.generation++;
+        const presentation = this.view.snapshot.presentation;
+        this.view.replace(snapshot);
+        this.view.snapshot.presentation = { ...presentation, ...snapshot.presentation };
+        this.metadataPending.clear();
+        this.presentation?.retainToolCalls([]);
+        this.displayEvent({ type: 'session_switch', reason: 'reconnect' });
+        this.answering.clear();
+        this.transcript.invalidate(); this.syncBottom();
+        this.notify('Reattached. Remote history restored; no submitted commands were replayed.');
+        void this.refreshPresentationData();
+      }));
+      // ReconnectingConnection drains its backlog from onEvent; install snapshot replacement first.
       this.unsubscribe.push(this.connection.onEvent(event => this.onEvent(event)));
       this.unsubscribe.push(this.connection.onDisconnect(error => {
         if (this.detached) return;
         this.connected = false; this.generation++;
         // Do not resolve remote dialogs, clear the queue, abort, or replay requests.
-        this.notify(`Connection lost: ${errorText(error)}. Remote work and dialogs remain active. No commands will be replayed. Press Ctrl+D, then run the same CLI attach command again.`);
+        this.notify(`Connection lost: ${errorText(error)}. Remote work and dialogs remain active. ${this.connection.onReconnect ? 'Reconnecting automatically.' : 'Run attach again to reconnect.'} No commands will be replayed. Ctrl+D detaches.`);
         this.syncBottom();
       }));
       this.unsubscribe.push(this.tui.addInputListener(data => {
@@ -234,7 +450,7 @@ export class RemoteTui {
         if (matchesKey(data, Key.escape)) {
           if (this.activeRemote) void this.answerDialog(this.activeRemote.id, { cancelled: true });
           else if (this.localDialog) this.localDialog.cancel();
-          else if (this.view.snapshot.live.busy || this.view.snapshot.live.compacting || this.hasQueue()) void this.interrupt();
+          else if (this.view.snapshot.live.busy || this.view.snapshot.live.compacting || this.hasQueue() || this.bashRunning || Object.keys(this.view.snapshot.live.bash ?? {}).length) void this.interrupt();
           return { consume: true };
         }
         if (!this.activeRemote && !this.localDialog && matchesKey(data, Key.alt('enter'))) {
@@ -245,6 +461,14 @@ export class RemoteTui {
         }
         if (matchesKey(data, Key.ctrl('t'))) {
           this.transcript.thinking = !this.transcript.thinking; this.transcript.invalidate(); this.tui.requestRender(); return { consume: true };
+        }
+        if (!this.activeRemote && !this.localDialog) {
+          if (matchesKey(data, Key.ctrl('v'))) { void this.pasteLocal(); return { consume: true }; }
+          if (matchesKey(data, Key.ctrl('g'))) { void this.externalEditor(); return { consume: true }; }
+          if (matchesKey(data, Key.ctrl('l'))) { void this.builtin('/model', '').catch(error => this.notify(errorText(error))); return { consume: true }; }
+          if (matchesKey(data, Key.ctrl('p'))) { void this.rpc({ type: 'cycle_model' }).then(() => this.refresh()).catch(error => this.notify(errorText(error))); return { consume: true }; }
+          if (matchesKey(data, Key.shift('tab'))) { void this.rpc({ type: 'cycle_thinking_level' }).then(() => this.refresh()).catch(error => this.notify(errorText(error))); return { consume: true }; }
+          if (this.presentation?.hasShortcut(data)) { void this.presentation.shortcut(data); return { consume: true }; }
         }
         return undefined;
       }));
@@ -259,6 +483,8 @@ export class RemoteTui {
   detach(): void {
     if (this.detached) return;
     this.detached = true; this.generation++;
+    clearInterval(this.metadataTimer);
+    void this.presentation?.shutdown();
     for (const unsubscribe of this.unsubscribe.splice(0)) unsubscribe();
     // Cancel only a LOCAL picker promise. Never answer a remote dialog on detach.
     this.localDialog?.cancel();
@@ -270,16 +496,22 @@ export class RemoteTui {
   private onEvent(event: RemoteEvent): void {
     if (this.detached || event.slotId !== this.slotId) return;
     const gap = event.seq > this.view.snapshot.seq + 1;
+    // Legacy daemons lack remote_bash_end. A completed shell record increases
+    // messageCount; refresh its history rather than retaining stale live output.
+    const legacyBashFinished = event.event.type === 'remote_state' && !this.refreshing
+      && Object.keys(this.view.snapshot.live.bash ?? {}).length > 0
+      && event.event.state?.messageCount > (this.view.snapshot.state.messageCount ?? 0);
     if (this.refreshing) this.journal.push(event);
     if (!this.view.apply(event)) return;
     this.transcript.changed();
+    this.displayEvent(event.event);
     if (event.event.type === 'extension_ui_request' && event.event.method === 'notify') this.notify(event.event.message ?? '');
     if (event.event.type === 'extension_error') this.notify(`Extension error: ${event.event.error}`);
     if (event.event.type === 'remote_warning') this.notify(`Remote warning: ${event.event.error ?? event.event.message ?? 'State inspection failed; remote work is preserved.'}`);
     if (event.event.type === 'auto_retry_start') this.notify(`Pi retry ${event.event.attempt}: ${event.event.errorMessage ?? ''}`);
     if (event.event.type === 'remote_slot_exit') this.notify(`Remote Pi exited${event.event.error ? `: ${event.event.error}` : ''}. Ctrl+D detaches.`);
     this.syncBottom();
-    if (gap || event.event.type === 'remote_refresh' || event.event.type === 'agent_settled' || event.event.type === 'compaction_end') {
+    if (gap || legacyBashFinished || event.event.type === 'remote_refresh' || event.event.type === 'agent_settled' || event.event.type === 'compaction_end') {
       void this.refresh().catch(error => this.notify(`Snapshot refresh failed: ${errorText(error)}`));
     }
   }
@@ -294,8 +526,12 @@ export class RemoteTui {
       try {
         const snapshot = await this.connection.request<Snapshot>('snapshot', { slotId: this.slotId });
         if (this.detached || generation !== this.generation) return;
+        const presentation = this.view.snapshot.presentation;
         this.view.replace(snapshot, this.journal);
+        this.view.snapshot.presentation = { ...presentation, ...snapshot.presentation };
+        this.presentation?.update(this.view.snapshot);
         this.transcript.invalidate(); this.syncBottom();
+        void this.refreshPresentationData();
       } finally {
         this.refreshPromise = undefined; this.refreshing = false; this.journal = [];
         if (this.refreshAgain) {
@@ -317,6 +553,7 @@ export class RemoteTui {
       this.editor.setText(restoredQueueText(queue ?? {}, this.editor.getExpandedText()));
       this.view.snapshot.live.steering = []; this.view.snapshot.live.followUp = [];
       this.syncBottom();
+      if (this.bashRunning || Object.keys(this.view.snapshot.live.bash ?? {}).length) await this.rpc({ type: 'abort_bash' });
       await this.rpc({ type: 'abort' });
     } catch (error) { this.notify(`Interrupt failed: ${errorText(error)}. Nothing will be retried automatically.`); }
     finally { this.interruptPending = false; }
@@ -363,7 +600,7 @@ export class RemoteTui {
   }
 
   private syncBottom(): void {
-    if (this.detached) return;
+    if (this.detached || this.externalEditorActive) return;
     const ui = this.view.snapshot.ui;
     const editorText = ui.find(record => record.method === 'set_editor_text');
     if (editorText && editorText.id !== this.appliedEditorId) {
@@ -379,16 +616,25 @@ export class RemoteTui {
     }
     this.bottom.clear();
     const widget = (placement: string) => {
-      for (const record of ui) if (record.method === 'setWidget' && (record.widgetPlacement ?? 'aboveEditor') === placement && record.widgetLines?.length) {
+      for (const record of ui) if (record.method === 'setWidget' && (record.widgetPlacement ?? 'aboveEditor') === placement && record.widgetLines?.length && !this.presentation?.widgets.has(record.widgetKey)) {
         this.bottom.addChild(new Text(record.widgetLines.map(safeText).join('\n'), 0, 0));
       }
+      for (const local of this.presentation?.widgets.values() ?? []) if (local.placement === placement) this.bottom.addChild(local.component);
     };
     widget('aboveEditor');
     this.bottom.addChild(new DynamicLines(width => this.queueLines(width)));
+    if (this.pendingAttachments.length) this.bottom.addChild(new Text(muted(`Attached: ${this.pendingAttachments.map(file => safeText(file.path)).join(', ')} · /clear-attachments to remove`), 0, 0));
     const control = this.activeRemote?.component ?? this.localDialog?.component ?? this.editor;
     this.bottom.addChild(control);
     widget('belowEditor');
-    this.bottom.addChild(new DynamicLines(() => [this.footer(), muted('Enter steer · Alt+Enter follow-up · Esc cancel/abort · Ctrl+D detach · /help')]));
+    if (this.presentation?.footer) {
+      if (!this.connected || this.view.snapshot.slot.status !== 'running') this.bottom.addChild(new Text(this.footer(), 0, 0));
+      this.bottom.addChild(this.presentation.footer);
+    } else this.bottom.addChild(new DynamicLines(() => [this.footer()]));
+    if (this.view.snapshot.live.busy && this.presentation?.workingVisible !== false) {
+      this.bottom.addChild(new Text(this.presentation?.workingMessage ?? muted('Working…'), 0, 0));
+    }
+    this.bottom.addChild(new Text(muted('Enter steer · Alt+Enter follow-up · Esc cancel/abort · Ctrl+D detach · /help'), 0, 0));
     this.tui.setFocus(control); this.tui.requestRender();
   }
 
@@ -464,10 +710,28 @@ export class RemoteTui {
     if (command === '/help') { this.editor.setText(''); this.notify(HELP); return; }
     if (this.commandPending) { this.restoreSubmission(text); this.notify('A local command is still pending. Your text remains in the editor.'); return; }
     this.editor.setText(''); this.editor.addToHistory(text);
+    this.editorHistory.push(text); if (this.editorHistory.length > 100) this.editorHistory.shift();
     this.commandPending = true;
     try {
-      const handled = await this.builtin(command, args);
-      if (!handled) await this.rpc({ type: 'prompt', message: text, streamingBehavior });
+      if (text.startsWith('!')) {
+        this.bashRunning = true;
+        try {
+          await this.rpc({type: 'bash', command: text.slice(text.startsWith('!!') ? 2 : 1), excludeFromContext: text.startsWith('!!')});
+          await this.refresh();
+        } finally { this.bashRunning = false; }
+      } else {
+        const handled = await this.builtin(command, args) || (command.startsWith('/') && await this.presentation?.command(command, args));
+        if (!handled) {
+          const prepared = await transformPromptWithAttachments(text, path => this.connection.request('read_attachment', {slotId: this.slotId, path}));
+          const attachments = this.pendingAttachments;
+          const localText = attachments.filter(file => file.text !== undefined).map(file => `\n\nAttached local file ${file.path}:\n${file.text}`).join('');
+          const images = [...(prepared.images ?? []), ...attachments.flatMap(file => file.image ? [file.image] : [])];
+          const prompt = { type: 'prompt', message: prepared.message + localText, ...(images.length ? {images} : {}), streamingBehavior };
+          if (Buffer.byteLength(JSON.stringify(prompt), 'utf8') > 24 * 1024 * 1024) throw new Error('Combined prompt and attachments exceed 24 MiB; nothing was sent');
+          await this.rpc(prompt);
+          this.pendingAttachments = [];
+        }
+      }
     } catch (error) {
       this.notify(`Request failed: ${errorText(error)}. After connection loss, its remote outcome can be unknown. Nothing will be replayed; attach again and check the session before resending.`);
       if (!this.detached) this.restoreSubmission(text);
@@ -476,6 +740,38 @@ export class RemoteTui {
 
   private async builtin(command: string, args: string): Promise<boolean> {
     switch (command) {
+      case '/paste': await this.pasteLocal(); return true;
+      case '/editor': await this.externalEditor(); return true;
+      case '/reload-ui': await this.reloadPresentation(); this.notify('Local presentation reloaded. Remote Pi was not changed.'); return true;
+      case '/reload': this.notify('Stock Pi RPC cannot reload its remote harness. Use /reload-ui to reload local presentation only; remote Pi is not restarted.'); return true;
+      case '/theme': {
+        if (!args) this.notify(`Local theme: ${this.localTheme.name ?? 'system'}. Usage: /theme NAME`);
+        else { const theme = await loadLocalTheme(args); this.options.theme = args; this.localTheme = theme; await this.reloadPresentation(); }
+        return true;
+      }
+      case '/attach': {
+        if (!args) this.notify('Usage: /attach LOCAL_PATH (remote files use @path in the prompt)');
+        else {
+          const file = await readAttachment({path: args.replace(/^"(.*)"$/, '$1'), cwd: process.cwd()});
+          if (this.pendingAttachments.length >= 8) throw new Error('At most eight pending attachments');
+          this.pendingAttachments.push(file);
+          this.notify(`Attached local file: ${file.path}`);
+        }
+        return true;
+      }
+      case '/clear-attachments': this.pendingAttachments = []; this.syncBottom(); return true;
+      case '/thinking': {
+        const data = await this.rpc({type:'get_available_thinking_levels'});
+        const level = args || await this.choose('Thinking level', (data.levels ?? []).map((value:string) => ({value,label:value})));
+        if (level !== undefined) { await this.rpc({type:'set_thinking_level',level}); await this.refresh(); }
+        return true;
+      }
+      case '/export': {
+        const result = await this.rpc({type:'export_html', ...(args ? {outputPath:args} : {})});
+        this.notify(`Exported on the remote host: ${result.path}`); return true;
+      }
+      case '/tree': this.notify('Pi RPC has no in-place tree-navigation command. Use /fork to branch from an earlier prompt.'); return true;
+      case '/login': case '/settings': this.notify('Configure the remote harness with normal Pi over SSH. The local client does not change provider credentials or remote settings directly.'); return true;
       case '/model': {
         const data = await this.rpc({ type: 'get_available_models' });
         const models: RecordValue[] = data.models ?? [];
@@ -529,7 +825,11 @@ export class RemoteTui {
 }
 
 /** Attach is the caller's responsibility. Closing this UI only closes the local transport. */
-export async function runTui(connection: RemoteConnection, slotId: string, initialSnapshot: Snapshot): Promise<void> {
+export async function runTui(connection: RemoteConnection, slotId: string, initialSnapshot: Snapshot, options: TuiOptions = {}): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('The remote terminal UI requires a terminal for stdin and stdout.');
-  await new RemoteTui(connection, slotId, initialSnapshot).run();
+  const client = new RemoteTui(connection, slotId, initialSnapshot, new ProcessTerminal(), options);
+  // Start input and outstanding startup dialogs before any trusted extension factory can await.
+  const finished = client.run();
+  void client.initialize();
+  await finished;
 }

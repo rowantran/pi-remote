@@ -2,48 +2,78 @@
 
 Type locally while an **unmodified Pi coding agent runs on a remote machine**. Closing the terminal, detaching, or losing SSH does not stop the remote agent.
 
-This is an initial implementation, not full Pi TUI parity. It uses Pi's documented JSONL RPC interface, not `InteractiveMode`, a fake `AgentSession`, or Pi Durable.
+Version 0.2 adds automatic client reconnect, numbered slots, remote path completion, file/image attachments, and opt-in local presentation adapters. It is not full Pi TUI parity. It uses Pi's documented JSONL RPC interface, not `InteractiveMode`, a fake `AgentSession`, or Pi Durable.
 
 ## Quick start
 
-Requires Node.js 22.19+ on both machines, SSH authentication configured, and **Pi 1.0.4** installed and configured on the remote host. Dependencies are pinned to that Pi version.
+Requires Node.js 22.19+ on both machines, working SSH authentication, and **Pi 1.0.4** installed and configured on the remote host. Local dependencies are pinned to the same Pi version; a separate local Pi CLI is not required. Replace `devbox` with your SSH host alias and `/remote/project` with an existing remote directory.
 
-From this checkout:
+From this checkout on your local machine:
 
 ```sh
 npm ci --ignore-scripts
 npm run build
-./scripts/deploy.sh rowan-v2-dev
+./scripts/deploy.sh devbox
 
-# Start a fresh, independent remote Pi process and attach the local terminal UI.
-./bin/pi-remote new rowan-v2-dev --cwd /home/ubuntu/workplace/YOUR_PROJECT
+# Start an independent remote Pi process and attach the local terminal UI.
+./bin/pi-remote new devbox --cwd /remote/project
 ```
 
-Use an existing remote directory. Remote Pi loads its normal settings, credentials, providers, extensions, skills, and trusted project resources there. Nothing is copied from your local Pi configuration.
+Remote Pi loads its normal settings, credentials, providers, extension factories, skills, and trusted project resources. Deployment copies application files, not your local Pi configuration, and does not restart existing daemons or slots.
 
 ```sh
-# List running and stopped slots.
-./bin/pi-remote ls rowan-v2-dev
+# List running and stopped slots, including their short numbers.
+./bin/pi-remote ls devbox
 
-# Reattach to a slot (the full ID or a unique prefix works).
-./bin/pi-remote attach rowan-v2-dev SLOT_ID
+# Attach by number, full UUID, or unique nonnumeric UUID prefix.
+./bin/pi-remote attach devbox 1
+
+# Omit the slot: attach to the only active slot, or open a local picker.
+./bin/pi-remote attach devbox
 
 # Create without opening the UI.
-./bin/pi-remote new rowan-v2-dev --cwd /remote/project --no-attach
+./bin/pi-remote new devbox --cwd /remote/project --no-attach
 
 # Pi options after -- are forwarded to the stock remote CLI.
-./bin/pi-remote new rowan-v2-dev --cwd /remote/project -- --model PROVIDER/MODEL
+./bin/pi-remote new devbox --cwd /remote/project -- --model PROVIDER/MODEL
 
 # Resume a stored Pi session in a NEW slot.
-./bin/pi-remote new rowan-v2-dev --cwd /remote/project --session /remote/session.jsonl
+./bin/pi-remote new devbox --cwd /remote/project --session /remote/session.jsonl
 
 # Explicitly stop a remote Pi process. Ordinary detach never does this.
-./bin/pi-remote kill rowan-v2-dev SLOT_ID
+./bin/pi-remote kill devbox 1
 ```
 
-`Ctrl+D` or `/detach` closes the local client without aborting Pi or answering an open dialog. After a connection failure, detach and run `attach` again. Automatic reconnect is not implemented yet. Accepted or uncertain commands are **never replayed automatically**.
+The 0.2 daemon persists stable slot numbers in `slots.json`, including stopped slots. A still-running 0.1 daemon uses insertion-order numeric aliases until a later daemon startup migrates its metadata. UUIDs remain valid in both cases. Numeric input always means a slot number, never a UUID prefix.
 
-For local testing, replace the SSH host with `--local` and use a local `--cwd`. `PI_REMOTE_HOST` can supply a default SSH host.
+`Ctrl+D` or `/detach` closes only the client. An attached terminal UI automatically reconnects to the same slot after transport loss; use `--no-reconnect` to disable this. Headless `rpc` and `watch` do not reconnect. Accepted or uncertain commands are **never replayed automatically**. Check the restored session before resending an uncertain request.
+
+For local testing, replace the host with `--local` and use a local `--cwd`. `PI_REMOTE_HOST` supplies a default SSH host. With that variable set, `attach 1` uses the default; use `attach --host devbox` for a host-only picker. `--host` takes precedence over the environment, and an explicit `HOST SLOT` pair also overrides the default.
+
+### Shell completion (fish, zsh, bash)
+
+In fish, run these commands from the checkout:
+
+```fish
+fish_add_path (pwd)/bin
+mkdir -p ~/.config/fish/completions
+pi-remote completion fish > ~/.config/fish/completions/pi-remote.fish
+source ~/.config/fish/completions/pi-remote.fish
+
+# Optional default for subsequent commands.
+set -gx PI_REMOTE_HOST devbox
+```
+
+Fish loads the installed completion file automatically in new shells. Type `pi-remote new devbox --cwd /remote/` and press Tab to list **remote directories**, not local ones. Slot completion after `pi-remote attach devbox ` includes numbers, status, session name, and workspace. `--session` completes remote files and directories, relative to `--cwd` when supplied.
+
+Remote `~` and relative completion prefixes use the remote home directory unless a completion base is supplied. Quote remote tilde paths, for example `--cwd '~/workplace/project'`, so your shell does not expand them to your **local** home. Prefer absolute paths for `--session` when launching. Completion is read-only: it may start the on-demand daemon, but never creates or attaches a Pi slot, sends a prompt, or runs an agent tool. An unavailable host produces no suggestions.
+
+For zsh or bash, put this checkout's `bin` directory on `PATH`, then install the matching script:
+
+- **zsh:** `mkdir -p ~/.zsh/completions; pi-remote completion zsh > ~/.zsh/completions/_pi-remote`. Add `fpath=(~/.zsh/completions $fpath)` before `autoload -Uz compinit; compinit` in `~/.zshrc`.
+- **bash:** `pi-remote completion bash > ~/.pi-remote-completion.bash`, then add `source ~/.pi-remote-completion.bash` to `~/.bashrc`.
+
+`completion` only prints a script; it does not edit shell configuration.
 
 ## Commands and keys
 
@@ -59,7 +89,9 @@ For local testing, replace the SSH host with `--local` and use a local `--cwd`. 
 | PageUp/PageDown | Scroll transcript |
 | Ctrl+End | Follow new output |
 | Ctrl+Shift+F | Search transcript |
-| `/model` | Local searchable picker populated by remote `get_available_models`; selection calls `set_model` |
+| `/model` / Ctrl+L | Searchable picker of remote models |
+| Ctrl+P | Cycle the remote model |
+| `/thinking [LEVEL]` / Shift+Tab | Choose/set the remote thinking level, or cycle it with Shift+Tab |
 | `/new` | Stock Pi `new_session` in the same slot |
 | `/fork` | Pick an earlier user message; Pi forks it and the local editor receives its original text |
 | `/resume` | Pick a stored remote session in the slot's workspace; Pi switches to it |
@@ -67,9 +99,29 @@ For local testing, replace the SSH host with `--local` and use a local `--cwd`. 
 | `/copy` | Copy the last assistant text to the **local** clipboard |
 | `/name NAME` | Set the current session name |
 | `/compact [instructions]` | Ask remote Pi to compact |
+| `/export [REMOTE_PATH]` | Export HTML on the remote host; the client reports its path |
+| `/attach LOCAL_PATH` | Queue a local text file or image for the next prompt |
+| Ctrl+V / `/paste` | Paste local clipboard files, an image, or text, where supported |
+| `/clear-attachments` | Remove pending local attachments |
+| Ctrl+G / `/editor` | Edit the draft with local `$VISUAL`, `$EDITOR`, or `nano` |
+| `!command` / `!!command` | Run a remote shell command; `!!` excludes its output from model context |
+| `/reload-ui` | Reload local presentation adapters and theme, not remote Pi |
+| `/theme [NAME]` | Show or change the local theme for this client |
 | `/help` | Show local controls |
 
-Unknown slash commands are passed to Pi's `prompt` RPC, so remote extension commands, skills, and prompt templates still work. Unsupported built-in TUI commands are not implemented by RPC and should not be assumed to work.
+The editor completes local built-in commands and remote extension/skill/template commands after `/`, and remote paths after `@`. Unknown slash commands pass to Pi's `prompt` RPC unless an explicitly loaded local adapter handles them. Unsupported built-in TUI commands should not be assumed to work.
+
+### Files, clipboard, and shell commands
+
+Use `Review @src/cli.ts` to include a file from the slot's remote workspace, or `Describe @"images/screen shot.png"` for a path with spaces. Absolute paths and `~/` are supported. Email addresses and references inside code spans/blocks are not attachments; a missing simple `@mention` stays literal, while a missing explicit path fails the submission.
+
+`/attach /local/path.txt` and clipboard files are read on the local machine; relative local paths use the directory where you launched the client. Text is appended to the prompt. Supported images are sent as **model input**, not just filenames; the selected model must support images. The built-in transcript shows image labels, **not inline image previews**. File reads are limited to regular UTF-8 text files up to 1 MiB or supported images up to 8 MiB. There can be eight pending local attachments, 32 distinct remote references, and at most 24 MiB in the combined prompt. Oversized or unsupported files fail rather than being silently truncated.
+
+Clipboard access occurs only on an explicit paste action. On Linux, image paste can use `wl-paste` on Wayland or `xclip` on X11. The external editor runs locally and returns its contents to the draft; it does not submit them.
+
+`!git status` runs through remote Pi and includes its output in model context on the next prompt. `!!git status` still runs remotely and is recorded in the session, but excludes its output from model context. Neither form starts a model turn by itself.
+
+### Slots and sessions
 
 A **slot** is a running Pi process, like a tmux pane. A **Pi session** is its current conversation file. `/new`, `/fork`, and `/resume` change the file inside that process; `pi-remote new` creates another process. Every attached client sees a slot's session changes. Two clients can attach at once; the first valid dialog answer wins.
 
@@ -77,7 +129,11 @@ The daemon rejects attempts through its create/resume commands to open a file al
 
 ## What survives disconnect
 
-- Model generation and remote tool execution.
+Automatic reconnect applies after a terminal client has attached successfully. It retries transport connections with backoff, obtains a fresh snapshot, and resumes display of the same slot. It does not create a replacement process or repeat prompts, shell commands, dialog answers, or session changes. Missing/exited slots and incompatible versions stop recovery. Draft text and pending local attachments remain in the same open client, not in durable storage.
+
+Remote state survives client disconnect:
+
+- Model generation, remote tool execution, and remote shell commands.
 - Steering and follow-up queues held by Pi.
 - A partial streamed assistant message and currently running tools.
 - Open extension `select`, `confirm`, `input`, and `editor` dialogs.
@@ -87,21 +143,49 @@ Dialogs have **no client-imposed timeout**. If an extension explicitly supplies 
 
 On attach, the daemon obtains the current branch entries through RPC and combines them with display-only live state. Snapshot sequence numbers and buffered events close the snapshot/live-stream race. Reconstructed display state is never supplied back to the model or written into Pi's session file.
 
-## Extension compatibility
+## Extension compatibility and local presentation
 
-The remote Pi process loads extensions normally. The wrapper does not load extension factories a second time and does not change their agent hooks, tools, or provider logic.
+The **stock remote harness is unchanged**. Remote Pi loads extension factories normally; their agent hooks, tools, providers, and credentials stay remote. Its RPC UI forwards dialogs, notifications, status text, string-array widgets, terminal title, and editor text. It cannot transfer executable terminal components to the client.
 
-Supported presentation calls: dialogs, notifications, status text, string-array widgets, terminal title, and editor text.
+The local client can separately load trusted presentation adapters for tool call/result renderers, custom message/entry renderers, Markdown transforms, custom footer/header/editor components, widgets, display events, commands, and shortcuts. Local adapters use snapshot data; they are not another `AgentSession`. Without an adapter, the client uses its built-in display. Renderer failures produce local warnings rather than stopping the remote agent.
 
-**Not implemented yet:** local extension tool renderers, custom footer/header, custom editor, message/entry renderers, custom component widgets, or `ctx.ui.custom()`. The client currently uses its own basic tool display, editor, and footer. The next UI milestone is opt-in presentation adapters; blindly executing all extensions twice would cause side effects.
+### Opt in explicitly
 
-Stock Pi RPC itself ignores several terminal-only hooks. Some extensions explicitly require `ctx.mode === "tui"`; those features remain unavailable. This is a limitation of the selected public API, not a remote loading fix.
+Use repeatable `--ui-extension PATH` flags, or create **local** `~/.pi/remote-client.json` with an explicit allowlist of trusted files:
+
+```json
+{
+  "extensions": ["/absolute/path/to/trusted-ui.ts"],
+  "theme": "dark"
+}
+```
+
+`--ui-config PATH` selects another config file. Config-relative extension paths resolve beside that file; command-line paths resolve from the local working directory. `~/` means local home here. CLI extension paths are added to the config allowlist and deduplicated. Only exact files are selected: the client does **not** automatically load local Pi extension directories, project resources, or packages. Explicit adapters can still import other modules.
+
+```sh
+./bin/pi-remote attach devbox 1 --ui-extension ./my-ui.ts --theme dark
+./bin/pi-remote attach devbox 1 --ui-config ./remote-ui.json --no-reconnect
+```
+
+`--theme NAME` overrides the config theme. Available themes include `system`, `dark`, `light`, and JSON themes from local `~/.pi/agent/themes/` (or `$PI_CODING_AGENT_DIR/themes/`). Use `/theme NAME` to change the current client and `/reload-ui` to reread its selected adapters/config. Neither command changes remote settings or restarts Pi; theme files are not watched automatically.
+
+[`examples/rowan-ui.ts`](examples/rowan-ui.ts) is a **user-specific selective adapter**, not a portable default. It expects Rowan's extension repository locally at `~/.pi/agent/git/github.com/rowantran/pi-extensions`, or at `$PI_REMOTE_RENDERER_REPO`. It selects footer, caret, compact tool, and codemode renderers, and renders persisted worked-for data without loading the original worked-for factory. It avoids the provider, background-worker, MCP, Slack, and codemode execution factories. Review its imports and adapt paths before selecting it with `--ui-extension ./examples/rowan-ui.ts` or your config allowlist.
+
+### Trust boundary
+
+**Adapters are trusted arbitrary JavaScript, not a sandbox.** Imports and factories run with the local process's normal file, network, credential, and subprocess privileges. Custom editors receive submission callbacks and therefore have **input authority**: they can submit prompts or commands, not merely change their appearance. Load only code you trust with that authority.
+
+The presentation API omits tool execution, provider registration, credential lookup, remote session mutation, and `ctx.ui.custom()`/local dialogs. Blocked API calls are a **compatibility guard, not a security boundary**; they do not constrain arbitrary JavaScript or custom-editor submission. Tool registration retains rendering fields, not executors. Select visual modules deliberately rather than running every remote extension factory again locally.
+
+Remote RPC still ignores terminal-only hooks such as footer/editor factories, and remote extensions see `ctx.mode === "rpc"`. Local presentation support does not make remote TUI-only code run or provide complete `ExtensionAPI` compatibility.
 
 ### Upstream RPC limitations
 
 - Pi 1.0.4 waits for initial `session_start` hooks before it starts reading RPC stdin. An extension that **awaits a dialog during initial startup** can therefore block startup before its answer can be read. The daemon retains the process and shows its starting state; it does not invent a timeout or patch the harness. Dialogs from commands or running tools were tested successfully.
 - RPC does not report cancellation of a dialog by an extension's abort signal. Explicit timeout expiry and client answers are tracked, but a signal-cancelled dialog can remain displayed until the user dismisses it.
-- There is no in-place `/tree` navigation RPC, remote file autocomplete, or built-in TUI `/login`/`settings` support here yet. Use normal remote Pi for configuration. File/image attachment UI and `!bash` UI are not implemented; the headless RPC command can invoke `bash`.
+- In-place `/tree` navigation is unavailable; use `/fork` to branch from an earlier prompt. `/login` and `/settings` are unavailable here; configure the remote harness with normal Pi over SSH.
+- Remote `/reload` is unavailable through stock RPC. `/reload-ui` reloads only local presentation; it does not reload remote extensions or settings.
+- Custom overlays through `ctx.ui.custom()` and built-in inline image display are not implemented.
 
 ## Process and security boundaries
 
@@ -133,7 +217,13 @@ Client disconnect is supported; daemon/host crash recovery of in-flight work is 
 
 An exclusive startup lock serializes stale-daemon reclamation. If the launcher itself crashes leaving `start.lock`, startup fails closed; inspect its PID and `daemon.log` before manually removing it. Never remove a live daemon's lock/socket. A reused PID also fails closed.
 
-Updating application files does not restart the daemon or existing slots. For an upgrade, stop the slots you no longer need, then stop the daemon deliberately using the PID in its `daemon.lock/pid`. This interrupts any remaining work. Do not do it merely to detach.
+### Upgrade without interrupting active work
+
+`deploy.sh` stages each release and its dependencies under `~/.local/share/pi-remote/releases/release.XXXXXX`, validates it, then atomically switches the stable `~/.local/share/pi-remote/bin/pi-remote` launcher symlink. Prior releases and legacy installation files/dependencies remain untouched because live daemons may still import them. **Do not remove them until all old processes have stopped.** Deployment does not clean them up automatically.
+
+Deploying 0.2 application files does **not** require restarting a live 0.1 daemon. The new client falls back to the newly installed remote filesystem helper when the old daemon does not support path completion, attachment reads, or filesystem metadata. These read-only calls use a separate SSH process; prompts and other mutations still go through the existing daemon. A transport error never triggers this fallback or mutation replay.
+
+Keep the old daemon running while its slots are active. To adopt new daemon code later, finish or explicitly stop its slots, then deliberately stop the daemon using the PID in `daemon.lock/pid`. This interrupts any remaining work. The next connection starts the installed daemon and migrates stored slot numbers; it does not resume stopped tasks. Never restart merely to detach or enable the compatibility helper.
 
 ## Development and verification
 
@@ -146,19 +236,26 @@ node --import tsx test/startup-smoke.ts
 
 # Offline tests use a deterministic child that speaks Pi-shaped RPC.
 # This optional test runs real Pi and existing extensions on an isolated remote workspace.
-PI_REMOTE_TEST_HOST=rowan-v2-dev node --import tsx test/remote-smoke.ts
+PI_REMOTE_TEST_HOST=devbox node --import tsx test/remote-smoke.ts
 
 # Also make one real model request using the host's existing credentials/configuration.
-PI_REMOTE_TEST_MODEL=1 node --import tsx test/remote-smoke.ts
+PI_REMOTE_TEST_HOST=devbox PI_REMOTE_TEST_MODEL=1 node --import tsx test/remote-smoke.ts
+
+# Test completion, attachments, numeric slots and exactly-once shell execution across reconnect.
+PI_REMOTE_TEST_HOST=devbox node --import tsx test/remote-features-smoke.ts
+
+# Test actual local terminal input/reconnect in an isolated tmux server.
+# Requires tmux and the user-specific Rowan presentation adapter dependencies.
+PI_REMOTE_TEST_HOST=devbox node --import tsx test/terminal-smoke.ts
 ```
 
-The remote smoke test uses a separate `/tmp/pi-remote-smoke.*` state directory, starts only its own slots, and stops those slots and its daemon afterward. It leaves test files/logs for inspection. It does not change global Pi settings or credentials.
+The remote smoke tests use separate `/tmp/pi-remote-{smoke,features,terminal}.*` state directories, start only their own slots, and stop those slots and their daemons afterward. The terminal test uses the separate `pi-remote-test` tmux server. It leaves test files/logs for inspection. It does not change global Pi settings or credentials.
 
 Headless inspection:
 
 ```sh
-./bin/pi-remote rpc rowan-v2-dev SLOT_ID '{"type":"get_state"}'
-./bin/pi-remote watch rowan-v2-dev SLOT_ID
+./bin/pi-remote rpc devbox 1 '{"type":"get_state"}'
+./bin/pi-remote watch devbox 1
 ```
 
 `rpc` waits for command acceptance/result, not necessarily agent completion. `watch` prints a snapshot followed by events; `agent_settled` means Pi has no automatic work left.
@@ -167,9 +264,13 @@ Headless inspection:
 
 - `src/daemon.ts`: slots, attachment snapshots, dialogs, private socket, persistence.
 - `src/pi-process.ts`: stock Pi RPC child ownership, correlation, output draining.
-- `src/client.ts`: SSH/local transport, on-demand startup, no automatic mutation replay.
+- `src/client.ts`, `src/reconnect.ts`: SSH/local transport, startup, snapshot-based reconnect without mutation replay.
+- `src/compat-client.ts`: read-only filesystem fallback for running legacy daemons.
 - `src/live.ts`: display-only streaming reconstruction on the daemon.
 - `src/tui.ts`, `src/view.ts`: local terminal UI and transcript projection.
-- `src/cli.ts`: commands and launch options.
+- `src/presentation.ts`, `src/local-theme.ts`: explicit adapter loading and local themes.
+- `src/files.ts`, `src/local-input.ts`, `src/editor-completion.ts`: attachments, clipboard/editor integration, and remote editor completion.
+- `src/cli.ts`, `src/completion.ts`, `completions/`: launch options, slot selection, and shell completion.
+- `examples/rowan-ui.ts`: selective, user-specific presentation adapter.
 
 Pi references: [RPC](https://pi.dev/docs/latest/rpc), [extension UI](https://pi.dev/docs/latest/rpc-extension-ui), [JSON events](https://pi.dev/docs/latest/json).
