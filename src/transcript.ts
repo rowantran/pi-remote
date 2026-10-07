@@ -70,6 +70,7 @@ export class Transcript extends Container {
   private defaults = new Map<string, ToolRenderers>();
   private tools = new Map<string, ToolRow>();
   private parsedToolArgs = new WeakMap<RecordValue, ParsedToolArgs>();
+  private derivedMessages = new WeakMap<RecordValue, RecordValue>();
   private messages = new Map<string, { source: RecordValue; component: Component }>();
   private renderedExpanded = this.expanded;
   private renderedThinking = this.thinking;
@@ -89,7 +90,7 @@ export class Transcript extends Container {
   reset(): void {
     for (const row of this.tools.values()) this.retire(row);
     this.host?.retainToolCalls([]);
-    this.tools.clear(); this.parsedToolArgs = new WeakMap();
+    this.tools.clear(); this.parsedToolArgs = new WeakMap(); this.derivedMessages = new WeakMap();
     this.messages.clear(); this.widthCache.clear(); this.changed();
   }
 
@@ -198,7 +199,7 @@ export class Transcript extends Container {
 
   private rebuild(): void {
     this.clear();
-    const messages = transcriptMessages(this.view.snapshot);
+    const messages = transcriptMessages(this.view.snapshot, this.derivedMessages);
     const tools = new Map<string, ToolState>();
     for (const message of messages) if (message.role === 'assistant') {
       for (const block of Array.isArray(message.content) ? message.content : []) {

@@ -28,7 +28,8 @@ export function messageKey(message: RecordValue): string {
   return `${message.role}:${message.timestamp}:${identity}:${message.customType ?? ''}`;
 }
 
-export function transcriptMessages(snapshot: Snapshot): RecordValue[] {
+/** Optional projections are owned by one Transcript and keyed only by immutable stored entries. */
+export function transcriptMessages(snapshot: Snapshot, projections?: WeakMap<RecordValue, RecordValue>): RecordValue[] {
   const messages: RecordValue[] = [];
   const indexes = new Map<string, number>();
   const put = (message: RecordValue) => {
@@ -37,17 +38,22 @@ export function transcriptMessages(snapshot: Snapshot): RecordValue[] {
     if (index === undefined) { indexes.set(key, messages.length); messages.push(message); }
     else messages[index] = message;
   };
+  const putDerived = (entry: RecordValue, message: RecordValue) => {
+    projections?.set(entry, message); put(message);
+  };
   for (const entry of activeBranch(snapshot.entries, snapshot.leafId)) {
-    if (entry.type === 'message' && entry.message) put(entry.message);
-    else if (entry.type === 'custom_message') {
+    if (entry.type === 'message' && entry.message) { put(entry.message); continue; }
+    const cached = projections?.get(entry);
+    if (cached) { put(cached); continue; }
+    if (entry.type === 'custom_message') {
       // Stored entry timestamps are ISO strings; live message timestamps are milliseconds.
       const timestamp = typeof entry.timestamp === 'string' ? Date.parse(entry.timestamp) : entry.timestamp;
-      put({ ...entry, timestamp: Number.isFinite(timestamp) ? timestamp : entry.timestamp, role: 'custom' });
+      putDerived(entry, { ...entry, timestamp: Number.isFinite(timestamp) ? timestamp : entry.timestamp, role: 'custom' });
     }
     else if (entry.type === 'compaction' || entry.type === 'branch_summary') {
-      put({ ...entry, role: entry.type === 'compaction' ? 'compactionSummary' : 'branchSummary' });
+      putDerived(entry, { ...entry, role: entry.type === 'compaction' ? 'compactionSummary' : 'branchSummary' });
     } else if (entry.type === 'custom') {
-      put({ ...entry, role: 'entry', content: `Session entry: ${entry.customType ?? 'custom'} (renderer not loaded)` });
+      putDerived(entry, { ...entry, role: 'entry', content: `Session entry: ${entry.customType ?? 'custom'} (renderer not loaded)` });
     }
   }
   // Messages can already be persisted while they remain in the current-run live state.
