@@ -56,6 +56,16 @@ export async function readPiHideThinkingBlock(agentDir = defaultAgentDir()): Pro
   } catch { return false; }
 }
 
+export type DoubleEscapeAction = 'tree' | 'fork' | 'none';
+
+/** Pi's local double-Escape preference. Both tree and fork use the remote fork picker. */
+export async function readPiDoubleEscapeAction(agentDir = defaultAgentDir()): Promise<DoubleEscapeAction> {
+  try {
+    const settings = JSON.parse(await readFile(join(agentDir, 'settings.json'), 'utf8'));
+    return settings?.doubleEscapeAction === 'fork' || settings?.doubleEscapeAction === 'none' ? settings.doubleEscapeAction : 'tree';
+  } catch { return 'tree'; }
+}
+
 /** Pi's own `theme` setting, used when no client theme is selected. Missing or invalid settings are ignored. */
 export async function readPiThemeSetting(agentDir = defaultAgentDir()): Promise<string | undefined> {
   try {

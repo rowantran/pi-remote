@@ -1,17 +1,18 @@
 import { readAttachment } from './files.js';
 import { Transcript } from './transcript.js';
+import { ForkSelector } from './fork-selector.js';
 import { ScheduledTuiAltScreen } from './scheduled-tui.js';
 import { WorkingIndicator } from './working-indicator.js';
 import { createRemoteKeybindings } from './keybindings.js';
 import { readLocalClipboard, editLocally } from './local-input.js';
 import { PresentationHost, readPresentationConfig, createPresentationTheme, type PresentationChange } from './presentation.js';
-import { loadLocalTheme, readPiHideThinkingBlock, readPiThemeSetting, resolveThemeSelection, terminalAppearance } from './local-theme.js';
+import { loadLocalTheme, readPiDoubleEscapeAction, readPiHideThinkingBlock, readPiThemeSetting, resolveThemeSelection, terminalAppearance, type DoubleEscapeAction } from './local-theme.js';
 import { hostname } from 'node:os';
 import { REMOTE_ICON, detachMessage, remoteSessionEnv, stoppedMessage } from './remote-session.js';
 import { RemoteAutocompleteProvider, transformPromptWithAttachments } from './editor-completion.js';
 import {
   copyToClipboard, CustomEditor, getSelectListTheme, initTheme,
-  type SessionInfo, type Theme,
+  type SessionInfo, type SessionTreeNode, type Theme,
 } from '@earendil-works/pi-coding-agent';
 import {
   type Component, Container, Editor, type Focusable, fuzzyFilter, getKeybindings, Input, isKeyRelease, Key,
@@ -37,6 +38,8 @@ Enter: send; while running, queue a steering instruction.
 Alt+Enter: queue a follow-up (wait until the run finishes).
 Shift+Enter / Ctrl+J: newline. Ctrl+C: clear the prompt. Ctrl+D: detach, even in a dialog.
 Esc: cancel the dialog, or clear the prompt queue then abort; queue text returns to the editor.
+Esc Esc (empty editor, idle): tree-style fork picker, unless local doubleEscapeAction is none.
+/fork /tree: browse user and assistant messages; choose a user prompt to fork into a new session.
 Ctrl+O: expand/collapse tool output. Ctrl+T: show/hide thinking.
 PageUp/PageDown: transcript scroll. Ctrl+End: follow output. Ctrl+Shift+F: transcript search.
 /detach /help /model /new /fork /resume /session /copy /name <name> /compact [instructions]
@@ -86,6 +89,8 @@ export interface TuiOptions {
   renderIntervalMs?: number;
   /** Start with thinking blocks hidden, like Pi's `hideThinkingBlock` setting. */
   hideThinkingBlock?: boolean;
+  /** Local Pi preference; tree falls back to fork because RPC cannot navigate in place. */
+  doubleEscapeAction?: DoubleEscapeAction;
 }
 
 /** Exported for terminal-adapter tests; uses only the public pi-tui API. */
@@ -102,13 +107,14 @@ export class RemoteTui {
   private quit = false;
   private commandPending = false;
   private interruptPending = false;
+  private lastEscapeTime?: number;
   private refreshPromise?: Promise<void>;
   private refreshing = false;
   private refreshAgain = false;
   private journal: RemoteEvent[] = [];
   private generation = 0;
   private activeRemote?: { id: string; component: Dialog };
-  private localDialog?: { component: Dialog; cancel: () => void };
+  private localDialog?: { component: Component & Partial<Focusable>; cancel: () => void; escape?: (data: string) => void };
   private answering = new Set<string>();
   private unsubscribe: (() => void)[] = [];
   private finish?: () => void;
@@ -167,7 +173,7 @@ export class RemoteTui {
     this.completion = new RemoteAutocompleteProvider({
       getCommands: () => this.rpc({ type: 'get_commands' }),
       completePath: prefix => this.connection.request('complete_path', { slotId: this.slotId, prefix }),
-      localCommands: ['attach', 'clear-attachments', 'detach', 'help', 'model', 'new', 'fork', 'resume', 'session', 'copy', 'name', 'compact', 'thinking', 'export', 'reload-ui', 'theme', 'tool-call', 'paste', 'editor', 'quit'].map(name => ({ name })),
+      localCommands: ['attach', 'clear-attachments', 'detach', 'help', 'model', 'new', 'fork', 'tree', 'resume', 'session', 'copy', 'name', 'compact', 'thinking', 'export', 'reload-ui', 'theme', 'tool-call', 'paste', 'editor', 'quit'].map(name => ({ name })),
     });
     this.editor.setAutocompleteProvider(this.completion);
     // Like Pi, learn whether the terminal is light or dark before building themed content.
@@ -414,6 +420,8 @@ export class RemoteTui {
       this.unsubscribe.push(this.connection.onDisconnect(error => {
         if (this.detached) return;
         this.connected = false; this.generation++;
+        this.lastEscapeTime = undefined;
+        this.localDialog?.cancel(); // A local selection must not survive into a different snapshot.
         // Do not resolve remote dialogs, clear the queue, abort, or replay requests.
         this.notify(`Connection lost: ${errorText(error)}. Remote work and dialogs remain active. ${this.connection.onReconnect ? 'Reconnecting automatically.' : 'Run attach again to reconnect.'} No commands will be replayed. Ctrl+D detaches.`, 'connection');
         this.syncBottom();
@@ -422,11 +430,26 @@ export class RemoteTui {
         if (isKeyRelease(data)) return undefined;
         if (matchesKey(data, Key.ctrl('d'))) { this.detach(); return { consume: true }; }
         if (matchesKey(data, Key.escape)) {
+          const previousEscape = this.lastEscapeTime;
+          this.lastEscapeTime = undefined;
           if (this.activeRemote) void this.answerDialog(this.activeRemote.id, { cancelled: true });
-          else if (this.localDialog) this.localDialog.cancel();
+          else if (this.localDialog) {
+            if (this.localDialog.escape) this.localDialog.escape(data);
+            else this.localDialog.cancel();
+            this.tui.requestRender();
+          }
           else if (this.view.snapshot.live.busy || this.view.snapshot.live.compacting || this.hasQueue() || this.bashRunning || Object.keys(this.view.snapshot.live.bash ?? {}).length) void this.interrupt();
+          else if (this.connected && this.view.snapshot.slot.status === 'running' && !this.commandPending && !this.interruptPending
+            && !this.editor.getExpandedText().trim() && this.options.doubleEscapeAction !== 'none') {
+            const now = Date.now();
+            if (previousEscape !== undefined && now - previousEscape < 500) void this.openForkFromShortcut();
+            else this.lastEscapeTime = now;
+          }
           return { consume: true };
         }
+        this.lastEscapeTime = undefined;
+        // Local pickers own their shortcuts. Tree filters must not toggle the transcript or model.
+        if (this.localDialog && !this.activeRemote) return undefined;
         if (!this.activeRemote && !this.localDialog && matchesKey(data, Key.ctrl('c'))) {
           // Like Pi's app.clear. Pending attachments stay; /clear-attachments removes them.
           this.editor.setText(''); this.tui.requestRender(); return { consume: true };
@@ -726,6 +749,47 @@ export class RemoteTui {
     });
   }
 
+  private async openForkFromShortcut(): Promise<void> {
+    if (this.commandPending) return;
+    this.commandPending = true;
+    try { await this.builtin('/fork', ''); }
+    catch (error) {
+      this.notify(`Fork request failed: ${errorText(error)}. Its remote outcome can be unknown after connection loss. Nothing will be replayed; check the session before trying again.`);
+    } finally { this.commandPending = false; if (!this.detached) this.syncBottom(); }
+  }
+
+  private chooseFork(tree: SessionTreeNode[], leafId: string | null): Promise<string | undefined> {
+    const pending = [...tree];
+    let hasUser = false;
+    while (pending.length) {
+      const node = pending.pop()!;
+      if (node.entry.type === 'message' && node.entry.message.role === 'user') { hasUser = true; break; }
+      pending.push(...node.children);
+    }
+    if (!hasUser) { this.notify('No user prompts available to fork.'); return Promise.resolve(undefined); }
+    return new Promise(resolve => {
+      let finished = false;
+      const done = (value?: string) => {
+        if (finished) return; finished = true; this.localDialog = undefined;
+        this.syncBottom(); resolve(value);
+      };
+      let component: ForkSelector;
+      component = new ForkSelector(tree, leafId, () => {
+        // Keep excluding this picker after cancellation, including the last frame on detach.
+        // Leave space for the transcript and the actual footer/widgets/queue, including adapters.
+        const otherRows = this.bottom.children.filter(child => child !== component && child !== this.editor)
+          .reduce((rows, child) => rows + child.render(this.tui.terminal.columns).length, 0);
+        return this.tui.terminal.rows - otherRows - 1;
+      },
+        () => this.localTheme, entryId => done(entryId), () => done(), text => {
+          if (!text) { this.notify('No text to copy at this point.'); return; }
+          void copyToClipboard(text).then(() => this.notify('Selected message copied to the local clipboard.'))
+            .catch(error => this.notify(`Copy failed: ${errorText(error)}`));
+        });
+      this.localDialog = { component, cancel: () => done(), escape: data => component.handleInput(data) }; this.syncBottom();
+    });
+  }
+
   private restoreSubmission(text: string): void {
     const draft = this.editor.getExpandedText();
     this.editor.setText(draft === text ? text : [text, draft].filter(Boolean).join('\n\n'));
@@ -799,7 +863,6 @@ export class RemoteTui {
         const result = await this.rpc({type:'export_html', ...(args ? {outputPath:args} : {})});
         this.notify(`Exported on the remote host: ${result.path}`); return true;
       }
-      case '/tree': this.notify('Pi RPC has no in-place tree-navigation command. Use /fork to branch from an earlier prompt.'); return true;
       case '/login': case '/settings': this.notify('Configure the remote harness with normal Pi over SSH. The local client does not change provider credentials or remote settings directly.'); return true;
       case '/model': {
         const data = await this.rpc({ type: 'get_available_models' });
@@ -815,11 +878,15 @@ export class RemoteTui {
         const data = await this.rpc({ type: 'new_session' });
         if (data?.cancelled) this.notify('New session cancelled.'); else await this.refresh(); return true;
       }
+      case '/tree': // Explicit fork fallback, not in-place session-tree navigation.
       case '/fork': {
-        const data = await this.rpc({ type: 'get_fork_messages' });
-        const messages: RecordValue[] = data.messages ?? [];
-        const entryId = await this.choose('Fork from a user message', messages.map(message => ({ value: message.entryId, label: message.text })));
-        if (entryId !== undefined && !this.detached) {
+        const generation = this.generation;
+        const sessionId = this.view.snapshot.state.sessionId;
+        const data = await this.rpc<{ tree: SessionTreeNode[]; leafId: string | null }>({ type: 'get_tree' });
+        if (this.detached || !this.connected || generation !== this.generation || sessionId !== this.view.snapshot.state.sessionId) return true;
+        const entryId = await this.chooseFork(data.tree ?? [], data.leafId ?? null);
+        if (entryId !== undefined && !this.detached && this.connected && generation === this.generation) {
+          if (sessionId !== this.view.snapshot.state.sessionId) { this.notify('Session changed while the picker was open. Open /fork again; nothing was sent.'); return true; }
           const result = await this.rpc({ type: 'fork', entryId });
           if (result?.cancelled) this.notify('Fork cancelled.');
           else { await this.refresh(); if (!this.detached) this.editor.setText(result?.text ?? ''); }
@@ -880,7 +947,8 @@ export async function runTui(connection: RemoteConnection, slotId: string, initi
   // variables that the daemon gives the remote Pi process.
   Object.assign(process.env, remoteSessionEnv({ host, slotId, slotNumber: initialSnapshot.slot.number }));
   const hideThinkingBlock = options.hideThinkingBlock ?? await readPiHideThinkingBlock();
-  const client = new RemoteTui(connection, slotId, initialSnapshot, new ProcessTerminal(), { ...options, host, hideThinkingBlock });
+  const doubleEscapeAction = options.doubleEscapeAction ?? await readPiDoubleEscapeAction();
+  const client = new RemoteTui(connection, slotId, initialSnapshot, new ProcessTerminal(), { ...options, host, hideThinkingBlock, doubleEscapeAction });
   // Start input and outstanding startup dialogs before any trusted extension factory can await.
   const finished = client.run();
   void client.initialize();

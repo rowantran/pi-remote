@@ -68,6 +68,16 @@ function launch(t: any, initial = snapshot(), connection = new FakeConnection(),
   return { ui, terminal, connection, finished, submit };
 }
 
+function forkTree() {
+  const assistant = { entry: { type: 'message', id: 'a', parentId: 'u', timestamp: '2026-01-01', message: { role: 'assistant', content: [{ type: 'text', text: 'assistant context' }] } }, children: [] };
+  const user = { entry: { type: 'message', id: 'u', parentId: null, timestamp: '2026-01-01', message: { role: 'user', content: 'original prompt' } }, children: [assistant] };
+  return { tree: [user], leafId: 'a' };
+}
+
+function serveFork(connection: FakeConnection) {
+  connection.handler = (method, params) => method === 'snapshot' ? snapshot() : params?.command.type === 'get_tree' ? forkTree() : params?.command.type === 'fork' ? { text: 'original\ntext', cancelled: false } : {};
+}
+
 test('active branch excludes abandoned branches and handles empty, broken and cyclic trees', () => {
   const entries = [
     { id: 'a', parentId: null }, { id: 'b', parentId: 'a' },
@@ -465,10 +475,115 @@ test('session transition /new handles remote confirmation while the command is s
 
 test('fork loads the returned original text into the editor without prompting', async t => {
   const { ui, terminal, connection, submit } = launch(t);
-  connection.handler = (method, params) => method === 'snapshot' ? snapshot() : params?.command.type === 'get_fork_messages' ? { messages: [{ entryId: 'a', text: 'original' }] } : params?.command.type === 'fork' ? { text: 'original\ntext', cancelled: false } : {};
+  serveFork(connection);
   submit('/fork'); await flush(); terminal.input('\r'); await flush();
   assert.equal(ui.editor.getExpandedText(), 'original\ntext');
-  assert.deepEqual(connection.requests.filter(request => request.method === 'rpc').map(request => request.params?.command.type), ['get_fork_messages', 'fork']);
+  assert.deepEqual(connection.requests.filter(request => request.method === 'rpc').map(request => request.params?.command), [{ type: 'get_tree' }, { type: 'fork', entryId: 'u' }]);
+});
+
+test('double Esc follows local settings without changing draft or history on cancel', async t => {
+  for (const doubleEscapeAction of [undefined, 'tree', 'fork', 'none'] as const) {
+    const { ui, terminal, connection } = launch(t, snapshot(), new FakeConnection(), { doubleEscapeAction });
+    serveFork(connection); ui.editor.setText(' \n');
+    terminal.input('\x1b'); assert.equal(connection.requests.length, 0);
+    terminal.input('\x1b'); await flush();
+    assert.deepEqual(connection.requests.map(request => request.params?.command), doubleEscapeAction === 'none' ? [] : [{ type: 'get_tree' }]);
+    if (doubleEscapeAction !== 'none') {
+      ui.tui.renderNow();
+      assert.match(ui.tui.getScreenLines().map(stripTerminalSequences).join('\n'), /Session Fork/);
+      terminal.input('\x1b'); await flush(); terminal.input('\x1b');
+      assert.equal(connection.requests.length, 1); // Cancellation is not the first Esc of another shortcut.
+    }
+    assert.equal(ui.editor.getExpandedText(), ' \n');
+    terminal.input('\x03'); terminal.input('\x1b[A');
+    assert.equal(ui.editor.getExpandedText(), '');
+    ui.detach();
+  }
+});
+
+test('double Esc requires an empty editor, less than 500 ms, and no intervening input', async t => {
+  let now = 1000; t.mock.method(Date, 'now', () => now);
+  const { ui, terminal, connection } = launch(t); serveFork(connection);
+  terminal.input('\x1b'); now += 500; terminal.input('\x1b'); await flush();
+  assert.equal(connection.requests.length, 0);
+  terminal.input('x'); ui.editor.setText(''); terminal.input('\x1b');
+  assert.equal(connection.requests.length, 0);
+  ui.editor.setText('draft'); terminal.input('\x1b'); terminal.input('\x1b');
+  assert.equal(connection.requests.length, 0); assert.equal(ui.editor.getExpandedText(), 'draft');
+});
+
+test('Esc during an abort or pending command cannot open the fork picker', async t => {
+  const initial = snapshot(); initial.live.busy = true;
+  const { ui, terminal, connection } = launch(t, initial);
+  const pending = deferred<RecordValue>();
+  connection.handler = (_method, params) => params?.command.type === 'abort' ? pending.promise : {};
+  terminal.input('\x1b'); await flush(); ui.view.snapshot.live.busy = false;
+  terminal.input('\x1b'); terminal.input('\x1b'); await flush();
+  assert.deepEqual(connection.requests.map(request => request.params?.command.type), ['clear_queue', 'abort']);
+  pending.resolve({}); await flush();
+});
+
+test('picker keys own local shortcuts and repaint search and Esc without forced renders', async t => {
+  const { ui, terminal, connection, submit } = launch(t); serveFork(connection);
+  submit('/fork'); await flush(); ui.tui.renderNow();
+  const frame = async () => {
+    await new Promise(resolve => setTimeout(resolve, 30));
+    return ui.tui.getScreenLines().map(stripTerminalSequences).join('\n');
+  };
+  terminal.input('\x0c'); assert.match(await frame(), /\[labeled\]/); // Not the model picker.
+  terminal.input('\x0f'); assert.match(await frame(), /\[all\]/); // Not transcript expansion.
+  terminal.input('\x14'); assert.match(await frame(), /\[no-tools\]/); // Not hidden thinking.
+  terminal.input('assistant'); assert.match(await frame(), /Type to search: assistant/);
+  terminal.input('\r'); assert.equal(connection.requests.length, 1);
+  terminal.input('\x1b'); const cleared = await frame();
+  assert.match(cleared, /Session Fork/); assert.doesNotMatch(cleared, /Type to search: assistant/);
+  terminal.input('\x1b'); assert.doesNotMatch(await frame(), /Session Fork/);
+  assert.equal(connection.requests.length, 1);
+});
+
+test('fork picker remains visible on a small screen with widgets above and below', async t => {
+  const initial = snapshot({ ui: [
+    { id: 'above', method: 'setWidget', widgetKey: 'above', widgetLines: ['above 1', 'above 2', 'above 3'] },
+    { id: 'below', method: 'setWidget', widgetKey: 'below', widgetPlacement: 'belowEditor', widgetLines: ['below 1', 'below 2', 'below 3'] },
+  ] });
+  const { ui, terminal, connection, submit } = launch(t, initial);
+  terminal.rows = 12; terminal.resize(); serveFork(connection);
+  submit('/fork'); await flush(); ui.tui.renderNow();
+  const screen = ui.tui.getScreenLines().map(stripTerminalSequences);
+  assert.ok(screen.some(row => row.startsWith('› ') && row.includes('user: original prompt')), screen.join('\n'));
+  assert.match(screen.join('\n'), /below 3/);
+});
+
+test('/tree uses the fork fallback and Ctrl+D still detaches', async t => {
+  const { ui, terminal, connection, submit, finished } = launch(t); serveFork(connection);
+  submit('/tree'); await flush(); ui.tui.renderNow();
+  assert.match(ui.tui.getScreenLines().map(stripTerminalSequences).join('\n'), /new session/);
+  terminal.input('\x04'); await finished;
+  assert.deepEqual(connection.requests.map(request => request.params?.command), [{ type: 'get_tree' }]);
+});
+
+test('disconnect, detach, or session change rejects stale trees and selections', async t => {
+  for (const loading of [true, false]) for (const change of ['disconnect', 'detach', 'session'] as const) {
+    const { ui, terminal, connection, submit } = launch(t, snapshot({ state: { sessionId: 'old' } }));
+    const pending = deferred<RecordValue>(); connection.handler = () => pending.promise;
+    submit('/fork'); await flush();
+    if (!loading) { pending.resolve(forkTree()); await flush(); }
+    if (change === 'disconnect') connection.disconnect();
+    else if (change === 'detach') ui.detach();
+    else connection.emit(event(1, { type: 'remote_state', state: { sessionId: 'new' } }));
+    if (loading) pending.resolve(forkTree());
+    await flush(); terminal.input('\r'); await flush();
+    assert.deepEqual(connection.requests.map(request => request.params?.command), [{ type: 'get_tree' }]);
+    ui.detach();
+  }
+});
+
+test('an empty tree reports no fork points', async t => {
+  const { ui, connection, submit } = launch(t);
+  connection.handler = () => ({ tree: [], leafId: null });
+  submit('/fork'); await flush(); ui.tui.renderNow();
+  assert.match(ui.tui.getScreenLines().map(stripTerminalSequences).join('\n'), /No user prompts available/);
+  assert.equal(connection.requests.length, 1);
 });
 
 test('in-flight prompt failure after disconnect is not restarted or replayed', async t => {
@@ -524,8 +639,9 @@ test('model picker renders in the local frame, filters text, and sets only the s
   } : {};
   submit('/model'); await flush(); ui.tui.renderNow();
   assert.match(ui.tui.getScreenLines().join('\n'), /Choose model/);
-  terminal.input('b'); ui.tui.renderNow();
+  terminal.input('b'); await new Promise(resolve => setTimeout(resolve, 30));
   assert.match(ui.tui.getScreenLines().join('\n'), /provider\/model-b/);
+  assert.doesNotMatch(ui.tui.getScreenLines().join('\n'), /provider\/model-a/);
   terminal.input('\r'); await flush();
   assert.deepEqual(connection.requests.filter(request => request.method === 'rpc').map(request => request.params?.command), [
     { type: 'get_available_models' }, { type: 'set_model', provider: 'provider', modelId: 'model-b' },
