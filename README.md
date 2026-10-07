@@ -63,13 +63,7 @@ Every command also accepts an unambiguous prefix: `pi-remote n --cwd /remote/pro
 
 `pi-remote ls`, the attach picker, and slot completion show each slot's Pi session name. This is Pi's own session name: the one `/name` sets and `/resume` shows. Set it with `/name NAME` in the attached UI.
 
-To name sessions automatically, install a Pi extension that does this **on the remote host**. Remote Pi loads it like any other extension, and pi-remote shows the name as soon as the extension sets it. For example, [`pi-auto-session-name`](https://github.com/patlux/pi-auto-session-name) names an unnamed session after its first run and keeps names set with `/name`:
-
-```sh
-ssh devbox pi install npm:pi-auto-session-name
-```
-
-Choose a cheap naming model in the remote `~/.pi/agent/extensions/auto-session-name.json`, for example `{"provider": "anthropic", "model": "claude-haiku-4-5"}`. Do not set `"reasoning": "off"` with that extension (version 0.1.1): Anthropic models then reject the request. Leave the option out to use its default. Extensions load when Pi starts, so slots that are already running do not get the extension.
+To name sessions automatically, install a Pi extension that does this **on the remote host**. Remote Pi loads it like any other extension, and pi-remote shows the name as soon as the extension sets it. For example, `auto-session-name.ts` in [rowantran/pi-extensions](https://github.com/rowantran/pi-extensions) names an unnamed session with a short slug after a run ends, and keeps names set with `/name`. Extensions load when Pi starts, so slots that are already running do not get a new extension.
 
 ### Configuration
 
