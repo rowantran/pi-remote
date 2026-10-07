@@ -181,6 +181,16 @@ On attach or refresh, a successful history snapshot replaces completed live mess
 
 The snapshot's optional `historyComplete` marker identifies this contract: `true` means saved history is current through the snapshot boundary; `false` means startup or a session transition is using cached history and an uncheckpointed live buffer. Neither form merges messages by timestamp. Unmarked snapshots from older daemons retain their legacy merge behavior. Both the client and daemon need this update to fix duplicate background notices. Deployment does not update a running daemon; follow the safe upgrade procedure below after its active work has finished.
 
+## Terminal bell and workspace urgency
+
+The local TUI rings the terminal bell (BEL) once when an observed remote run goes from busy to idle. This is built in and enabled by default; no presentation adapter or remote bell extension is needed. Attaching to an idle or busy slot, starting work, retries, and detaching do not ring. A reconnect or snapshot refresh that finds previously busy work idle rings once, as does a busy slot exiting. Duplicate events do not ring again.
+
+Ghostty's default `bell-features = attention,title` behavior adds a 🔔 title marker and requests attention. SketchyBar can mark a workspace urgent when a Ghostty window title starts with `🔔 `. Ghostty clears the marker on focus or keyboard input. Window titles do not aggregate all Ghostty split panes.
+
+Use `--no-bell` with `new` or `attach` to disable the built-in bell for that client. To disable it by default, set `"bell": false` in local `~/.pi/remote-client.json` (or the file selected by `--ui-config`). `/reload-ui` rereads the setting; `--no-bell` always wins. The bell still rings when work settles in a focused window; focus-aware suppression is not implemented.
+
+Do not also load a terminal-bell presentation adapter unless you want a second bell. Remote Pi's TUI-only `emit-terminal-bel.ts` remains inactive in RPC mode; native Pi can still use it.
+
 ## Extension compatibility and local presentation
 
 The **stock remote harness is unchanged**. Remote Pi loads extension factories normally; their agent hooks, tools, providers, and credentials stay remote. Its RPC UI forwards dialogs, notifications, status text, string-array widgets, terminal title, and editor text. It cannot transfer executable terminal components to the client.
@@ -198,7 +208,8 @@ Use repeatable `--ui-extension PATH` flags, or create **local** `~/.pi/remote-cl
 ```json
 {
   "extensions": ["/absolute/path/to/trusted-ui.ts"],
-  "theme": "dark"
+  "theme": "dark",
+  "bell": true
 }
 ```
 
@@ -213,11 +224,9 @@ pi-remote attach 1 --ui-config ./remote-ui.json --no-reconnect
 
 [`examples/rowan-ui.ts`](examples/rowan-ui.ts) is a **user-specific selective adapter**, not a portable default. It expects Rowan's extension repository locally at `~/.pi/agent/git/github.com/rowantran/pi-extensions`, or at `$PI_REMOTE_RENDERER_REPO`. It loads the original footer, caret, assistant-background, and compact-tool factories unchanged, selects the existing codemode renderers and the display-only `background/render.ts` message renderer, and runs the full original `worked-for.ts` factory.
 
-The adapter also runs the original `emit-terminal-bel.ts` factory unchanged. That factory writes a terminal bell (BEL) when Pi settles, but only when `ctx.mode` is `tui`. Remote Pi runs in RPC mode, so the factory does nothing there, and stdout carries JSONL anyway. The local host reports `tui` and forwards each remote `agent_settled` event, so the bell goes to the local terminal. Ghostty then shows its bell title marker (🔔) and dock badge. Tools that read window titles, such as a SketchyBar urgency script, can use this marker. Attaching to an idle slot does not ring. A reconnect or slot exit that finds finished work rings once.
-
 Worked-for uses a narrow local facade: its expected `worked-for` append is suppressed (other entry types throw), its model-context hook is not registered, and its normal display hooks, entry renderer, and Markdown transformer use the presentation host unchanged. Remote Pi alone persists timing entries; local settle events never write or forward them. Other extensions still cannot call `appendEntry` locally. The original timer updates the local working message and stops on settle, detach, and UI reload. The factory also patches native Pi's private `CustomEntryComponent` spacing, but this client's Transcript renders custom entries directly, so that patch does not establish native custom-entry spacing parity. Missing or incompatible original modules produce a load warning, not a handwritten fallback.
 
-The adapter avoids the provider, background-worker, MCP, Slack, and codemode execution factories. Background completion/check-in messages use the same compact header, five output lines, and hidden-line count as normal Pi. Full result content remains available to the remote agent and the background output tool. Update the local pi-extensions checkout to a version that includes `worked-for.ts`, `emit-terminal-bel.ts`, and `background/render.ts` before using this adapter. Review its imports and adapt paths before selecting it with `--ui-extension ./examples/rowan-ui.ts` or your config allowlist.
+The adapter avoids the provider, background-worker, MCP, Slack, and codemode execution factories. Background completion/check-in messages use the same compact header, five output lines, and hidden-line count as normal Pi. Full result content remains available to the remote agent and the background output tool. Update the local pi-extensions checkout to a version that includes `worked-for.ts` and `background/render.ts` before using this adapter. Review its imports and adapt paths before selecting it with `--ui-extension ./examples/rowan-ui.ts` or your config allowlist.
 
 ### Trust boundary
 

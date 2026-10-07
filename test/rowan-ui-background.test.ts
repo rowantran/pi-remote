@@ -44,8 +44,6 @@ async function withFakeRendererRepo(run: () => Promise<void>) {
           new Text(theme.fg('dim', 'Worked for ' + entry.data.elapsedSeconds + 's'), 1, 0));
       }
     `,
-    // Bell behavior is covered in rowan-ui.test.ts.
-    'emit-terminal-bel.ts': 'export default function() {}',
     // Any accidental worker or executor import must fail the adapter load.
     'background.ts': 'throw new Error("BACKGROUND WORKER FACTORY MUST NOT LOAD");',
     'background/executors.ts': 'throw new Error("BACKGROUND EXECUTORS MUST NOT LOAD");',

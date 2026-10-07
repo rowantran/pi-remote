@@ -42,6 +42,7 @@ Options:
   --ui-config PATH     Local presentation configuration
   --theme NAME         Local UI theme, or a LIGHT/DARK pair
   --no-reconnect       Disable automatic client reconnection
+  --no-bell            Disable the local terminal bell when remote work settles
 
 Configuration:
   $XDG_CONFIG_HOME/pi-remote/config.json (default ~/.config/pi-remote/config.json)
@@ -49,6 +50,8 @@ Configuration:
     {"host": "devbox", "cwd": "~/project"}
   Host precedence: --host, then PI_REMOTE_HOST, then the config file.
   Directory precedence: --cwd, then PI_REMOTE_CWD, then the config file.
+  Local UI: ~/.pi/remote-client.json (or --ui-config) supports {"bell": false}.
+  The bell defaults to on; --no-bell overrides the local UI config.
 
 SLOT is a stable number from ls, a full UUID, or a unique UUID prefix.
 attach without SLOT opens a local picker when several active slots exist.
@@ -70,7 +73,7 @@ Ctrl+D or /detach exits the local UI WITHOUT stopping remote work. Ctrl+C clears
 Explicit 'kill', or /quit in the UI, stops remote Pi. SSH authentication uses your existing config.
 Requires matching Pi ${PI_VERSION} on both machines.
 `;
-export interface UiOptions { presentationPaths?: string[]; presentationConfig?: string; theme?: string; host?: string }
+export interface UiOptions { presentationPaths?: string[]; presentationConfig?: string; theme?: string; host?: string; bell?: boolean }
 export interface Options { positionals: string[]; piArgs: string[]; values: Map<string,string>; flags: Set<string>; ui: UiOptions }
 export function parseOptions(args: string[]): Options {
   const options: Options = { positionals: [], piArgs: [], values: new Map(), flags: new Set(), ui: {} };
@@ -89,8 +92,10 @@ export function parseOptions(args: string[]): Options {
       if (flag === '--ui-extension') (options.ui.presentationPaths ??= []).push(value);
       if (flag === '--ui-config') options.ui.presentationConfig = value;
       if (flag === '--theme') options.ui.theme = value;
-    } else if (boolFlags.has(arg)) options.flags.add(arg);
-    else if (arg.startsWith('-')) throw new Error(`Unknown option ${arg}`);
+    } else if (boolFlags.has(arg)) {
+      options.flags.add(arg);
+      if (arg === '--no-bell') options.ui.bell = false;
+    } else if (arg.startsWith('-')) throw new Error(`Unknown option ${arg}`);
     else options.positionals.push(arg);
   }
   return options;

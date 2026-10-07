@@ -36,7 +36,6 @@ export default async function rowanUI(pi: ExtensionAPI) {
   const background = await loader.import<any>(join(root, 'assistant-background.ts'), { default: true });
   const compact = await loader.import<any>(join(root, 'compact-tools.ts'));
   const workedFor = await loader.import<any>(join(root, 'worked-for.ts'), { default: true });
-  const bell = await loader.import<any>(join(root, 'emit-terminal-bel.ts'), { default: true });
   const codemode = await loader.import<any>(join(root, 'codemode/render.ts'));
   const { renderBackgroundMessage } = await loader.import<{ renderBackgroundMessage: MessageRenderer }>(join(root, 'background/render.ts'));
   footer(pi);
@@ -48,10 +47,6 @@ export default async function rowanUI(pi: ExtensionAPI) {
   // Its private CustomEntryComponent spacing patch runs too, but our Transcript renders
   // custom entries directly and does not use that native wrapper.
   await workedFor(workedForPresentationAPI(pi));
-  // Remote Pi runs in RPC mode, where this factory is a no-op and stdout carries JSONL.
-  // Run it here instead: the local host reports mode "tui" and forwards remote settle
-  // events, so BEL reaches the local terminal (Ghostty's bell title, dock, SketchyBar).
-  bell(pi);
   // Completion/check-in notices share the renderer without loading background.ts workers.
   pi.registerMessageRenderer('background', renderBackgroundMessage);
 

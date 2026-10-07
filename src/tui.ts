@@ -89,6 +89,8 @@ export interface TuiOptions {
   renderIntervalMs?: number;
   /** Start with thinking blocks hidden, like Pi's `hideThinkingBlock` setting. */
   hideThinkingBlock?: boolean;
+  /** Ring the local terminal when remote work settles; overrides config, defaults to true. */
+  bell?: boolean;
   /** Local Pi preference; tree falls back to fork because RPC cannot navigate in place. */
   doubleEscapeAction?: DoubleEscapeAction;
 }
@@ -143,9 +145,13 @@ export class RemoteTui {
   private terminalColorScheme?: TerminalColorScheme;
   private themeSelection = 'system';
   private reloadQueue = Promise.resolve();
+  /** Undefined until local config is read; buffered startup events must respect its opt-out. */
+  private bell?: boolean;
+  private pendingBell = false;
 
   constructor(private connection: RemoteConnection, private slotId: string, snapshot: Snapshot,
     terminal: Terminal = new ProcessTerminal(), private options: TuiOptions = {}) {
+    this.bell = options.bell;
     setKeybindings(createRemoteKeybindings());
     // No session, extensions, providers, or remote resources are loaded locally.
     let initial: string | undefined;
@@ -181,7 +187,10 @@ export class RemoteTui {
     await this.queryTerminalColors();
     if (this.detached) return;
     try { await this.reloadPresentation(); }
-    catch (error) { this.notify(`Local presentation initialization failed: ${errorText(error)}`); }
+    catch (error) {
+      this.notify(`Local presentation initialization failed: ${errorText(error)}`);
+      if (this.bell === undefined) this.configureBell();
+    }
     if (this.detached) return;
     this.refreshPresentationData();
     this.metadataTimer = setInterval(() => this.refreshPresentationData(), 15_000);
@@ -246,6 +255,8 @@ export class RemoteTui {
   private async loadPresentation(): Promise<void> {
     if (this.detached) return;
     const config = await readPresentationConfig(this.options.presentationConfig, this.options.presentationPaths);
+    if (this.detached) return;
+    this.configureBell(config.bell);
     const selection = this.options.theme ?? config.theme ?? await readPiThemeSetting() ?? 'system';
     const theme = await loadLocalTheme(selection, undefined, this.appearance);
     if (this.detached) return;
@@ -513,7 +524,7 @@ export class RemoteTui {
     if (!this.view.apply(event)) return;
     this.transcript.changed();
     this.displayEvent(event.event);
-    if (event.event.type !== 'agent_start' && event.event.type !== 'agent_settled') this.reconcileWorkingLifecycle(wasBusy);
+    this.reconcileWorkingLifecycle(wasBusy, event.event.type);
     if (event.event.type === 'extension_ui_request' && event.event.method === 'notify') this.notify(event.event.message ?? '');
     if (event.event.type === 'extension_error') this.notify(`Extension error: ${event.event.error}`);
     if (event.event.type === 'remote_warning') this.notify(`Remote warning: ${event.event.error ?? event.event.message ?? 'State inspection failed; remote work is preserved.'}`);
@@ -611,10 +622,25 @@ export class RemoteTui {
     }
   }
 
-  /** Snapshot/slot-exit transitions must also start or stop local extension timers. */
-  private reconcileWorkingLifecycle(wasBusy: boolean): void {
+  private configureBell(configBell?: boolean): void {
+    this.bell = this.options.bell ?? configBell ?? true;
+    if (this.pendingBell) { this.pendingBell = false; this.ringBell(); }
+  }
+
+  private ringBell(): void {
+    if (this.detached) return;
+    if (this.bell === undefined) this.pendingBell = true;
+    else if (this.bell) this.tui.terminal.write('\x07');
+  }
+
+  /** Share settle detection with snapshots/reconnects, without replaying bells or display hooks. */
+  private reconcileWorkingLifecycle(wasBusy: boolean, eventType?: string): void {
     const busy = this.view.snapshot.live.busy;
-    if (wasBusy !== busy) this.displayEvent({ type: busy ? 'agent_start' : 'agent_settled' });
+    // Notify only on a busy-to-idle transition: retries, duplicate settles and idle attaches are quiet.
+    if (wasBusy && !busy) this.ringBell();
+    if (wasBusy !== busy && eventType !== 'agent_start' && eventType !== 'agent_settled') {
+      this.displayEvent({ type: busy ? 'agent_start' : 'agent_settled' });
+    }
   }
 
   private clearWorkingIndicator(): void {
