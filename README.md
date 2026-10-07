@@ -52,19 +52,24 @@ For local testing, replace the host with `--local` and use a local `--cwd`. `PI_
 
 ### Shell completion (fish, zsh, bash)
 
-In fish, run these commands from the checkout:
+Put `pi-remote` on `PATH` first (for example, run `fish_add_path (pwd)/bin` once from the checkout). Then add this line to **`~/.config/fish/config.fish`**, after your PATH setup:
 
 ```fish
-fish_add_path (pwd)/bin
-mkdir -p ~/.config/fish/completions
-pi-remote completion fish > ~/.config/fish/completions/pi-remote.fish
-source ~/.config/fish/completions/pi-remote.fish
-
-# Optional default for subsequent commands.
-set -gx PI_REMOTE_HOST devbox
+pi-remote completion fish | source
 ```
 
-Fish loads the installed completion file automatically in new shells. Type `pi-remote new devbox --cwd /remote/` and press Tab to list **remote directories**, not local ones. Slot completion after `pi-remote attach devbox ` includes numbers, status, session name, and workspace. `--session` completes remote files and directories, relative to `--cwd` when supplied.
+The command prints the versioned [`completions/pi-remote.fish`](completions/pi-remote.fish) script shipped with the repo. Sourcing it registers completions in the current shell; it does not install files, edit your config, or contact a remote host. Reloading the config does not register duplicate rules. Remote directories and slots are queried only when completion runs.
+
+If you prefer fish's automatic file loading, install the same script instead of adding the config line:
+
+```fish
+mkdir -p ~/.config/fish/completions
+pi-remote completion fish > ~/.config/fish/completions/pi-remote.fish
+```
+
+Choose one setup method. Remove a previously installed completion file if you switch to the config line. You can also set a default host with `set -gx PI_REMOTE_HOST devbox`.
+
+Type `pi-remote new devbox --cwd /remote/` and press Tab to list **remote directories**, not local ones. Slot completion after `pi-remote attach devbox ` includes numbers, status, session name, and workspace. `--session` completes remote files and directories, relative to `--cwd` when supplied.
 
 Remote `~` and relative completion prefixes use the remote home directory unless a completion base is supplied. Quote remote tilde paths, for example `--cwd '~/workplace/project'`, so your shell does not expand them to your **local** home. Prefer absolute paths for `--session` when launching. Completion is read-only: it may start the on-demand daemon, but never creates or attaches a Pi slot, sends a prompt, or runs an agent tool. An unavailable host produces no suggestions.
 

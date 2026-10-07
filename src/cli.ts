@@ -42,8 +42,9 @@ remote home; --session completion uses --cwd when supplied.
 Quote remote '~' paths so your shell does not expand them to LOCAL home.
 
 Completion installation (prints scripts; never edits shell configuration):
-  fish: pi-remote completion fish > ~/.config/fish/completions/pi-remote.fish
-        Create that directory first if needed; fish loads it automatically.
+  fish: pi-remote completion fish | source
+        Add this line to ~/.config/fish/config.fish after setting PATH.
+        Alternatively, save the output to ~/.config/fish/completions/pi-remote.fish.
   zsh:  pi-remote completion zsh > ~/.zsh/completions/_pi-remote
         Add ~/.zsh/completions to fpath before running compinit.
   bash: pi-remote completion bash > ~/.pi-remote-completion.bash

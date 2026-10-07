@@ -277,6 +277,11 @@ async function shellFixture(t: TestContext) {
 import { appendFile, readdir } from 'node:fs/promises';
 import { completeWords, formatCompletions, unquoteWord, tokenizeCompletionLine } from ${JSON.stringify(new URL('../src/completion.ts', import.meta.url).href)};
 const args = process.argv.slice(2);
+if (args[0] === 'completion') {
+  const { main } = await import(${JSON.stringify(new URL('../src/cli.ts', import.meta.url).href)});
+  await main(args);
+  process.exit(0);
+}
 await appendFile(process.env.PI_REMOTE_TEST_LOG, JSON.stringify(args) + '\\n');
 const shell = args[args.indexOf('--shell') + 1];
 let words = args.includes('--line') ? tokenizeCompletionLine(args[args.indexOf('--line')+1]).slice(1) : args.slice(args.indexOf('--') + 1);
@@ -309,6 +314,31 @@ if (output) process.stdout.write(output+'\\n');
 }
 const fishPath = process.platform === 'darwin' ? '/opt/homebrew/bin/fish' : '/usr/bin/fish';
 async function hasExecutable(path: string): Promise<boolean> { try { await access(path); return true; } catch { return false; } }
+
+test('fish config can pipe completion output into source repeatedly without files or duplicate requests', { timeout: 15000 }, async t => {
+  if (!await hasExecutable(fishPath)) { t.skip('fish is not installed'); return; }
+  const fixture = await shellFixture(t);
+  const config = join(fixture.dir, 'fish-config');
+  const script = `set -g fish_complete_path
+complete -c pi-remote -a user-kept
+pi-remote completion fish | source
+pi-remote completion fish | source
+# Emitting and sourcing scripts must not ask for remote candidates.
+test ! -e "$PI_REMOTE_TEST_LOG"; or exit 91
+complete -c pi-remote | string match --quiet '*user-kept*'; or exit 92
+complete -c pi-remote | count
+complete -C 'pi-remote new alias --cwd /remote/'`;
+  const { stdout, stderr } = await exec(fishPath, ['--no-config', '-c', script], {
+    env: { ...fixture.env, XDG_CONFIG_HOME: config }, cwd: root,
+  });
+  assert.equal(stderr, '');
+  const [rules, ...candidates] = stdout.trim().split('\n');
+  assert.equal(rules, '2', 'one project rule plus the preserved user rule');
+  assert.deepEqual(candidates.map(line => line.split('\t')[0]).sort(), fixture.names.map(name => `/remote/${name}/`).sort());
+  const requests = (await readFile(fixture.env.PI_REMOTE_TEST_RPC_LOG, 'utf8')).trim().split('\n');
+  assert.equal(requests.length, 1, 're-sourcing must not duplicate a remote lookup');
+  await assert.rejects(access(join(config, 'fish/completions/pi-remote.fish')), { code: 'ENOENT' });
+});
 
 test('fish complete -C: remote directory names with spaces, quotes, and syntax remain one candidate each', { timeout: 15000 }, async t => {
   if (!await hasExecutable(fishPath)) { t.skip('fish is not installed'); return; }
