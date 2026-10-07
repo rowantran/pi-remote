@@ -86,6 +86,41 @@ test('local widgets, commands, shortcuts, metadata and reload leave the remote h
   assert.equal(ui.presentation?.workingMessage, 'agent');
 });
 
+test('custom working messages stay above the editor with a custom footer and respect visibility', async t => {
+  const dir = await mkdtemp(resolve(tmpdir(), 'remote-working-status-'));
+  t.after(() => rm(dir, { recursive: true }));
+  const fixture = resolve(dir, 'working.ts');
+  await writeFile(fixture, `export default function(pi) {
+    pi.on('session_start', (_, ctx) => {
+      ctx.ui.setFooter(() => ({ invalidate() {}, render() { return ['custom footer']; } }));
+      ctx.ui.setWidget('above', ['above-editor widget']);
+      ctx.ui.setWidget('below', ['below-editor widget'], { placement: 'belowEditor' });
+    });
+    pi.on('agent_start', (_, ctx) => ctx.ui.setWorkingMessage('Custom working message'));
+    pi.registerCommand('hide-working', { handler(_, ctx) { ctx.ui.setWorkingVisible(false); } });
+    pi.registerCommand('show-working', { handler(_, ctx) { ctx.ui.setWorkingVisible(true); } });
+    pi.registerCommand('change-working', { handler(_, ctx) { ctx.ui.setWorkingMessage('Changed working message'); } });
+  }`);
+  const initial = snapshot(); initial.live.busy = true;
+  const { ui, submit } = await launch(t, initial, [fixture]);
+  const rows = () => { ui.tui.renderNow(); return ui.tui.getScreenLines().map(stripTerminalSequences); };
+  ui.editor.setText('prompt draft');
+  const screen = rows();
+  const markers = ['Custom working message', 'above-editor widget', 'prompt draft', 'below-editor widget', 'custom footer'];
+  const positions = markers.map(marker => screen.findIndex(row => row.includes(marker)));
+  assert.ok(positions.every(position => position >= 0), screen.join('\n'));
+  assert.deepEqual([...positions].sort((a, b) => a - b), positions, screen.join('\n'));
+  assert.equal(screen.filter(row => row.includes('Custom working message')).length, 1);
+  await submit('/hide-working');
+  assert.ok(!rows().some(row => row.includes('Custom working message')));
+  await submit('/show-working');
+  assert.equal(rows().filter(row => row.includes('Custom working message')).length, 1);
+  await submit('/change-working');
+  const changed = rows();
+  assert.ok(!changed.some(row => row.includes('Custom working message')));
+  assert.ok(changed.findIndex(row => row.includes('Changed working message')) < changed.findIndex(row => row.includes('custom footer')));
+});
+
 test('metadata, status and streaming updates preserve historical Markdown caches', async t => {
   const key = Symbol.for('pi-remote.test.render-cache');
   const counts = { history: 0, live: 0 };

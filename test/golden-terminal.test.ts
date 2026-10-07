@@ -51,10 +51,12 @@ test('golden restored-history comparison does not hide synthetic clock rows', ()
   assert.notEqual(history.canonical, syntheticClock.canonical, 'clock normalization must not remove missing or extra timer rows');
 });
 
-test('golden crop excludes the custom-editor Working footer without masking transcript text', () => {
-  const body = ['GOLDEN_USER', 'answer', '', '', '', ' ⠴ Working', ''];
-  assert.equal(crop(screen(body), 160).text, 'GOLDEN_USER\nanswer\n');
-  assert.match(crop(screen(['GOLDEN_USER', ' ⠴ Working', 'answer']), 160).text, /Working/);
+test('golden crop excludes native and remote working status without masking transcript text', () => {
+  for (const status of [' ⠴ Working', 'Working…']) {
+    const body = ['GOLDEN_USER', 'answer', '', '', '', status, ''];
+    assert.equal(crop(screen(body), 160).text, 'GOLDEN_USER\nanswer\n');
+    assert.match(crop(screen(['GOLDEN_USER', status, 'answer']), 160).text, /Working/);
+  }
 });
 
 test('golden crop keeps legacy remote heading and fails closed on missing boundaries', () => {

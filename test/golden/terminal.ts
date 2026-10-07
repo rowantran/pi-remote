@@ -95,9 +95,9 @@ export function crop(ansi: string, rows: number) {
   const borders = plain.flatMap((line, i) => i > start && /^[─━]{2}/u.test(line.trimStart()) ? [i] : []);
   let end = borders.at(-2) ?? -1;
   assert.ok(end > start, 'Cannot find editor border after transcript');
-  // A custom editor (for example prompt-caret) moves Pi's live status spinner
-  // above the editor border. It is footer UI, separated from the transcript.
-  const working = plain.findIndex((line, i) => i > start + 3 && /^\s*[\u2800-\u28ff]\s+Working\s*$/.test(line)
+  // Pi's custom-editor spinner and the remote client's working label sit above
+  // the editor border. They are prompt UI, separated from the transcript.
+  const working = plain.findIndex((line, i) => i > start + 3 && /^\s*(?:[\u2800-\u28ff]\s+Working|Working…)\s*$/.test(line)
     && canonical.slice(i - 3, i).every(row => row === '[]'));
   if (working >= 0 && working < end) end = working;
   while (end > start && canonical[end - 1] === '[]') end--;

@@ -575,8 +575,12 @@ export class RemoteTui {
       }
       for (const local of this.presentation?.widgets.values() ?? []) if (local.placement === placement) this.bottom.addChild(local.component);
     };
-    widget('aboveEditor');
+    // Match Pi's separate-status layout: pending prompts, status, widgets, editor, footer.
     this.bottom.addChild(new DynamicLines(width => this.queueLines(width)));
+    if (this.view.snapshot.live.busy && this.presentation?.workingVisible !== false) {
+      this.bottom.addChild(new Text(this.presentation?.workingMessage ?? muted('Working…'), 0, 0));
+    }
+    widget('aboveEditor');
     if (this.pendingAttachments.length) this.bottom.addChild(new Text(muted(`Attached: ${this.pendingAttachments.map(file => safeText(file.path)).join(', ')} · /clear-attachments to remove`), 0, 0));
     const control = this.activeRemote?.component ?? this.localDialog?.component ?? this.editor;
     this.bottom.addChild(control);
@@ -585,9 +589,6 @@ export class RemoteTui {
       if (!this.connected || this.view.snapshot.slot.status !== 'running') this.bottom.addChild(new Text(this.footer(), 0, 0));
       this.bottom.addChild(this.presentation.footer);
     } else this.bottom.addChild(new DynamicLines(() => [this.footer()]));
-    if (this.view.snapshot.live.busy && this.presentation?.workingVisible !== false) {
-      this.bottom.addChild(new Text(this.presentation?.workingMessage ?? muted('Working…'), 0, 0));
-    }
     this.tui.setFocus(control); this.tui.requestRender();
   }
 
