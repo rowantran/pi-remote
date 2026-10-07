@@ -96,7 +96,7 @@ Each pane is captured with **`tmux capture-pane -p -e -N`**. The harness keeps f
 Only these items are excluded or normalized:
 
 - Startup headers and warnings before the first user message.
-- The editor, footer, and the separate custom-editor Working spinner.
+- The editor, footer, and the separate working status above the editor (Pi's custom-editor spinner or the remote client's `Working…` label).
 - Stock's temporary `Tool output: ...` and `Thinking blocks: ...` notifications.
 - Invisible trailing spaces with no background, inverse, underline, or strike style.
 - The numeric value in standalone `Took 0.0s` / `Elapsed 0.0s` Bash clock labels. The short fixture runs below ten seconds. The label and its styles remain compared. Original values remain in the raw captures and text diffs.

@@ -239,6 +239,46 @@ test('footer shows the remote host and no key-hint line', async t => {
   assert.doesNotMatch(screen, /Alt\+Enter follow-up/);
 });
 
+test('working status stays above the prompt and footer while the agent runs', async t => {
+  const initial = snapshot(); initial.live.busy = true; initial.live.steering = ['queued instruction'];
+  initial.ui = [
+    { id: 'above', method: 'setWidget', widgetKey: 'above', widgetLines: ['above-editor widget'] },
+    { id: 'below', method: 'setWidget', widgetKey: 'below', widgetPlacement: 'belowEditor', widgetLines: ['below-editor widget'] },
+  ];
+  const { ui, terminal, connection } = launch(t, initial);
+  ui.editor.setText('prompt draft');
+  const rows = () => { ui.tui.renderNow(); return ui.tui.getScreenLines().map(stripTerminalSequences); };
+  const checkOrder = () => {
+    const screen = rows();
+    const markers = ['Steer: queued instruction', 'Working…', 'above-editor widget', 'prompt draft', 'below-editor widget', 'Working · slot'];
+    const positions = markers.map(marker => screen.findIndex(row => row.includes(marker)));
+    assert.ok(positions.every(position => position >= 0), screen.join('\n'));
+    assert.deepEqual([...positions].sort((a, b) => a - b), positions, screen.join('\n'));
+  };
+  checkOrder();
+  // A smaller viewport must still keep the status in the pinned prompt area.
+  terminal.rows = 12; terminal.resize(); checkOrder();
+  assert.equal(ui.editor.focused, true);
+  connection.emit(event(1, { type: 'agent_end', willRetry: true }));
+  checkOrder();
+  connection.handler = method => method === 'snapshot' ? snapshot({ seq: 2 }) : {};
+  connection.emit(event(2, { type: 'agent_settled' })); await flush();
+  assert.ok(!rows().some(row => row.includes('Working…')));
+  assert.ok(rows().some(row => row.includes('Ready · slot')));
+});
+
+test('working status remains above a remote dialog instead of below the footer', async t => {
+  const initial = snapshot({ ui: [{ id: 'dialog', method: 'input', title: 'Remote question' }] });
+  initial.live.busy = true;
+  const { ui } = launch(t, initial);
+  ui.tui.renderNow();
+  const screen = ui.tui.getScreenLines().map(stripTerminalSequences);
+  const working = screen.findIndex(row => row.includes('Working…'));
+  const dialog = screen.findIndex(row => row.includes('Remote question'));
+  const footer = screen.findIndex(row => row.includes('Working · slot'));
+  assert.ok(working >= 0 && working < dialog && dialog < footer, screen.join('\n'));
+});
+
 test('detach message includes the slot number when known', () => {
   assert.equal(detachMessage('uuid', 3), 'Detached from slot 3 / uuid');
   assert.equal(detachMessage('uuid'), 'Detached from slot uuid');

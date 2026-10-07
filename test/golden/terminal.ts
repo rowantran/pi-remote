@@ -95,10 +95,14 @@ export function crop(ansi: string, rows: number) {
   const borders = plain.flatMap((line, i) => i > start && /^[─━]{2}/u.test(line.trimStart()) ? [i] : []);
   let end = borders.at(-2) ?? -1;
   assert.ok(end > start, 'Cannot find editor border after transcript');
-  // A custom editor (for example prompt-caret) moves Pi's live status spinner
-  // above the editor border. It is footer UI, separated from the transcript.
-  const working = plain.findIndex((line, i) => i > start + 3 && /^\s*[\u2800-\u28ff]\s+Working\s*$/.test(line)
-    && canonical.slice(i - 3, i).every(row => row === '[]'));
+  // Pi's custom-editor spinner and the remote client's working label sit above
+  // the editor border. They are prompt UI, separated from the transcript.
+  // Inspect only the prompt edge, allowing up to three blank padding rows.
+  // A status-shaped transcript line must never hide later transcript content.
+  const working = plain.findIndex((line, i) => i > start + 3 && i < end && end - i <= 4
+    && /^\s*(?:[\u2800-\u28ff]\s+Working|Working…)\s*$/.test(line)
+    && canonical.slice(i - 3, i).every(row => row === '[]')
+    && canonical.slice(i + 1, end).every(row => row === '[]'));
   if (working >= 0 && working < end) end = working;
   while (end > start && canonical[end - 1] === '[]') end--;
   assert.ok(end - start < rows - 12, 'Transcript might be clipped; increase --rows');
