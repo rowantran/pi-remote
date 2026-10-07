@@ -663,3 +663,12 @@ test('new_session awaiting an extension hook dialog remains answerable after dis
   assert.deepEqual(completed.live, clearedLive);
   assert.equal(completed.slot.status, 'running');
 });
+
+test('an explicit kill records a clean stop reason without startup stderr', { timeout: 10_000 }, async t => {
+  const { peer, create } = await setup(t);
+  const info = await create();
+  await peer.request('kill', { slotId: info.id });
+  const [stopped] = await peer.request<SlotInfo[]>('list');
+  assert.equal(stopped.status, 'exited');
+  assert.equal(stopped.error, 'Stopped by request (code=0, signal=null).');
+});

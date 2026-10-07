@@ -248,11 +248,11 @@ test('completion reads host defaults and connection flags without confusing opti
   }
 });
 
-test('attach, kill, watch, and rpc offer short slots with cwd/name/state labels', async () => {
+test('attach, kill, watch, and rpc offer running slots with cwd/name/state labels', async () => {
   for (const command of ['attach', 'kill', 'watch', 'rpc']) {
     const remote = fakeRemote();
     const result = await completeWords([command, '--host', 'alias', ''], { connect: remote.connect });
-    assert.deepEqual(result.map(item => item.value), command === 'kill' ? ['19', '3'] : ['19', '3', '40']);
+    assert.deepEqual(result.map(item => item.value), ['19', '3']);
     assert.equal(result[0].label, 'running · Fix quoted paths · /remote/project with spaces');
     assert.deepEqual(remote.calls, [{ method: 'list', params: undefined }]);
     assert.equal(remote.closed(), 1);
@@ -266,7 +266,7 @@ test('slot completion respects default/explicit hosts and numeric versus UUID pr
     assert.equal(remote.connections[0].host, 'default');
   }
   const remote = fakeRemote();
-  assert.deepEqual((await completeWords(['attach', '--host', 'host', 'abc'], { connect: remote.connect })).map(item => item.value), ['abcdefff-b', 'abcdefff-c']);
+  assert.deepEqual((await completeWords(['attach', '--host', 'host', 'abc'], { connect: remote.connect })).map(item => item.value), ['abcdefff-b']);
 });
 
 test('completion does not contact remote hosts for unrelated tokens, missing hosts, or forwarded Pi flags', async () => {
@@ -433,12 +433,12 @@ test('fish complete -C handles --cwd=, unfinished quotes, escaped spaces, remote
   }
 });
 
-test('fish complete -C: attach/kill/watch/rpc list stable short slot numbers with descriptive labels', { timeout: 20000 }, async t => {
+test('fish complete -C: attach/kill/watch/rpc list running slots by stable short number with descriptive labels', { timeout: 20000 }, async t => {
   if (!await hasExecutable(fishPath)) { t.skip('fish is not installed'); return; }
   const fixture = await shellFixture(t);
   for (const command of ['attach', 'kill', 'watch', 'rpc']) {
     const { stdout } = await exec(fishPath, ['--no-config', '-c', `source ${shellQuote(join(root, 'completions/pi-remote.fish'))}; complete -C "$PI_REMOTE_LINE"`], { env: { ...fixture.env, PI_REMOTE_LINE: `pi-remote ${command} --host alias ` }, cwd: root });
-    assert.deepEqual(stdout.trim().split('\n').map(line => line.split('\t')[0]).sort(), (command === 'kill' ? ['19', '3'] : ['19', '3', '40']).sort());
+    assert.deepEqual(stdout.trim().split('\n').map(line => line.split('\t')[0]).sort(), ['19', '3']);
     assert.match(stdout, /19\trunning · Fix quoted paths · \/remote\/project with spaces/);
   }
 });

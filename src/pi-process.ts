@@ -34,7 +34,8 @@ export class PiProcess {
     });
     this.child.once('error', error => { fail(error); this.resolveExit(); });
     this.child.once('close', (code, signal) => {
-      fail(new Error(`Pi exited (code=${code}, signal=${signal}). ${this.stderrTail}`));
+      // After an explicit stop, startup warnings in stderr are noise, not a cause.
+      fail(new Error(this.closing ? `Stopped by request (code=${code}, signal=${signal}).` : `Pi exited (code=${code}, signal=${signal}). ${this.stderrTail}`));
       this.resolveExit();
     });
     this.child.stdin.on('error', fail);
