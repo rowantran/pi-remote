@@ -1,23 +1,25 @@
 import { readAttachment } from './files.js';
+import { Transcript } from './transcript.js';
+import { createRemoteKeybindings } from './keybindings.js';
 import { readLocalClipboard, editLocally } from './local-input.js';
-import { PresentationHost, readPresentationConfig, createPresentationTheme, type PresentationToolContext } from './presentation.js';
+import { PresentationHost, readPresentationConfig, createPresentationTheme } from './presentation.js';
 import { loadLocalTheme } from './local-theme.js';
 import { RemoteAutocompleteProvider, transformPromptWithAttachments } from './editor-completion.js';
 import {
-  copyToClipboard, getMarkdownTheme, getSelectListTheme, initTheme,
+  copyToClipboard, getSelectListTheme, initTheme,
   type SessionInfo, type Theme,
 } from '@earendil-works/pi-coding-agent';
 import {
   type Component, Container, Editor, type Focusable, fuzzyFilter, getKeybindings, Input, isKeyRelease, Key,
-  Markdown, matchesKey, ProcessTerminal, ScrollView, SelectList, type SelectItem,
-  Text, type Terminal, TuiAltScreen, truncateToWidth, VStack, wrapTextWithAnsi,
+  matchesKey, ProcessTerminal, ScrollView, SelectList, type SelectItem, setKeybindings,
+  Text, type Terminal, TuiAltScreen, truncateToWidth, VStack,
 } from '@earendil-works/pi-tui';
 import {
   errorText,
   type RecordValue, type RemoteConnection, type RemoteEvent, type Snapshot,
 } from './protocol.js';
 import {
-  DIALOG_METHODS, RemoteView, restoredQueueText, safeText, toolText, transcriptMessages,
+  DIALOG_METHODS, RemoteView, restoredQueueText, safeText, transcriptMessages,
 } from './view.js';
 
 const accent = (text: string) => `\x1b[36m${text}\x1b[39m`;
@@ -69,152 +71,6 @@ class Dialog extends Container implements Focusable {
   handleInput(data: string): void { if (this.inputHandler) this.inputHandler(data); else this.control.handleInput?.(data); }
 }
 
-class MessageDisplay implements Component {
-  private children: Component[] = [];
-  constructor(message: RecordValue, expanded: boolean, thinking: boolean, host?: PresentationHost,
-    tool?: (id: string) => Component | undefined, usedTools = new Set<string>()) {
-    const text = (value: unknown, color = (s: string) => s) => this.children.push(new Text(color(safeText(value)), 0, 0));
-    const markdown = (value: unknown, messageType: 'user' | 'assistant' | 'assistant-thinking' = 'assistant') => {
-      let component: Markdown | undefined; let lastWidth: number | undefined;
-      this.children.push({ render(width) {
-        if (!component || lastWidth !== width) {
-          const source = safeText(value);
-          const transformed = host?.transformMarkdown(source, { messageType, isStreaming: message.stopReason === 'pending', availableWidth: width }) ?? source;
-          component = new Markdown(transformed, 0, 0, getMarkdownTheme()); lastWidth = width;
-        }
-        return component.render(width);
-      }, invalidate() { component = undefined; } });
-    };
-    const appendTool = (id: string): boolean => {
-      if (usedTools.has(id)) return true;
-      const component = tool?.(id);
-      if (!component) return false;
-      usedTools.add(id); this.children.push(component); return true;
-    };
-    switch (message.role) {
-      case 'system': return;
-      case 'entry': {
-        const component = host?.renderEntry(message, { expanded });
-        if (component) { this.children.push(component); break; }
-        text(message.content ?? `Session entry: ${message.customType ?? 'custom'} (renderer not loaded)`, muted); break;
-      }
-      case 'custom': {
-        if (message.display === false) return;
-        const component = host?.renderMessage(message, { expanded, outputPad: 0 });
-        if (component) { this.children.push(component); break; }
-        text(`[${message.customType ?? 'extension'}]`, accent); markdown(contentText(message.content)); break;
-      }
-      case 'user': text('You', accent); markdown(contentText(message.content), 'user'); break;
-      case 'assistant':
-        text('Pi', accent);
-        for (const block of Array.isArray(message.content) ? message.content : []) {
-          if (!block) continue;
-          if (block.type === 'text') markdown(block.text);
-          else if (block.type === 'thinking') {
-            if (thinking) markdown(block.thinking || '[redacted thinking]', 'assistant-thinking');
-            else text(host?.hiddenThinkingLabel ?? 'Thinking (Ctrl+T to show)', muted);
-          } else if (block.type === 'toolCall' && !appendTool(block.id)) text(toolHeading(block.name, block.arguments, block.argumentText), muted);
-        }
-        if (message.errorMessage) text(message.errorMessage, errorColor);
-        if (message.stopReason === 'aborted') text('Aborted', warning);
-        break;
-      case 'toolResult':
-        if (appendTool(message.toolCallId)) break;
-        text(`${message.isError ? '✗' : '✓'} ${message.toolName ?? 'tool'}`, message.isError ? errorColor : muted);
-        this.children.push(new ToolOutput(toolText(message), expanded)); break;
-      case 'bashExecution':
-        text(`$ ${message.command}`, muted);
-        this.children.push(new ToolOutput(safeText(message.output), expanded)); break;
-      case 'compactionSummary': case 'branchSummary':
-        text(message.role === 'compactionSummary' ? 'Context compacted' : 'Branch summary', muted);
-        if (expanded) markdown(message.summary); break;
-      default: text(message.content ? contentText(message.content) : `[${message.role ?? 'message'}]`, muted);
-    }
-    if (this.children.length) this.children.push(new Text('', 0, 0));
-  }
-  render(width: number): string[] { return this.children.flatMap(child => child.render(width)).map(line => truncateToWidth(line, width, '')); }
-  invalidate(): void { for (const child of this.children) child.invalidate(); }
-}
-
-function contentText(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  return content.filter(Boolean).map(block => block.type === 'text' ? block.text : block.type === 'image' ? `[image: ${block.mimeType}]` : '').filter(Boolean).join('\n');
-}
-function toolHeading(name: unknown, args?: RecordValue, argumentText?: string): string {
-  const detail = args?.command ?? args?.path ?? args?.pattern ?? argumentText ?? (args && Object.keys(args).length ? JSON.stringify(args) : '');
-  return safeText(`${name ?? 'tool'}${detail ? `: ${detail}` : ''}`).replace(/\n/g, ' ');
-}
-
-class ToolOutput implements Component {
-  private cachedWidth?: number;
-  private cachedLines?: string[];
-  constructor(private text: string, private expanded: boolean) {}
-  render(width: number): string[] {
-    if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
-    const lines = wrapTextWithAnsi(this.text, Math.max(1, width));
-    const output = this.expanded ? lines : lines.slice(0, 3);
-    if (!this.expanded && lines.length > 3) output.push(`… ${lines.length - 3} more lines (Ctrl+O to expand)`);
-    this.cachedWidth = width;
-    return this.cachedLines = output.map(line => truncateToWidth(muted(line), width, ''));
-  }
-  invalidate(): void { this.cachedLines = undefined; }
-}
-
-class Transcript implements Component {
-  private cachedLines?: string[];
-  private cachedWidth?: number;
-  expanded = false;
-  thinking = false;
-  readonly notices: string[] = [];
-  constructor(private view: RemoteView, private presentation: () => PresentationHost | undefined = () => undefined) {}
-  changed(): void { this.cachedLines = undefined; }
-  invalidate(): void { this.changed(); }
-  notify(message: string): void { this.notices.push(safeText(message)); if (this.notices.length > 50) this.notices.shift(); this.changed(); }
-  render(width: number): string[] {
-    if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
-    const messages = transcriptMessages(this.view.snapshot);
-    const host = this.presentation();
-    const tools = new Map<string, RecordValue>();
-    for (const message of messages) {
-      if (message.role === 'assistant') for (const block of Array.isArray(message.content) ? message.content : []) {
-        if (block?.type === 'toolCall' && block.id) tools.set(block.id, { name: block.name, args: block.arguments, argsComplete: message.stopReason !== 'pending' });
-      }
-    }
-    for (const live of Object.values(this.view.snapshot.live.tools)) tools.set(live.toolCallId, {
-      ...tools.get(live.toolCallId), name: live.toolName, args: live.args ?? tools.get(live.toolCallId)?.args,
-      result: live.result ?? live.partialResult, isPartial: live.type !== 'tool_execution_end', isError: !!live.isError, executionStarted: true, argsComplete: true,
-    });
-    for (const message of messages) if (message.role === 'toolResult') tools.set(message.toolCallId, {
-      ...tools.get(message.toolCallId), name: message.toolName, result: message, isPartial: false, isError: !!message.isError, executionStarted: true, argsComplete: true,
-    });
-    host?.retainToolCalls(tools.keys());
-    const used = new Set<string>();
-    const displayTool = (id: string): Component | undefined => {
-      const tool = tools.get(id); if (!tool) return undefined;
-      const context: PresentationToolContext = { toolCallId: id, args: tool.args ?? {}, expanded: this.expanded,
-        isPartial: tool.isPartial ?? !tool.result, isError: !!tool.isError, executionStarted: !!tool.executionStarted, argsComplete: !!tool.argsComplete };
-      // Build both slots before rendering either: compact result renderers update shared call state.
-      const call = host?.renderCall(tool.name, context.args, context);
-      const result = tool.result && host?.renderResult(tool.name, tool.result, { expanded: this.expanded, isPartial: !!context.isPartial }, context);
-      const children: Component[] = [call ?? new Text(muted(`${tool.isError ? '✗' : tool.result && !context.isPartial ? '✓' : '⋯'} ${toolHeading(tool.name, tool.args)}`), 0, 0)];
-      if (result) children.push(result);
-      else if (tool.result) children.push(new ToolOutput(toolText(tool.result), this.expanded));
-      return { render: width => children.flatMap(child => child.render(width)), invalidate: () => children.forEach(child => child.invalidate()) };
-    };
-    const lines: string[] = host?.header?.render(width) ?? [];
-    for (const message of messages) lines.push(...new MessageDisplay(message, this.expanded, this.thinking, host, displayTool, used).render(width));
-    for (const id of tools.keys()) if (!used.has(id)) lines.push(...(displayTool(id)?.render(width) ?? []));
-    for (const shell of Object.values(this.view.snapshot.live.bash ?? {})) {
-      lines.push(muted('⋯ Remote shell'));
-      lines.push(...new ToolOutput(safeText(shell.output), this.expanded).render(width));
-    }
-    for (const notice of this.notices) lines.push(...wrapTextWithAnsi(warning(notice), Math.max(1, width)));
-    this.cachedWidth = width;
-    return this.cachedLines = lines.map(line => truncateToWidth(line, width, ''));
-  }
-}
-
 export interface TuiOptions { presentationPaths?: string[]; presentationConfig?: string; theme?: string }
 
 /** Exported for terminal-adapter tests; uses only the public pi-tui API. */
@@ -259,6 +115,7 @@ export class RemoteTui {
 
   constructor(private connection: RemoteConnection, private slotId: string, snapshot: Snapshot,
     terminal: Terminal = new ProcessTerminal(), private options: TuiOptions = {}) {
+    setKeybindings(createRemoteKeybindings());
     initTheme(options.theme, false); // No session, extensions, providers, or remote resources are loaded locally.
     this.view = new RemoteView(snapshot);
     this.tui = new TuiAltScreen(terminal, true, undefined, { copySelection: async text => {
@@ -266,7 +123,7 @@ export class RemoteTui {
     } });
     this.editor = this.makeEditor();
     this.editor.onSubmit = text => { void this.submit(text, 'steer'); };
-    this.transcript = new Transcript(this.view, () => this.presentation);
+    this.transcript = new Transcript(this.view, this.tui, () => this.presentation);
     this.root = new DocumentLayout([
       { component: new ScrollView(this.transcript, { primary: true, follow: 'end', scrollbar: 'auto' }), basis: 0, grow: 1, minSize: 1 },
       { component: this.bottom, basis: 'auto', shrink: 1, minSize: 1 },
@@ -296,7 +153,11 @@ export class RemoteTui {
     const config = await readPresentationConfig(this.options.presentationConfig, this.options.presentationPaths);
     const theme = await loadLocalTheme(this.options.theme ?? config.theme);
     if (this.detached) return;
-    await this.presentation?.shutdown();
+    const previous = this.presentation;
+    this.presentation = undefined; // Async shutdown must not rebuild rows against a retiring host.
+    this.transcript.reset(); // Stop native renderer timers before disabling the old host.
+    await previous?.shutdown();
+    if (this.detached) return;
     this.localTheme = theme;
     this.appliedEditorFactory = undefined;
     const host = new PresentationHost({
@@ -311,6 +172,8 @@ export class RemoteTui {
     await host.load(config.extensions);
     if (this.detached) { await host.shutdown(); return; }
     await host.start();
+    // Loading a factory can request a render before its later registrations finish.
+    this.transcript.reset();
     if (this.view.snapshot.live.busy) await host.dispatch({ type: 'agent_start' });
     this.installEditor(true);
     this.completion?.invalidateCommands();
@@ -428,7 +291,7 @@ export class RemoteTui {
         this.view.replace(snapshot);
         this.view.snapshot.presentation = { ...presentation, ...snapshot.presentation };
         this.metadataPending.clear();
-        this.presentation?.retainToolCalls([]);
+        this.transcript.reset();
         this.displayEvent({ type: 'session_switch', reason: 'reconnect' });
         this.answering.clear();
         this.transcript.invalidate(); this.syncBottom();
@@ -484,11 +347,13 @@ export class RemoteTui {
     if (this.detached) return;
     this.detached = true; this.generation++;
     clearInterval(this.metadataTimer);
-    void this.presentation?.shutdown();
     for (const unsubscribe of this.unsubscribe.splice(0)) unsubscribe();
     // Cancel only a LOCAL picker promise. Never answer a remote dialog on detach.
     this.localDialog?.cancel();
     try { this.tui.stop(); } finally {
+      // Stop output before retiring components: remote tools still run after detach.
+      this.transcript.reset();
+      void this.presentation?.shutdown();
       this.connection.close(); this.finish?.();
     }
   }

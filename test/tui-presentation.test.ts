@@ -5,6 +5,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { AssistantMessageComponent, ToolExecutionComponent } from '@earendil-works/pi-coding-agent';
 import { stripTerminalSequences, visibleWidth, type Terminal } from '@earendil-works/pi-tui';
 import { RemoteTui } from '../src/tui.js';
 import { createPresentationTheme } from '../src/presentation.js';
@@ -83,6 +84,56 @@ test('local widgets, commands, shortcuts, metadata and reload leave the remote h
   assert.equal(ui.view.snapshot.seq, 4); assert.equal(ui.view.snapshot.presentation?.gitBranch, 'remote-git');
   connection.listener?.({ type: 'event', slotId: 'slot', seq: 5, event: { type: 'agent_start' } }); await flush();
   assert.equal(ui.presentation?.workingMessage, 'agent');
+});
+
+test('partial shell timers are retired on UI reload, reconnect and detach without stopping remote work', async t => {
+  for (const action of ['reload', 'async-reload', 'reconnect', 'detach']) await t.test(action, async t => {
+    const active = new Set<ReturnType<typeof setInterval>>();
+    const originalSet = globalThis.setInterval, originalClear = globalThis.clearInterval;
+    t.mock.method(globalThis, 'setInterval', (callback: (...args: any[]) => void, ms: number, ...args: any[]) => {
+      const timer = originalSet(callback, ms, ...args); if (ms === 1000) active.add(timer); return timer;
+    });
+    t.mock.method(globalThis, 'clearInterval', (timer: ReturnType<typeof setInterval>) => { active.delete(timer); originalClear(timer); });
+    let ui: RemoteTui | undefined;
+    let releaseShutdown = () => {};
+    const gateKey = Symbol.for('pi-remote.test.shutdown-gate');
+    try {
+      const initial = snapshot(); initial.live.busy = true;
+      initial.live.messages = [{ role: 'assistant', timestamp: 1, stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'running', name: 'bash', arguments: { command: 'fixture' } }] }];
+      initial.live.tools.running = { toolCallId: 'running', toolName: 'bash', type: 'tool_execution_update', partialResult: { content: [{ type: 'text', text: 'partial output' }] } };
+      const paths: string[] = [];
+      if (action === 'async-reload') {
+        const dir = await mkdtemp(resolve(tmpdir(), 'remote-shutdown-')); t.after(() => rm(dir, { recursive: true }));
+        const path = resolve(dir, 'async-shutdown.ts');
+        await writeFile(path, `export default function(pi) { pi.on('session_shutdown', async () => {
+          const gate = globalThis[Symbol.for('pi-remote.test.shutdown-gate')];
+          if (gate) { gate.entered(); await gate.wait; }
+        }); }`);
+        paths.push(path);
+      }
+      const launched = await launch(t, initial, paths); ui = launched.ui;
+      ui.tui.renderNow(); assert.equal(active.size, 1);
+      const originalTimer = [...active][0];
+      if (action === 'reload') { await launched.submit('/reload-ui'); ui.tui.renderNow(); }
+      if (action === 'async-reload') {
+        let entered!: () => void;
+        const enteredPromise = new Promise<void>(resolve => { entered = resolve; });
+        const wait = new Promise<void>(resolve => { releaseShutdown = resolve; });
+        (globalThis as any)[gateKey] = { entered, wait };
+        const reloading = (ui as any).reloadPresentation();
+        await enteredPromise;
+        ui.tui.renderNow(); // Simulate incoming remote output while shutdown awaits.
+        assert.equal(active.size, 1);
+        releaseShutdown(); await reloading; ui.tui.renderNow();
+      }
+      if (action === 'reconnect') { launched.connection.reconnected?.(structuredClone(initial)); await flush(); ui.tui.renderNow(); }
+      if (action !== 'detach') { assert.ok(!active.has(originalTimer)); assert.equal(active.size, 1); }
+      ui.detach(); await flush(); assert.equal(active.size, 0);
+      assert.equal(ui.view.snapshot.live.busy, true);
+      assert.equal(ui.view.snapshot.live.tools.running.partialResult.content[0].text, 'partial output');
+      assert.ok(!launched.connection.requests.some(request => ['kill', 'abort', 'abort_bash'].includes(request.params?.command?.type ?? request.method)));
+    } finally { releaseShutdown(); delete (globalThis as any)[gateKey]; ui?.detach(); for (const timer of active) originalClear(timer); }
+  });
 });
 
 test('oversized combined attachment payload is rejected before sending a prompt', async t => {
@@ -168,8 +219,15 @@ test('actual Rowan adapter renders virtual footer, caret, compact tools, codemod
   ], details: { calls: [{ id: 'nested1', name: 'read', args: '{"path":"/remote/nested.ts"}', status: 'ok' }] } }];
   initial.entries = [{ type: 'custom', id: 'worked', parentId: null, customType: 'worked-for', data: { elapsedSeconds: 75 } }]; initial.leafId = 'worked';
   const adapter = fileURLToPath(new URL('../examples/rowan-ui.ts', import.meta.url));
+  const assistantRender = AssistantMessageComponent.prototype.render;
+  const toolRender = ToolExecutionComponent.prototype.render;
   const { ui, terminal, connection, submit } = await launch(t, initial, [adapter]);
   assert.ok(ui.presentation?.footer, (ui as any).transcript.notices.join('\n'));
+  assert.notEqual(AssistantMessageComponent.prototype.render, assistantRender);
+  assert.notEqual(ToolExecutionComponent.prototype.render, toolRender);
+  assert.equal(ui.presentation!.transformMarkdown('_Worked for 1m 15s_', {
+    messageType: 'assistant', isStreaming: false, availableWidth: 140,
+  }), '');
   const footer = stripTerminalSequences(ui.presentation!.footer!.render(140).join('\n'));
   assert.match(footer, /physical high/); assert.match(footer, /73% left/); assert.match(footer, /remote-git/);
   ui.editor.setText('draft'); assert.match(stripTerminalSequences(ui.editor.render(140).join('\n')), /› draft/);

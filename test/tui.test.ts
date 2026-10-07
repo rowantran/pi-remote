@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Terminal } from '@earendil-works/pi-tui';
-import { visibleWidth } from '@earendil-works/pi-tui';
+import { stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
 import type { RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../src/protocol.js';
 import { RemoteTui } from '../src/tui.js';
 import { activeBranch, applyAssistantDelta, RemoteView, restoredQueueText, safeText, toolText, transcriptMessages } from '../src/view.js';
@@ -310,7 +310,7 @@ test('rendering handles Unicode, streamed Markdown, compact tool output, and ver
   const initial = snapshot(); initial.live.messages = [
     { ...message('user'), content: '世界 👩‍💻 café' },
     { ...message('assistant', 2), content: [{ type: 'text', text: '# Heading\n\n```ts\nconst value = "世界";\n```\n\n| key | value |\n| --- | --- |\n| 世界 | longlonglong |' }] },
-    { role: 'toolResult', timestamp: 3, toolCallId: 'call', toolName: 'test', content: [{ type: 'text', text: Array.from({ length: 20 }, (_, i) => `output ${i}`).join('\n') }] },
+    { role: 'toolResult', timestamp: 3, toolCallId: 'call', toolName: 'read', content: [{ type: 'text', text: Array.from({ length: 20 }, (_, i) => `output ${i}`).join('\n') }] },
   ];
   const { ui, terminal } = launch(t, initial);
   for (const width of [80, 20, 6, 1]) {
@@ -319,8 +319,19 @@ test('rendering handles Unicode, streamed Markdown, compact tool output, and ver
     assert.ok(lines.every(line => visibleWidth(line) <= width), `overflow at width ${width}`);
   }
   terminal.columns = 80; ui.tui.invalidate(); ui.tui.renderNow();
-  const before = ui.tui.render(80).join('\n'); assert.match(before, /more lines/); assert.doesNotMatch(before, /output 19/);
+  const before = ui.tui.render(80).join('\n'); assert.doesNotMatch(before, /output 19/); // Pi collapses successful read output entirely.
   terminal.input('\x0f'); ui.tui.renderNow(); assert.match(ui.tui.render(80).join('\n'), /output 19/);
+});
+
+test('stock tool previews show the same application shortcut the client handles', t => {
+  const initial = snapshot(); initial.live.messages = [
+    { ...message('assistant', 1), content: [{ type: 'toolCall', id: 'bash', name: 'bash', arguments: { command: 'fixture' } }] },
+    { role: 'toolResult', timestamp: 2, toolCallId: 'bash', toolName: 'bash', content: [{ type: 'text', text: Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n') }], isError: false },
+  ];
+  const { ui, terminal } = launch(t, initial);
+  assert.match(stripTerminalSequences(ui.tui.render(80).join('\n')), /ctrl\+o to expand/);
+  terminal.input('\x0f');
+  assert.match(stripTerminalSequences(ui.tui.render(80).join('\n')), /line 0/);
 });
 
 test('custom entry with an unpersisted parent does not hide existing raw history', () => {

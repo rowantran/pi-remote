@@ -14,10 +14,13 @@ export default async function rowanUI(pi: ExtensionAPI) {
   const loader = createJiti(import.meta.url, { interopDefault: true, moduleCache: false, alias });
   const footer = await loader.import<any>(join(root, 'codex-footer.ts'), { default: true });
   const caret = await loader.import<any>(join(root, 'prompt-caret.ts'), { default: true });
+  const background = await loader.import<any>(join(root, 'assistant-background.ts'), { default: true });
   const compact = await loader.import<any>(join(root, 'compact-tools.ts'));
   const codemode = await loader.import<any>(join(root, 'codemode/render.ts'));
   footer(pi);
   caret(pi);
+  // The transcript uses the same public Pi classes this original factory decorates.
+  background(pi);
   compact.default(pi);
 
   // Capture only the existing render functions. No codemode runtime is instantiated.
@@ -42,5 +45,7 @@ export default async function rowanUI(pi: ExtensionAPI) {
       : seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`;
     return new Text(theme.fg('dim', `Worked for ${label}`), 1, 0);
   });
-  pi.registerEntryRenderer('pi.virtual-model-state', () => new Text('', 0, 0));
+  // Preserve the original extension's display-only filter for older timing messages.
+  pi.registerMarkdownTransformer((markdown, context) => context.messageType === 'assistant'
+    && /^_Worked for (?:(?:\d+h )?\d+m )?\d+s_$/.test(markdown) ? '' : markdown);
 }

@@ -9,10 +9,12 @@
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test test/*.test.ts",
+    "test:golden": "node --import tsx test/golden-transcript.ts",
     "verify": "npm run check && npm test && npm run build"
   },
   "engines": { "node": ">=22.19" },
   "dependencies": {
+    "@earendil-works/pi-ai": "1.0.4",
     "@earendil-works/pi-coding-agent": "1.0.4",
     "@earendil-works/pi-tui": "1.0.4",
     "jiti": "2.7.0"

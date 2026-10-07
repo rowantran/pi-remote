@@ -65,6 +65,10 @@ interface ToolRow {
   state: RecordValue; args: any; call?: DisposableComponent; result?: DisposableComponent;
   active: boolean; onInvalidate?: () => void; invalidate: () => void;
 }
+interface ComponentRow {
+  active: boolean; call?: DisposableComponent; result?: DisposableComponent;
+  nativeInvalidate?: () => void; invalidate: () => void;
+}
 interface Hook { owner: Owner; fn: (...args: any[]) => any }
 interface Owner { path: string; enabled: boolean }
 const DISPLAY_EVENTS = new Set([
@@ -116,10 +120,20 @@ export class PresentationHost {
   private readonly statuses = new Map<string, string>();
   private readonly branchListeners = new Set<() => void>();
   private readonly rows = new Map<string, ToolRow>();
+  private readonly componentRows = new Map<string, ComponentRow>();
+  private readonly componentContexts = new WeakMap<object, ComponentRow>();
   private readonly loaded = new Set<string>();
   private readonly reported = new Set<string>();
   private readonly disabled = new WeakSet<Function>();
   private readonly guardedComponents = new WeakMap<object, DisposableComponent>();
+  private readonly originalComponents = new WeakMap<object, DisposableComponent>();
+  private _rendererRevision = 0;
+  /** Changes when transcript registrations change; cached Pi components must be recreated. */
+  get rendererRevision(): number { return this._rendererRevision; }
+  /** A stable bridge for Pi's public user/assistant message components. */
+  readonly markdownTransformers: readonly MarkdownTransformer[] = [
+    (text, context) => this.transformMarkdown(text, context),
+  ];
   private readonly fallbackTheme = createPresentationTheme();
   private started = false;
   private stopped = false;
@@ -143,6 +157,7 @@ export class PresentationHost {
     this.report(name, message); throw new Error(message);
   }
   private changed(): void { if (!this.stopped) this.options.invalidate(); }
+  private renderersChanged(): void { this._rendererRevision++; this.changed(); }
   private call<T>(key: string, fn: (...args: any[]) => T, ...args: any[]): T | undefined {
     if (this.disabled.has(fn)) return undefined;
     try { return fn(...args); }
@@ -180,13 +195,15 @@ export class PresentationHost {
         const factory = await jiti.import<any>(resolved, { default: true });
         if (typeof factory !== 'function') throw new Error('Extension must export a default factory');
         await factory(this.makeAPI(owner));
-      } catch (error) { owner.enabled = false; this.report(resolved, error); }
+      } catch (error) {
+        owner.enabled = false; this.renderersChanged(); this.report(resolved, error);
+      }
     }
     this.changed();
   }
   async start(): Promise<void> {
     if (this.started || this.stopped) return;
-    this.started = true; await this.dispatch({ type: 'session_start' });
+    this.started = true; await this.dispatch({ type: 'session_start', reason: 'startup' });
   }
   update(snapshot: Snapshot): void {
     this.current = snapshot;
@@ -205,7 +222,7 @@ export class PresentationHost {
   }
   async shutdown(): Promise<void> {
     if (this.stopped) return;
-    await this.dispatch({ type: 'session_shutdown' }); this.stopped = true;
+    await this.dispatch({ type: 'session_shutdown', reason: 'quit' }); this.stopped = true;
     this.footer?.dispose?.(); this.header?.dispose?.();
     for (const widget of this.widgets.values()) widget.component.dispose?.();
     this.retainToolCalls([]); this.branchListeners.clear(); this.bus.clear();
@@ -245,11 +262,12 @@ export class PresentationHost {
           renderCall: renderCall && ((...args) => owner.enabled ? renderCall(...args) : undefined as any),
           renderResult: renderResult && ((...args) => owner.enabled ? renderResult(...args) : undefined as any),
         });
+        this.renderersChanged();
       },
-      registerToolRenderer: (fn: ToolRendererResolver) => this.resolvers.push(hook(fn)),
-      registerMessageRenderer: (name: string, fn: MessageRenderer) => this.messages.set(name, hook(fn)),
-      registerEntryRenderer: (name: string, fn: EntryRenderer) => this.entries.set(name, hook(fn)),
-      registerMarkdownTransformer: (fn: MarkdownTransformer) => this.markdown.push(hook(fn)),
+      registerToolRenderer: (fn: ToolRendererResolver) => { this.resolvers.push(hook(fn)); this.renderersChanged(); },
+      registerMessageRenderer: (name: string, fn: MessageRenderer) => { this.messages.set(name, hook(fn)); this.renderersChanged(); },
+      registerEntryRenderer: (name: string, fn: EntryRenderer) => { this.entries.set(name, hook(fn)); this.renderersChanged(); },
+      registerMarkdownTransformer: (fn: MarkdownTransformer) => { this.markdown.push(hook(fn)); this.renderersChanged(); },
       registerCommand: (name: string, command: RecordValue) => this.commands.set(name, hook(command.handler)),
       registerShortcut: (key: string, shortcut: RecordValue) => this.shortcuts.set(key, hook(shortcut.handler)),
       registerFlag: () => {}, getFlag: () => undefined,
@@ -392,16 +410,107 @@ export class PresentationHost {
       };
     }, set: (target, property, value) => Reflect.set(target, property, value, target) });
     this.guardedComponents.set(value, guarded); this.guardedComponents.set(guarded, guarded);
+    this.originalComponents.set(guarded, value);
     return guarded;
   }
-  resolveToolRenderer(name: string): ToolRenderers | undefined {
+  resolveToolRenderer(name: string, fallback?: ToolRenderers): ToolRenderers | undefined {
     const resolveAt = (index: number): ToolRenderers | undefined => {
       const hook = this.resolvers[index];
-      if (!hook) return this.tools.get(name);
+      if (!hook) return this.tools.get(name) ?? fallback;
       if (!hook.owner.enabled || this.disabled.has(hook.fn)) return resolveAt(index + 1);
-      return this.call(`tool resolver ${name}`, hook.fn, name, () => resolveAt(index + 1));
+      // A resolver can call next() before failing. Do not run downstream resolvers twice.
+      let resolved = false;
+      let next: ToolRenderers | undefined;
+      const resolveNext = () => {
+        if (!resolved) { resolved = true; next = resolveAt(index + 1); }
+        return next;
+      };
+      const result = this.call(`tool resolver ${name}`, hook.fn, name, resolveNext);
+      return this.disabled.has(hook.fn) ? resolveNext() : result;
     };
     return resolveAt(0);
+  }
+  /**
+   * Render-only definitions for Pi's public ToolExecutionComponent. Pi owns renderer state,
+   * previous components, invalidation, expansion, images and shell layout on this path.
+   * The fallback belongs at the end of the resolver chain, so next() can discover it.
+   */
+  toolRenderers(name: string, fallback?: ToolRenderers): ToolRenderers | undefined {
+    if (this.stopped) return undefined;
+    const renderers = this.resolveToolRenderer(name, fallback);
+    if (!renderers) return undefined;
+    const { renderShell, renderCall, renderResult } = renderers;
+    // Enumerate only presentation fields, even when a resolver returns a full tool definition.
+    return {
+      renderShell,
+      renderCall: renderCall && ((args, theme, context) => {
+        const safeArgs = readonlyCopy(args);
+        const row = this.componentRow(name, context);
+        return this.toolComponent(row, 'call', `tool call ${name}`, renderCall,
+          safeArgs, theme, this.componentContext(row, context, safeArgs));
+      }),
+      renderResult: renderResult && ((result, options, theme, context) => {
+        const row = this.componentRow(name, context);
+        return this.toolComponent(row, 'result', `tool result ${name}`, renderResult, readonlyCopy(result), options,
+          theme, this.componentContext(row, context, readonlyCopy(context.args)));
+      }),
+    };
+  }
+  private componentRow(name: string, context: RenderContext): ComponentRow {
+    if (this.stopped) throw new Error('Presentation host has stopped');
+    // State identity identifies a Pi component incarnation; the host never reads or owns
+    // its contents. A new component with the same call id must retire old callbacks too.
+    let row = this.componentContexts.get(context.state);
+    if (!row) {
+      const key = `${context.toolCallId}\0${name}`;
+      const previous = this.componentRows.get(key);
+      if (previous) this.releaseComponentRow(previous);
+      row = { active: !this.stopped, invalidate: () => {
+        if (row!.active && !this.stopped) row!.nativeInvalidate?.();
+      } };
+      this.componentContexts.set(context.state, row);
+      this.componentRows.set(key, row);
+    }
+    if (row.active) row.nativeInvalidate = context.invalidate;
+    return row;
+  }
+  private componentContext(row: ComponentRow, context: RenderContext, args: unknown): RenderContext {
+    return {
+      ...context, args, invalidate: row.invalidate,
+      // Keep component identity transparent to renderers that reuse their original instance.
+      lastComponent: context.lastComponent && (this.originalComponents.get(context.lastComponent) ?? context.lastComponent),
+    };
+  }
+  private releaseComponentRow(row: ComponentRow): void {
+    row.active = false; row.nativeInvalidate = undefined;
+    for (const component of new Set([row.call, row.result])) component?.dispose?.();
+    row.call = undefined; row.result = undefined;
+  }
+  private toolComponent(row: ComponentRow, slot: 'call' | 'result', key: string,
+    renderer: (...args: any[]) => Component, ...args: any[]): Component {
+    if (!row.active || this.stopped) throw new Error('Presentation tool row has been removed');
+    const component = this.component(key, this.call(key, renderer, ...args));
+    const previous = row[slot];
+    row[slot] = component;
+    const other = row[slot === 'call' ? 'result' : 'call'];
+    if (previous !== component && previous !== other) previous?.dispose?.();
+    if (component) return component;
+    if (!this.disabled.has(renderer)) {
+      this.disabled.add(renderer); this.report(key, 'Renderer did not return a component');
+    }
+    // Pi catches renderer factory failures and supplies its standard fallback. Returning
+    // undefined here instead would leave Pi holding an invalid component until render time.
+    throw new Error(`${key} is unavailable`);
+  }
+  /** Guarded callback for Pi's public CustomMessageComponent, using Pi's supplied theme. */
+  messageRenderer(customType: string): MessageRenderer | undefined {
+    const hook = this.messages.get(customType);
+    if (!hook?.owner.enabled || this.stopped) return undefined;
+    return (message, options, theme) => {
+      if (!hook.owner.enabled || this.stopped) return undefined;
+      return this.component(`message ${customType}`,
+        this.call(`message ${customType}`, hook.fn, readonlyCopy(message), options, theme));
+    };
   }
   private row(name: string, args: unknown, input: PresentationToolContext, slot: 'call' | 'result'): { row: ToolRow; context: RenderContext } {
     const key = `${input.toolCallId}\0${name}`;
@@ -445,6 +554,9 @@ export class PresentationHost {
       row.call?.dispose?.(); row.result?.dispose?.();
       row.call = undefined; row.result = undefined; row.state = {}; row.args = undefined;
       this.rows.delete(key);
+    }
+    for (const [key, row] of this.componentRows) if (!keep.has(key.split('\0')[0])) {
+      this.releaseComponentRow(row); this.componentRows.delete(key);
     }
   }
   renderMessage(message: RecordValue, options: { expanded: boolean; outputPad?: number }): Component | undefined {

@@ -136,7 +136,7 @@ The editor completes local built-in commands and remote extension/skill/template
 
 Use `Review @src/cli.ts` to include a file from the slot's remote workspace, or `Describe @"images/screen shot.png"` for a path with spaces. Absolute paths and `~/` are supported. Email addresses and references inside code spans/blocks are not attachments; a missing simple `@mention` stays literal, while a missing explicit path fails the submission.
 
-`/attach /local/path.txt` and clipboard files are read on the local machine; relative local paths use the directory where you launched the client. Text is appended to the prompt. Supported images are sent as **model input**, not just filenames; the selected model must support images. The built-in transcript shows image labels, **not inline image previews**. File reads are limited to regular UTF-8 text files up to 1 MiB or supported images up to 8 MiB. There can be eight pending local attachments, 32 distinct remote references, and at most 24 MiB in the combined prompt. Oversized or unsupported files fail rather than being silently truncated.
+`/attach /local/path.txt` and clipboard files are read on the local machine; relative local paths use the directory where you launched the client. Text is appended to the prompt. Supported images are sent as **model input**, not just filenames; the selected model must support images. Tool-result images use labels, **not inline image previews**. User messages render their text content, as in Pi. File reads are limited to regular UTF-8 text files up to 1 MiB or supported images up to 8 MiB. There can be eight pending local attachments, 32 distinct remote references, and at most 24 MiB in the combined prompt. Oversized or unsupported files fail rather than being silently truncated.
 
 Clipboard access occurs only on an explicit paste action. On Linux, image paste can use `wl-paste` on Wayland or `xclip` on X11. The external editor runs locally and returns its contents to the draft; it does not submit them.
 
@@ -168,6 +168,10 @@ On attach, the daemon obtains the current branch entries through RPC and combine
 
 The **stock remote harness is unchanged**. Remote Pi loads extension factories normally; their agent hooks, tools, providers, and credentials stay remote. Its RPC UI forwards dialogs, notifications, status text, string-array widgets, terminal title, and editor text. It cannot transfer executable terminal components to the client.
 
+The transcript composes Pi's public `UserMessageComponent`, `AssistantMessageComponent`, `ToolExecutionComponent`, shell, custom-message, skill, and summary components. Built-in tool renderers come from Pi's public tool factories; their executors are not retained or called locally. Pi owns Markdown, thinking styles, spacing, tool backgrounds, expansion, and renderer state. The client only reconciles remote messages and strips terminal controls from wire content. Thinking is visible by default, as in Pi. Detach, reconnect, and UI reload retire local renderer timers without stopping remote tools; restored results do not invent new execution times.
+
+Edit diffs use the remote result's `details`. The built-in edit renderer's pre-execution filesystem preview is disabled locally, so a remote path cannot accidentally preview a file on the client machine. No Pi internals or fake session are needed for transcript rendering.
+
 The local client can separately load trusted presentation adapters for tool call/result renderers, custom message/entry renderers, Markdown transforms, custom footer/header/editor components, widgets, display events, commands, and shortcuts. Local adapters use snapshot data; they are not another `AgentSession`. Without an adapter, the client uses its built-in display. Renderer failures produce local warnings rather than stopping the remote agent.
 
 ### Opt in explicitly
@@ -190,7 +194,7 @@ pi-remote attach 1 --ui-config ./remote-ui.json --no-reconnect
 
 `--theme NAME` overrides the config theme. Available themes include `system`, `dark`, `light`, and JSON themes from local `~/.pi/agent/themes/` (or `$PI_CODING_AGENT_DIR/themes/`). Use `/theme NAME` to change the current client and `/reload-ui` to reread its selected adapters/config. Neither command changes remote settings or restarts Pi; theme files are not watched automatically.
 
-[`examples/rowan-ui.ts`](examples/rowan-ui.ts) is a **user-specific selective adapter**, not a portable default. It expects Rowan's extension repository locally at `~/.pi/agent/git/github.com/rowantran/pi-extensions`, or at `$PI_REMOTE_RENDERER_REPO`. It selects footer, caret, compact tool, and codemode renderers, and renders persisted worked-for data without loading the original worked-for factory. It avoids the provider, background-worker, MCP, Slack, and codemode execution factories. Review its imports and adapt paths before selecting it with `--ui-extension ./examples/rowan-ui.ts` or your config allowlist.
+[`examples/rowan-ui.ts`](examples/rowan-ui.ts) is a **user-specific selective adapter**, not a portable default. It expects Rowan's extension repository locally at `~/.pi/agent/git/github.com/rowantran/pi-extensions`, or at `$PI_REMOTE_RENDERER_REPO`. It loads the original footer, caret, assistant-background, and compact-tool factories unchanged, selects the existing codemode renderers, and renders persisted worked-for data without loading the original worked-for factory. That factory writes session entries and patches private Pi internals, so it remains a narrow data-rendering adapter. It avoids the provider, background-worker, MCP, Slack, and codemode execution factories. Review its imports and adapt paths before selecting it with `--ui-extension ./examples/rowan-ui.ts` or your config allowlist.
 
 ### Trust boundary
 
@@ -253,6 +257,13 @@ Locally, `pi-remote` runs from `src/` through the `tsx` devDependency, so source
 ```sh
 npm run verify
 
+# Golden master: real stock Pi versus pi-remote in paired tmux terminals.
+# Requires tmux and Pi 1.0.4 on PATH. Uses a deterministic local provider, no credentials.
+npm run test:golden
+
+# Repeat with the unchanged Rowan compact-tools, assistant-background and caret factories.
+npm run test:golden -- --rowan
+
 # Exercise concurrent on-demand startup and crash/stale-lock recovery with the built CLI.
 # Uses an isolated local daemon with no Pi slots or model calls.
 node --import tsx test/startup-smoke.ts
@@ -273,6 +284,10 @@ PI_REMOTE_TEST_HOST=devbox node --import tsx test/terminal-smoke.ts
 ```
 
 The remote smoke tests use separate `/tmp/pi-remote-{smoke,features,terminal}.*` state directories, start only their own slots, and stop those slots and their daemons afterward. The terminal test uses the separate `pi-remote-test` tmux server. It leaves test files/logs for inspection. It does not change global Pi settings or credentials.
+
+The golden test starts a normal Pi TUI and a pi-remote client backed by stock Pi RPC. It submits the same prompts, waits at deterministic streaming/tool checkpoints, toggles tools and thinking, runs a shell command, submits a second prompt, and compares resumed/restored histories. Restoration also checks that no messages or provider calls were added and the remote Pi process stayed alive. The default matrix covers 80/120 columns and dark/light themes. `--widths`, `--themes`, `--rows`, and `--pi-bin` select other configurations; `--remote-bin` can compare an older checkout.
+
+Each checkpoint saves both raw ANSI screens, transcript text, resolved foreground/background/attribute runs, diffs, and side-by-side views. The test fails on text or style differences after normalizing wall-clock duration labels. Startup/editor/footer UI and transient toggle notifications are outside this transcript comparison. It checks neither inline images nor terminal palette auto-detection. Isolated homes, sessions, workspaces, daemons, and a private tmux server keep tests separate from active work. Only test processes are stopped; the printed artifact directory is retained for inspection.
 
 ### Power-user / debugging commands
 
@@ -296,6 +311,7 @@ pi-remote watch 1
 - `src/compat-client.ts`: read-only filesystem fallback for running legacy daemons.
 - `src/live.ts`: display-only streaming reconstruction on the daemon.
 - `src/tui.ts`, `src/view.ts`: local terminal UI and transcript projection.
+- `src/transcript.ts`, `src/keybindings.ts`: public Pi transcript components and application shortcut hints.
 - `src/presentation.ts`, `src/local-theme.ts`: explicit adapter loading and local themes.
 - `src/files.ts`, `src/local-input.ts`, `src/editor-completion.ts`: attachments, clipboard/editor integration, and remote editor completion.
 - `src/cli.ts`, `src/completion.ts`, `completions/`: launch options, command prefixes, slot selection, and shell completion.
