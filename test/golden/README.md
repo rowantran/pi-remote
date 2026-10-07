@@ -2,6 +2,19 @@
 
 This harness runs the **actual stock Pi 1.0.4 CLI** beside the current `pi-remote` CLI. Pi owns both agent runs: one uses the stock terminal UI; the other is an unmodified stock RPC process started by an isolated `pi-remote --local` daemon. Neither side needs credentials or a live model service.
 
+## Reference behavior follows Pi
+
+The **correct rendering is the behavior of stock Pi at the version being tested**, not a permanent requirement to preserve today's screenshots. Future Pi releases can intentionally change layout, colors, spacing, tool output, or keyboard hints. Those changes can become the new expected behavior for pi-remote.
+
+The harness captures its stock reference on every run; saved artifacts document a particular version, not a timeless baseline. It currently requires Pi **1.0.4**, matching the pinned client dependencies. When upgrading Pi:
+
+1. Update the client dependency pins, supported-version checks, and golden harness version check together.
+2. Run both the standard and `--rowan` comparisons against that same Pi version.
+3. Review the new stock output and diffs. Adapt pi-remote through public Pi APIs where needed; do not force the new Pi to reproduce the old screenshots.
+4. Retain fresh captures and record the tested versions. Do not hide real differences by broadening normalization just to make the tests pass.
+
+With `--rowan`, the reference also includes the selected local extension files, so updates to those extensions can change the expected appearance too.
+
 ## Run
 
 Requires Node 22.19+, the project's installed dependencies, `tmux`, `diff`, Bash, and stock `pi` 1.0.4 on `PATH`.
@@ -66,11 +79,13 @@ The restoration checkpoint verifies that each side still uses its original isola
 
 Content covers headings, bold/italic/strike, inline code, links, quotes, lists, tables, syntax-highlighted code, Unicode, user Markdown, backslash escapes, thinking, tool success/error colors, output truncation, and user Bash panels. Stock Pi renders user Markdown; the harness does not assume user messages are plain text.
 
-`--rowan` explicitly loads these original local files, with no copies or adapters:
+`--rowan` is a golden-test option, not a Pi model/provider or a general pi-remote mode. Without it, the comparison uses standard Pi presentation. With it, both sides load these original local files, with no copies or adapters:
 
 - `compact-tools.ts`
 - `assistant-background.ts`
 - `prompt-caret.ts`
+
+The default directory is `~/.pi/agent/git/github.com/rowantran/pi-extensions`; `--rowan-root PATH` overrides it. This is a selected presentation compatibility check, not a test of Rowan's entire extension setup.
 
 Stock Pi loads them with `--extension`. The local remote client loads the same paths with `--ui-extension`; its RPC process receives only the deterministic provider. No provider, worker, credential, or other execution factories from the user's extension collection are loaded.
 

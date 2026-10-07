@@ -287,6 +287,8 @@ The remote smoke tests use separate `/tmp/pi-remote-{smoke,features,terminal}.*`
 
 The golden test starts a normal Pi TUI and a pi-remote client backed by stock Pi RPC. It submits the same prompts, waits at deterministic streaming/tool checkpoints, toggles tools and thinking, runs a shell command, submits a second prompt, and compares resumed/restored histories. Restoration also checks that no messages or provider calls were added and the remote Pi process stayed alive. The default matrix covers 80/120 columns and dark/light themes. `--widths`, `--themes`, `--rows`, and `--pi-bin` select other configurations; `--remote-bin` can compare an older checkout.
 
+**Golden expectations follow the tested Pi version.** Future Pi updates may intentionally change the correct appearance; the goal is to match the new stock Pi, not preserve old screenshots forever. Upgrade the pinned dependencies and version checks together, then review new captures. See [reference behavior and upgrade guidance](test/golden/README.md#reference-behavior-follows-pi).
+
 Each checkpoint saves both raw ANSI screens, transcript text, resolved foreground/background/attribute runs, diffs, and side-by-side views. The test fails on text or style differences after normalizing wall-clock duration labels. Startup/editor/footer UI and transient toggle notifications are outside this transcript comparison. It checks neither inline images nor terminal palette auto-detection. Isolated homes, sessions, workspaces, daemons, and a private tmux server keep tests separate from active work. Only test processes are stopped; the printed artifact directory is retained for inspection.
 
 ### Power-user / debugging commands
