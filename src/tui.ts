@@ -1,5 +1,6 @@
 import { readAttachment } from './files.js';
 import { Transcript } from './transcript.js';
+import { ScheduledTuiAltScreen } from './scheduled-tui.js';
 import { createRemoteKeybindings } from './keybindings.js';
 import { readLocalClipboard, editLocally } from './local-input.js';
 import { PresentationHost, readPresentationConfig, createPresentationTheme, type PresentationChange } from './presentation.js';
@@ -79,6 +80,8 @@ export interface TuiOptions {
   presentationPaths?: string[]; presentationConfig?: string; theme?: string;
   /** Remote host label for the footer, such as the SSH host alias. */
   host?: string;
+  /** Minimum interval between normal frame starts; defaults to 8 ms locally. */
+  renderIntervalMs?: number;
 }
 
 /** Exported for terminal-adapter tests; uses only the public pi-tui API. */
@@ -133,7 +136,7 @@ export class RemoteTui {
     try { initial = options.theme && resolveThemeSelection(options.theme, terminalAppearance()); } catch { /* Reported by initialize(). */ }
     initTheme(initial, false);
     this.view = new RemoteView(snapshot);
-    this.tui = new TuiAltScreen(terminal, true, undefined, { copySelection: async text => {
+    this.tui = new ScheduledTuiAltScreen(terminal, true, undefined, { renderIntervalMs: options.renderIntervalMs, copySelection: async text => {
       try { await copyToClipboard(text); return true; } catch (error) { return errorText(error); }
     } });
     this.editor = this.makeEditor();
