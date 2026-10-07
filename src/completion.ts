@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { basename, resolve } from 'node:path';
 import { connectCompatibleLocal, connectCompatibleSsh } from './compat-client.js';
-import { defaultHost as configuredDefaultHost } from './config.js';
+import { defaultCwd as configuredDefaultCwd, defaultHost as configuredDefaultHost } from './config.js';
 import { nodeModuleArgs } from './node-entry.js';
 import type { RemoteConnection, SlotInfo } from './protocol.js';
 
@@ -135,9 +135,13 @@ export function completionContext(words: string[]): CompletionContext {
 function safeDefaultHost(): string | undefined {
   try { return configuredDefaultHost(); } catch { return undefined; }
 }
+function safeDefaultCwd(): string | undefined {
+  try { return configuredDefaultCwd(); } catch { return undefined; }
+}
 export interface CompletionDependencies {
   connect?: (options: { host?: string; local: boolean; remoteBin?: string; stateDir?: string }) => Promise<Pick<RemoteConnection, 'request' | 'close'>>;
   defaultHost?: string;
+  defaultCwd?: string;
 }
 /** Only hello (inside connect), list, and complete_path are used. Never attaches,
  * creates a slot, invokes a Pi command, or retries a request. */
@@ -161,9 +165,11 @@ export async function completeWords(words: string[], dependencies: CompletionDep
   try {
     connection = await connect({ host, local: context.local, remoteBin: context.values.get('--remote-bin'), stateDir: context.values.get('--state-dir') });
     if (pathOption) {
+      // --session paths are relative to --cwd, or to the default directory that new would use.
+      const sessionBase = context.valueOption === '--session' ? context.values.get('--cwd') ?? (context.local ? undefined : (dependencies.defaultCwd ?? safeDefaultCwd()) || undefined) : undefined;
       const result = await connection.request<PathCompletion>('complete_path', {
         prefix: context.prefix,
-        ...(context.valueOption === '--session' && context.values.has('--cwd') ? { cwd: context.values.get('--cwd') } : {}),
+        ...(sessionBase ? { cwd: sessionBase } : {}),
         directoriesOnly: context.valueOption === '--cwd',
       });
       if (!Array.isArray(result?.items)) return [];
