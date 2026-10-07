@@ -15,40 +15,56 @@ npm ci --ignore-scripts
 npm run build
 ./scripts/deploy.sh devbox
 
+# Set the default SSH host once (see "Configuration" below).
+mkdir -p ~/.config/pi-remote
+echo '{"host": "devbox"}' > ~/.config/pi-remote/config.json
+
 # Start an independent remote Pi process and attach the local terminal UI.
-./bin/pi-remote new devbox --cwd /remote/project
+./bin/pi-remote new --cwd /remote/project
 ```
 
 Remote Pi loads its normal settings, credentials, providers, extension factories, skills, and trusted project resources. Deployment copies application files, not your local Pi configuration, and does not restart existing daemons or slots.
 
 ```sh
 # List running and stopped slots, including their short numbers.
-./bin/pi-remote ls devbox
+./bin/pi-remote ls
 
 # Attach by number, full UUID, or unique nonnumeric UUID prefix.
-./bin/pi-remote attach devbox 1
+./bin/pi-remote attach 1
 
 # Omit the slot: attach to the only active slot, or open a local picker.
-./bin/pi-remote attach devbox
+./bin/pi-remote attach
 
 # Create without opening the UI.
-./bin/pi-remote new devbox --cwd /remote/project --no-attach
+./bin/pi-remote new --cwd /remote/project --no-attach
 
 # Pi options after -- are forwarded to the stock remote CLI.
-./bin/pi-remote new devbox --cwd /remote/project -- --model PROVIDER/MODEL
+./bin/pi-remote new --cwd /remote/project -- --model PROVIDER/MODEL
 
 # Resume a stored Pi session in a NEW slot.
-./bin/pi-remote new devbox --cwd /remote/project --session /remote/session.jsonl
+./bin/pi-remote new --cwd /remote/project --session /remote/session.jsonl
 
 # Explicitly stop a remote Pi process. Ordinary detach never does this.
-./bin/pi-remote kill devbox 1
+./bin/pi-remote kill 1
 ```
 
 The 0.2 daemon persists stable slot numbers in `slots.json`, including stopped slots. A still-running 0.1 daemon uses insertion-order numeric aliases until a later daemon startup migrates its metadata. UUIDs remain valid in both cases. Numeric input always means a slot number, never a UUID prefix.
 
 `Ctrl+D` or `/detach` closes only the client. An attached terminal UI automatically reconnects to the same slot after transport loss; use `--no-reconnect` to disable this. The power-user/debug commands `rpc` and `watch` do not reconnect. Accepted or uncertain commands are **never replayed automatically**. Check the restored session before resending an uncertain request.
 
-For local testing, replace the host with `--local` and use a local `--cwd`. `PI_REMOTE_HOST` supplies a default SSH host. With that variable set, `attach 1` uses the default; use `attach --host devbox` for a host-only picker. `--host` takes precedence over the environment, and an explicit `HOST SLOT` pair also overrides the default.
+Use `--host HOST` with any command to select another SSH host, for example `pi-remote attach --host otherbox 1`. For local testing, use `--local` instead of a host and use a local `--cwd`.
+
+Every command also accepts an unambiguous prefix: `pi-remote n --cwd /remote/project` runs `new`, `pi-remote a 1` runs `attach`, `pi-remote k 1` runs `kill`, and `pi-remote l` runs `ls`. The internal commands `bridge`, `daemon`, `complete`, and `fs` need their full names.
+
+### Configuration
+
+The local client reads `$XDG_CONFIG_HOME/pi-remote/config.json`. If `XDG_CONFIG_HOME` is unset or not an absolute path, it reads `~/.config/pi-remote/config.json`. The file is optional and supports one key:
+
+```json
+{ "host": "devbox" }
+```
+
+The host comes from the first of these that is set: `--host`, the `PI_REMOTE_HOST` environment variable, then the config file. `--local` ignores all three. Invalid JSON or unknown keys cause an error, so a typo does not go unnoticed. This file is separate from the presentation config `~/.pi/remote-client.json` described below.
 
 ### Shell completion (fish, zsh, bash)
 
@@ -67,9 +83,9 @@ mkdir -p ~/.config/fish/completions
 pi-remote completion fish > ~/.config/fish/completions/pi-remote.fish
 ```
 
-Choose one setup method. Remove a previously installed completion file if you switch to the config line. You can also set a default host with `set -gx PI_REMOTE_HOST devbox`.
+Choose one setup method. Remove a previously installed completion file if you switch to the config line. Completion uses the same default host as the CLI (`--host`, `PI_REMOTE_HOST`, then the config file).
 
-Type `pi-remote new devbox --cwd /remote/` and press Tab to list **remote directories**, not local ones. Slot completion after `pi-remote attach devbox ` includes numbers, status, session name, and workspace. `--session` completes remote files and directories, relative to `--cwd` when supplied.
+Type `pi-remote new --cwd /remote/` and press Tab to list **remote directories**, not local ones. Slot completion after `pi-remote attach ` includes numbers, status, session name, and workspace. `--session` completes remote files and directories, relative to `--cwd` when supplied.
 
 Remote `~` and relative completion prefixes use the remote home directory unless a completion base is supplied. Quote remote tilde paths, for example `--cwd '~/workplace/project'`, so your shell does not expand them to your **local** home. Prefer absolute paths for `--session` when launching. Completion is read-only: it may start the on-demand daemon, but never creates or attaches a Pi slot, sends a prompt, or runs an agent tool. An unavailable host produces no suggestions.
 
@@ -168,8 +184,8 @@ Use repeatable `--ui-extension PATH` flags, or create **local** `~/.pi/remote-cl
 `--ui-config PATH` selects another config file. Config-relative extension paths resolve beside that file; command-line paths resolve from the local working directory. `~/` means local home here. CLI extension paths are added to the config allowlist and deduplicated. Only exact files are selected: the client does **not** automatically load local Pi extension directories, project resources, or packages. Explicit adapters can still import other modules.
 
 ```sh
-./bin/pi-remote attach devbox 1 --ui-extension ./my-ui.ts --theme dark
-./bin/pi-remote attach devbox 1 --ui-config ./remote-ui.json --no-reconnect
+./bin/pi-remote attach 1 --ui-extension ./my-ui.ts --theme dark
+./bin/pi-remote attach 1 --ui-config ./remote-ui.json --no-reconnect
 ```
 
 `--theme NAME` overrides the config theme. Available themes include `system`, `dark`, `light`, and JSON themes from local `~/.pi/agent/themes/` (or `$PI_CODING_AGENT_DIR/themes/`). Use `/theme NAME` to change the current client and `/reload-ui` to reread its selected adapters/config. Neither command changes remote settings or restarts Pi; theme files are not watched automatically.
@@ -264,8 +280,8 @@ The remote smoke tests use separate `/tmp/pi-remote-{smoke,features,terminal}.*`
 - `watch` prints the current session snapshot, then streams live events as JSON. It does not submit prompts or answer dialogs.
 
 ```sh
-./bin/pi-remote rpc devbox 1 '{"type":"get_state"}'
-./bin/pi-remote watch devbox 1
+./bin/pi-remote rpc 1 '{"type":"get_state"}'
+./bin/pi-remote watch 1
 ```
 
 `rpc` waits for command acceptance/result, not necessarily agent completion. In `watch` output, `agent_settled` means Pi has no automatic work left. Ctrl+C stops watching without stopping Pi. Neither command reconnects automatically.
@@ -280,7 +296,8 @@ The remote smoke tests use separate `/tmp/pi-remote-{smoke,features,terminal}.*`
 - `src/tui.ts`, `src/view.ts`: local terminal UI and transcript projection.
 - `src/presentation.ts`, `src/local-theme.ts`: explicit adapter loading and local themes.
 - `src/files.ts`, `src/local-input.ts`, `src/editor-completion.ts`: attachments, clipboard/editor integration, and remote editor completion.
-- `src/cli.ts`, `src/completion.ts`, `completions/`: launch options, slot selection, and shell completion.
+- `src/cli.ts`, `src/completion.ts`, `completions/`: launch options, command prefixes, slot selection, and shell completion.
+- `src/config.ts`: XDG config file and default host.
 - `examples/rowan-ui.ts`: selective, user-specific presentation adapter.
 
 Pi references: [RPC](https://pi.dev/docs/latest/rpc), [extension UI](https://pi.dev/docs/latest/rpc-extension-ui), [JSON events](https://pi.dev/docs/latest/json).

@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { basename, resolve } from 'node:path';
 import { connectCompatibleLocal, connectCompatibleSsh } from './compat-client.js';
+import { defaultHost as configuredDefaultHost } from './config.js';
 import type { RemoteConnection, SlotInfo } from './protocol.js';
 
 export const VALUE_OPTIONS = ['--host', '--remote-bin', '--state-dir', '--cwd', '--session', '--ui-extension', '--ui-config', '--theme'] as const;
@@ -13,6 +14,23 @@ const COMMAND_LABELS: Partial<Record<typeof COMMANDS[number], string>> = {
   watch: 'Power-user/debug: stream session events as JSON',
 };
 const SLOT_COMMANDS = new Set(['attach', 'kill', 'watch', 'rpc']);
+/** Server/internal commands: exact names only, never matched by a prefix. */
+export const INTERNAL_COMMANDS = ['complete', 'fs', 'daemon', 'bridge'] as const;
+
+/** Exact names win (including internal ones). Otherwise an unambiguous prefix
+ * of a public command selects it, e.g. n -> new, k -> kill. Unknown or
+ * ambiguous input is returned unchanged with any matching candidates. */
+export function matchCommand(input: string): { command?: string; candidates: string[] } {
+  if ((COMMANDS as readonly string[]).includes(input) || (INTERNAL_COMMANDS as readonly string[]).includes(input)) return { command: input, candidates: [input] };
+  const candidates = input ? COMMANDS.filter(command => command.startsWith(input)) : [];
+  return { command: candidates.length === 1 ? candidates[0] : undefined, candidates };
+}
+export function resolveCommand(input: string): string {
+  const { command, candidates } = matchCommand(input);
+  if (command) return command;
+  if (candidates.length > 1) throw new Error(`Ambiguous command '${input}': ${candidates.join(', ')}. See --help.`);
+  throw new Error(`Unknown command '${input}'. See --help.`);
+}
 export type NumberedSlot = SlotInfo & { number?: number };
 export interface CompletionItem { value: string; label: string; directory: boolean }
 export interface PathCompletion { items: CompletionItem[]; truncated: boolean }
@@ -30,14 +48,11 @@ export function slotLabel(slot: SlotInfo): string {
   return `${slot.status} · ${slot.sessionName || '(unnamed)'} · ${slot.cwd}`;
 }
 
-/** With a default host, a lone slot-command argument is a slot. Two arguments
- * (three for rpc) mean explicit HOST SLOT [JSON]. --host always wins. */
-export function selectHost(command: string, positionals: string[], options: { host?: string; local?: boolean; defaultHost?: string }): { host?: string; positionals: string[] } {
-  const remaining = [...positionals];
-  if (options.local) return { positionals: remaining };
-  if (options.host !== undefined) return { host: options.host, positionals: remaining };
-  const explicitHost = !options.defaultHost || !SLOT_COMMANDS.has(command) || remaining.length >= (command === 'rpc' ? 3 : 2);
-  return { host: explicitHost ? remaining.shift() ?? options.defaultHost : options.defaultHost, positionals: remaining };
+/** The host is never positional: --host wins, then the default (PI_REMOTE_HOST
+ * or the config file). --local ignores both. */
+export function selectHost(options: { host?: string; local?: boolean; defaultHost?: string }): string | undefined {
+  if (options.local) return undefined;
+  return options.host ?? (options.defaultHost || undefined);
 }
 
 /** Remove shell quoting, but never expand variables, substitutions, globs, or ~.
@@ -87,7 +102,7 @@ interface CompletionContext {
   forwarded: boolean;
 }
 export function completionContext(words: string[]): CompletionContext {
-  const command = words[0] ?? '';
+  const command = matchCommand(words[0] ?? '').command ?? words[0] ?? '';
   const current = words.length > 1 ? words.at(-1)! : '';
   const context: CompletionContext = { command, prefix: current, insertionPrefix: '', values: new Map(), local: false, positionals: [], forwarded: false };
   let pending: string | undefined;
@@ -115,6 +130,10 @@ export function completionContext(words: string[]): CompletionContext {
   return context;
 }
 
+/** Completion is silent: a malformed config file yields no default host. */
+function safeDefaultHost(): string | undefined {
+  try { return configuredDefaultHost(); } catch { return undefined; }
+}
 export interface CompletionDependencies {
   connect?: (options: { host?: string; local: boolean; remoteBin?: string; stateDir?: string }) => Promise<Pick<RemoteConnection, 'request' | 'close'>>;
   defaultHost?: string;
@@ -133,15 +152,8 @@ export async function completeWords(words: string[], dependencies: CompletionDep
   if (context.valueOption && !pathOption) return [];
   const slotCompletion = !context.valueOption && SLOT_COMMANDS.has(context.command);
   if (!pathOption && !slotCompletion) return [];
-  const defaultHost = dependencies.defaultHost ?? process.env.PI_REMOTE_HOST;
-  const explicit = context.values.get('--host');
-  // With a host default, an already-entered numeric/UUID slot means the next
-  // token is not another slot (notably rpc's JSON argument).
-  if (slotCompletion && defaultHost && explicit === undefined && !context.local && context.positionals.length === 1 && /^(?:\d+|[a-f0-9]{8}(?:-[a-f0-9-]*)?)$/i.test(context.positionals[0])) return [];
-  const positionalHost = !context.local && explicit === undefined && context.positionals.length > 0;
-  const host = context.local ? undefined : explicit ?? (positionalHost ? context.positionals[0] : defaultHost);
-  const positionalCount = context.positionals.length - (positionalHost ? 1 : 0);
-  if (slotCompletion && positionalCount > 0) return [];
+  if (slotCompletion && context.positionals.length > 0) return [];
+  const host = selectHost({ host: context.values.get('--host'), local: context.local, defaultHost: dependencies.defaultHost ?? safeDefaultHost() });
   if (!context.local && !host) return [];
   const connect = dependencies.connect ?? (options => options.local ? connectCompatibleLocal(options.stateDir) : connectCompatibleSsh({ host: options.host!, remoteBin: options.remoteBin, stateDir: options.stateDir }));
   let connection: Pick<RemoteConnection, 'request' | 'close'> | undefined;

@@ -48,9 +48,9 @@ try {
   const metadata=await client.request('filesystem_metadata',{slotId:first.id});assert.equal(metadata.homeDir,'/home/ubuntu');
   const cli=fileURLToPath(new URL('../dist/cli.js',import.meta.url));
   const options=['--state-dir',stateDir];
-  const completion=await exec(process.execPath,[cli,'complete','--shell','fish','--words',JSON.stringify(['new',host,...options,'--cwd',`${root}/dir`])]);
+  const completion=await exec(process.execPath,[cli,'complete','--shell','fish','--words',JSON.stringify(['new','--host',host,...options,'--cwd',`${root}/dir`])]);
   assert.match(completion.stdout,/directory.*spaces/);
-  const slotCompletion=await exec(process.execPath,[cli,'complete','--shell','fish','--words',JSON.stringify(['attach',host,...options,''])]);
+  const slotCompletion=await exec(process.execPath,[cli,'complete','--shell','fish','--words',JSON.stringify(['attach','--host',host,...options,''])]);
   assert.match(slotCompletion.stdout,/1\t/);
   console.log('PASS remote cwd/slot shell completion, numeric selection, UTF-8 file attachments, remote metadata');
 
@@ -70,7 +70,7 @@ try {
   console.log('PASS live SSH recovery reattached the same Pi PID; in-flight bash completed exactly once');
   const second=await client.request('create',{cwd:root,args:['--session-dir',`${root}/second-history`]});slots.push(second.id);
   assert.equal(second.number,legacy?undefined:2);
-  const selected=await exec(process.execPath,[cli,'rpc',host,'2',...options,JSON.stringify({type:'get_state'})]);
+  const selected=await exec(process.execPath,[cli,'rpc','--host',host,'2',...options,JSON.stringify({type:'get_state'})]);
   assert.ok(JSON.parse(selected.stdout).sessionId);
   console.log('PASS second independent slot and numeric CLI targeting');
 } finally {

@@ -2,8 +2,9 @@ import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import type { Readable, Writable } from 'node:stream';
-import { BOOLEAN_OPTIONS, VALUE_OPTIONS, completionScript, runCompletionCommand, selectHost, slotLabel, slotNumber, numberSlots, type NumberedSlot } from './completion.js';
+import { BOOLEAN_OPTIONS, VALUE_OPTIONS, completionScript, resolveCommand, runCompletionCommand, selectHost, slotLabel, slotNumber, numberSlots, type NumberedSlot } from './completion.js';
 import { runDaemon, defaultStateDir } from './daemon.js';
+import { configPath, defaultHost } from './config.js';
 import { bridge } from './client.js';
 import { connectCompatibleLocal, connectCompatibleSsh } from './compat-client.js';
 import { ReconnectingConnection } from './reconnect.js';
@@ -12,21 +13,23 @@ import { PI_VERSION, PROTOCOL_VERSION, type SlotInfo, type Snapshot, type Remote
 const HELP = `pi-remote — local terminal UI, persistent remote Pi RPC processes
 
 Everyday commands:
-  pi-remote new HOST --cwd REMOTE_DIRECTORY [--no-attach] [-- PI_OPTIONS...]
-  pi-remote ls HOST [--json]
-  pi-remote attach HOST [SLOT]
-  pi-remote kill HOST SLOT
+  pi-remote new --cwd REMOTE_DIRECTORY [--host HOST] [--no-attach] [-- PI_OPTIONS...]
+  pi-remote ls [--host HOST] [--json]
+  pi-remote attach [--host HOST] [SLOT]
+  pi-remote kill [--host HOST] SLOT
   pi-remote completion fish|zsh|bash
 
 Power-user / debugging commands:
-  pi-remote rpc HOST SLOT '{"type":"get_state"}'
+  pi-remote rpc [--host HOST] SLOT '{"type":"get_state"}'
     Send one JSON command and print its response.
-  pi-remote watch HOST SLOT
+  pi-remote watch [--host HOST] SLOT
     Print a session snapshot, then stream live events as JSON.
   These are for scripts and debugging. Use attach for normal interactive work.
 
+Any unambiguous command prefix works: n = new, a = attach, k = kill, l = ls.
+
 Options:
-  --host HOST          Alternative to positional SSH host (or PI_REMOTE_HOST)
+  --host HOST          SSH host (default: PI_REMOTE_HOST, then the config file)
   --remote-bin PATH    Remote program (default ~/.local/share/pi-remote/bin/pi-remote)
   --state-dir PATH     Remote daemon state directory (default ~/.pi/remote)
   --session PATH       Resume a session file when creating a new slot
@@ -38,11 +41,13 @@ Options:
   --theme NAME         Local UI theme
   --no-reconnect       Disable automatic client reconnection
 
+Configuration:
+  $XDG_CONFIG_HOME/pi-remote/config.json (default ~/.config/pi-remote/config.json)
+  sets the default SSH host: {"host": "devbox"}
+  Host precedence: --host, then PI_REMOTE_HOST, then the config file.
+
 SLOT is a stable number from ls, a full UUID, or a unique UUID prefix.
 attach without SLOT opens a local picker when several active slots exist.
---host takes precedence. A positional HOST overrides PI_REMOTE_HOST.
-With PI_REMOTE_HOST set, a lone attach/kill/watch argument is SLOT;
-rpc SLOT JSON also uses that default. Use --host HOST for a host-only picker.
 --local ignores SSH host defaults. Remote ~ and relative completion paths use
 remote home; --session completion uses --cwd when supplied.
 Quote remote '~' paths so your shell does not expand them to LOCAL home.
@@ -130,7 +135,7 @@ export async function resolveSlot(connection: Pick<RemoteConnection, 'request'>,
   const active = slots.filter(slot => slot.status !== 'exited');
   if (active.length === 1) return active[0].id;
   if (allowPicker && active.length > 1) return pickSlot(active);
-  throw new Error(active.length ? 'Specify a slot number or UUID from ls.' : 'No active slots. Create one with new HOST --cwd DIRECTORY.');
+  throw new Error(active.length ? 'Specify a slot number or UUID from ls.' : 'No active slots. Create one with new --cwd DIRECTORY.');
 }
 /** Only a live terminal UI owns recovery. Headless commands end on disconnect. */
 export function shouldReconnect(command: string, flags: ReadonlySet<string>, stdinIsTTY = Boolean(process.stdin.isTTY), stdoutIsTTY = Boolean(process.stdout.isTTY)): boolean {
@@ -138,7 +143,8 @@ export function shouldReconnect(command: string, flags: ReadonlySet<string>, std
 }
 
 export async function main(args = process.argv.slice(2)): Promise<void> {
-  const command = args[0] ?? 'help';
+  const first = args[0] ?? 'help';
+  const command = first === '--help' || first === '-h' || first === '--version' ? first : resolveCommand(first);
   if (command === 'help' || command === '--help' || command === '-h') { console.log(HELP); return; }
   if (command === '--version' || command === 'version') { console.log(`pi-remote 0.2.0 (Pi ${PI_VERSION}, protocol ${PROTOCOL_VERSION})`); return; }
   if (command === 'fs') {
@@ -157,12 +163,11 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   if (command === 'daemon') { await runDaemon({ stateDir: stateDir ?? defaultStateDir(), executable: process.env.PI_REMOTE_PI_BIN ?? 'pi' }); return; }
   if (command === 'bridge') { await bridge(stateDir); return; }
   if (!['new', 'ls', 'attach', 'kill', 'rpc', 'watch'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
-  const target = selectHost(command, options.positionals, { host: options.values.get('--host'), defaultHost: process.env.PI_REMOTE_HOST, local: options.flags.has('--local') });
-  const host = target.host;
-  options.positionals = target.positionals;
+  const local = options.flags.has('--local');
+  const host = selectHost({ host: options.values.get('--host'), local, defaultHost: local ? undefined : defaultHost() });
   const maxPositionals = command === 'rpc' ? 2 : ['attach', 'kill', 'watch'].includes(command) ? 1 : 0;
-  if (options.positionals.length > maxPositionals) throw new Error('Too many arguments. With --host, omit the positional HOST. See --help.');
-  if (!options.flags.has('--local') && !host) throw new Error('Specify an SSH host or use --local. See --help.');
+  if (options.positionals.length > maxPositionals) throw new Error(`Too many arguments. Use --host HOST to select a host. See --help.`);
+  if (!local && !host) throw new Error(`No host. Use --host HOST, set PI_REMOTE_HOST, add {"host": "HOST"} to ${configPath()}, or use --local.`);
   const factory = () => options.flags.has('--local') ? connectCompatibleLocal(stateDir) : connectCompatibleSsh({ host: host!, remoteBin: options.values.get('--remote-bin'), stateDir });
   const connection = shouldReconnect(command, options.flags) ? await ReconnectingConnection.connect(factory) : await factory();
   let removeSignal: (() => void) | undefined;
@@ -171,7 +176,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       const slots = numberSlots(await connection.request<NumberedSlot[]>('list'));
       if (options.flags.has('--json')) console.log(JSON.stringify(slots, null, 2));
       else {
-        if (!slots.length) console.log('No slots. Create one with new HOST --cwd DIRECTORY.');
+        if (!slots.length) console.log('No slots. Create one with new --cwd DIRECTORY.');
         for (const slot of slots) console.log(`${String(slotNumber(slot) ?? '-').padStart(3)}  ${slot.id}  ${slot.status.padEnd(7)}  ${slot.clients} client(s)  ${slot.sessionName ?? '(unnamed)'}  ${slot.cwd}${slot.error ? `\n  ${slot.error}` : ''}`);
       }
       return;
