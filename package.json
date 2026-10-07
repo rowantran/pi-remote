@@ -10,6 +10,8 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test test/*.test.ts",
     "test:golden": "node --import tsx test/golden-transcript.ts",
+    "test:scroll": "node --import tsx test/scroll-benchmark.ts",
+    "test:native-scroll": "node --import tsx test/native-scroll-benchmark.ts",
     "verify": "npm run check && npm test && npm run build"
   },
   "engines": { "node": ">=22.19" },

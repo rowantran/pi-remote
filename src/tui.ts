@@ -2,7 +2,7 @@ import { readAttachment } from './files.js';
 import { Transcript } from './transcript.js';
 import { createRemoteKeybindings } from './keybindings.js';
 import { readLocalClipboard, editLocally } from './local-input.js';
-import { PresentationHost, readPresentationConfig, createPresentationTheme } from './presentation.js';
+import { PresentationHost, readPresentationConfig, createPresentationTheme, type PresentationChange } from './presentation.js';
 import { loadLocalTheme, readPiThemeSetting, resolveThemeSelection, terminalAppearance } from './local-theme.js';
 import { hostname } from 'node:os';
 import { REMOTE_ICON, detachMessage, remoteSessionEnv } from './remote-session.js';
@@ -242,7 +242,7 @@ export class RemoteTui {
     this.appliedEditorFactory = undefined;
     const host = new PresentationHost({
       snapshot: () => this.view.snapshot, tui: this.tui, theme: () => this.localTheme,
-      notify: message => this.notify(message), invalidate: () => this.presentationChanged(),
+      notify: message => this.notify(message), invalidate: scope => this.presentationChanged(scope),
       getEditorText: () => this.editor.getExpandedText(), setEditorText: text => this.editor.setText(text),
       getToolsExpanded: () => this.transcript.expanded,
       setToolsExpanded: expanded => { this.transcript.expanded = expanded; },
@@ -276,8 +276,10 @@ export class RemoteTui {
     if (previous !== next) (previous as Editor & { dispose?(): void }).dispose?.();
   }
 
-  private presentationChanged(): void {
-    this.transcript.invalidate();
+  private presentationChanged(scope: PresentationChange = 'transcript'): void {
+    // Footer/status/widget updates need a frame, not a reset of every historical
+    // Markdown block. Remote message changes reconcile through Transcript.changed().
+    if (scope === 'transcript') this.transcript.invalidate();
     if (this.presentationQueued || this.detached) return;
     this.presentationQueued = true;
     queueMicrotask(() => {

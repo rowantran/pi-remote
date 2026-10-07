@@ -86,6 +86,74 @@ test('local widgets, commands, shortcuts, metadata and reload leave the remote h
   assert.equal(ui.presentation?.workingMessage, 'agent');
 });
 
+test('metadata, status and streaming updates preserve historical Markdown caches', async t => {
+  const key = Symbol.for('pi-remote.test.render-cache');
+  const counts = { history: 0, live: 0 };
+  (globalThis as any)[key] = counts;
+  const dir = await mkdtemp(resolve(tmpdir(), 'remote-render-cache-'));
+  t.after(async () => { delete (globalThis as any)[key]; await rm(dir, { recursive: true }); });
+  const fixture = resolve(dir, 'cache.ts');
+  await writeFile(fixture, `export default function(pi) {
+    pi.registerMarkdownTransformer(text => {
+      const counts = globalThis[Symbol.for('pi-remote.test.render-cache')];
+      if (text.includes('historical')) counts.history++;
+      if (text.includes('streamed')) counts.live++;
+      return text;
+    });
+    pi.on('session_start', (_, ctx) => {
+      ctx.ui.setFooter(() => ({ invalidate() {}, render() { return ['usage:' + ctx.getContextUsage()?.tokens]; } }));
+      ctx.ui.setWidget('metadata', () => ({ invalidate() {}, render() { return ['session:' + pi.getSessionName()]; } }));
+    });
+    pi.on('message_update', (_, ctx) => ctx.ui.setStatus('stream', 'receiving'));
+    pi.registerCommand('header', { handler(_, ctx) {
+      ctx.ui.setHeader(() => ({ invalidate() {}, render() { return ['new header']; } }));
+    } });
+    pi.registerCommand('transform', { handler() {
+      pi.registerMarkdownTransformer(text => text.replace('historical', 'replaced'));
+    } });
+  }`);
+  const initial = snapshot();
+  initial.live.messages = [
+    { role: 'assistant', timestamp: 1, stopReason: 'stop', content: [{ type: 'text', text: '**historical** response' }] },
+    { role: 'assistant', timestamp: 2, stopReason: 'pending', content: [{ type: 'text', text: 'streamed' }] },
+  ];
+  const { ui, connection, terminal, submit } = await launch(t, initial, [fixture]);
+  ui.tui.renderNow();
+  assert.ok(counts.history > 0);
+  counts.history = 0; counts.live = 0;
+  const historical = (ui as any).transcript.children[0];
+  let invalidations = 0;
+  const original = historical.invalidate;
+  t.mock.method(historical, 'invalidate', function (this: any) { invalidations++; original.call(this); });
+  for (let i = 0; i < 3; i++) { ui.tui.scrollBy(-1); ui.tui.renderNow(); }
+  assert.equal(counts.history, 0);
+  const handler = connection.handler;
+  connection.handler = (method, params) => params?.command?.type === 'get_session_stats'
+    ? { contextUsage: { tokens: 60000 } } : handler(method, params);
+  (ui as any).refreshPresentationData(); await flush(); ui.tui.renderNow();
+  assert.match(ui.tui.getScreenLines().join('\n'), /usage:60000/);
+  connection.listener?.({ type: 'event', slotId: 'slot', seq: 1,
+    event: { type: 'session_info_changed', name: 'renamed' } });
+  await flush(); ui.tui.renderNow();
+  assert.match(ui.tui.getScreenLines().join('\n'), /session:renamed/);
+  connection.listener?.({ type: 'event', slotId: 'slot', seq: 2,
+    event: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: ' new text' } } });
+  await flush(); ui.tui.renderNow();
+  assert.match(ui.tui.getScreenLines().join('\n'), /streamed new text/);
+  assert.ok(counts.live > 0);
+  assert.equal(counts.history, 0);
+  assert.equal(invalidations, 0);
+  assert.equal((ui as any).transcript.children[0], historical);
+  // Display options and real renderer registrations still invalidate/rebuild content.
+  terminal.input('\x14'); await flush(); ui.tui.renderNow();
+  assert.ok(counts.history > 0);
+  await submit('/header'); ui.tui.renderNow();
+  assert.match(ui.tui.getScreenLines().join('\n'), /new header/);
+  await submit('/transform'); ui.tui.renderNow();
+  assert.match(ui.tui.getScreenLines().join('\n'), /replaced/);
+  assert.doesNotMatch(ui.tui.getScreenLines().join('\n'), /historical/);
+});
+
 test('partial shell timers are retired on UI reload, reconnect and detach without stopping remote work', async t => {
   for (const action of ['reload', 'async-reload', 'reconnect', 'detach']) await t.test(action, async t => {
     const active = new Set<ReturnType<typeof setInterval>>();
