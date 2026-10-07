@@ -131,7 +131,7 @@ For zsh or bash, put `pi-remote` on `PATH` with `npm link`, then install the mat
 | `/theme [NAME]` | Show or change the local theme for this client |
 | `/help` | Show local controls |
 
-The editor completes local built-in commands and remote extension/skill/template commands after `/`, and remote paths after `@`. Unknown slash commands pass to Pi's `prompt` RPC unless an explicitly loaded local adapter handles them. Unsupported built-in TUI commands should not be assumed to work.
+The editor completes local built-in commands and remote extension/skill/template commands after `/`, and remote paths after `@`. Slash command suggestions use case-insensitive fuzzy matching, so `/pseude` can suggest `/skill:pseudocode`. Unknown slash commands pass to Pi's `prompt` RPC unless an explicitly loaded local adapter handles them. Unsupported built-in TUI commands should not be assumed to work.
 
 ### Files, clipboard, and shell commands
 

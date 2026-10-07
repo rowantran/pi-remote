@@ -70,6 +70,66 @@ test('slash suggestions merge remote and local commands, cache requests, and san
   assert.equal(calls, 2);
 });
 
+test('slash suggestions match subsequences, non-prefix text, and case-insensitive queries', async () => {
+  const autocomplete = provider();
+  autocomplete.setCommands([{ name: 'skill:pseudocode', description: 'Write pseudocode' }]);
+  for (const text of ['/pseude', '/code', '/PSDE', '/SKILL:PSDE']) {
+    const suggestions = await autocomplete.getSuggestions([text], 0, text.length, { signal: signal() });
+    assert.equal(suggestions?.prefix, text);
+    assert.deepEqual(suggestions?.items, [{
+      value: '/skill:pseudocode', label: '/skill:pseudocode', description: 'Write pseudocode',
+    }]);
+  }
+  for (const text of ['/zzzz', '/eduesp']) {
+    assert.equal(await autocomplete.getSuggestions([text], 0, text.length, { signal: signal() }), null);
+  }
+});
+
+test('slash suggestions rank exact and consecutive matches ahead of gapped matches', async () => {
+  const autocomplete = provider();
+  autocomplete.setCommands([{ name: 'compact-mode' }, { name: 'code' }, { name: 'skill:pseudocode' }]);
+  const suggestions = await autocomplete.getSuggestions(['/code'], 0, 5, { signal: signal() });
+  assert.deepEqual(suggestions?.items.map(item => item.value), ['/code', '/skill:pseudocode', '/compact-mode']);
+  const all = await autocomplete.getSuggestions(['/'], 0, 1, { signal: signal() });
+  assert.deepEqual(all?.items.map(item => item.value), ['/code', '/compact-mode', '/skill:pseudocode']);
+});
+
+test('slash suggestions ignore cancellation before and during cached command lookup', async () => {
+  let calls = 0;
+  let resolve!: (commands: { name: string }[]) => void;
+  const commands = new Promise<{ name: string }[]>(done => { resolve = done; });
+  const autocomplete = new RemoteAutocompleteProvider({
+    getCommands: () => { calls++; return commands; }, completePath: empty, localCommands: [],
+  });
+  const cancelled = new AbortController(); cancelled.abort();
+  assert.equal(await autocomplete.getSuggestions(['/pseude'], 0, 7, { signal: cancelled.signal }), null);
+  assert.equal(calls, 0);
+  const later = new AbortController();
+  const pending = autocomplete.getSuggestions(['/pseude'], 0, 7, { signal: later.signal });
+  later.abort(); resolve([{ name: 'skill:pseudocode' }]);
+  assert.equal(await pending, null);
+  const suggestions = await autocomplete.getSuggestions(['/pseude'], 0, 7, { signal: signal() });
+  assert.deepEqual(suggestions?.items.map(item => item.value), ['/skill:pseudocode']);
+  assert.equal(calls, 1);
+});
+
+test('fuzzy slash completion replaces the whole token and preserves arguments and other lines', async () => {
+  const autocomplete = provider();
+  autocomplete.setCommands([{ name: 'skill:pseudocode' }]);
+  const prefix = '/pseude';
+  const suggestions = await autocomplete.getSuggestions([prefix], 0, prefix.length, { signal: signal() });
+  assert(suggestions);
+  const item = suggestions.items[0];
+  assert.deepEqual(autocomplete.applyCompletion([prefix], 0, prefix.length, item, suggestions.prefix), {
+    lines: ['/skill:pseudocode '], cursorLine: 0, cursorCol: '/skill:pseudocode '.length,
+  });
+  const original = ['/pseude-remainder argument', 'second line'];
+  assert.deepEqual(autocomplete.applyCompletion(original, 0, prefix.length, item, suggestions.prefix), {
+    lines: ['/skill:pseudocode argument', 'second line'], cursorLine: 0, cursorCol: '/skill:pseudocode'.length,
+  });
+  assert.deepEqual(original, ['/pseude-remainder argument', 'second line']);
+});
+
 test('failed remote command lookup still exposes local commands and updates do not request RPC', async () => {
   const autocomplete = new RemoteAutocompleteProvider({ getCommands: async () => { throw new Error('old daemon'); }, completePath: empty });
   assert.equal((await autocomplete.getSuggestions(['/att'], 0, 4, { signal: signal() }))?.items[0].value, '/attach');
@@ -80,7 +140,7 @@ test('failed remote command lookup still exposes local commands and updates do n
 test('slash completion is only offered for the first prompt token', async () => {
   let commands = 0;
   const autocomplete = new RemoteAutocompleteProvider({ getCommands: async () => { commands++; return []; }, completePath: empty });
-  for (const text of ['Please /he', '/help argument', '/folder/path', 'a\n/he', '`/he']) {
+  for (const text of ['Please /he', '/help argument', '/folder/path', 'a\n/he', '`/he', ' /he', '/he\n']) {
     const lines = text.split('\n');
     assert.equal(await autocomplete.getSuggestions(lines, lines.length - 1, lines.at(-1)!.length, { signal: signal() }), null);
   }
