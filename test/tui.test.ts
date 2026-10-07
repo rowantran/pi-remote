@@ -4,7 +4,7 @@ import type { Terminal } from '@earendil-works/pi-tui';
 import { stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
 import type { RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../src/protocol.js';
 import { RemoteTui, type TuiOptions } from '../src/tui.js';
-import { detachMessage } from '../src/remote-session.js';
+import { detachMessage, stoppedMessage } from '../src/remote-session.js';
 import { activeBranch, applyAssistantDelta, RemoteView, restoredQueueText, safeText, toolText, transcriptMessages } from '../src/view.js';
 
 function snapshot(overrides: Partial<Snapshot> = {}): Snapshot {
@@ -282,6 +282,57 @@ test('working status remains above a remote dialog instead of below the footer',
 test('detach message includes the slot number when known', () => {
   assert.equal(detachMessage('uuid', 3), 'Detached from slot 3 / uuid');
   assert.equal(detachMessage('uuid'), 'Detached from slot uuid');
+  assert.equal(stoppedMessage('uuid', 3), 'Stopped slot 3 / uuid');
+  assert.equal(stoppedMessage('uuid'), 'Stopped slot uuid');
+});
+
+test('/quit on an idle slot kills it through the daemon, not Pi, then closes the client', async t => {
+  const { ui, terminal, connection, submit, finished } = launch(t);
+  submit('/quit'); await finished;
+  assert.deepEqual(connection.requests, [{ method: 'kill', params: { slotId: 'slot' } }]);
+  assert.equal(ui.stoppedSlot, true); assert.equal(connection.closed, true); assert.equal(terminal.stopped, true);
+});
+
+test('/quit while Pi is working asks first; cancel keeps the slot and the client', async t => {
+  const initial = snapshot(); initial.live.busy = true;
+  const { ui, terminal, connection, submit } = launch(t, initial);
+  submit('/quit'); await flush();
+  assert.match(stripTerminalSequences(terminal.output), /Stop the remote Pi process\?/);
+  terminal.input('\x1b'); await flush();
+  assert.deepEqual(connection.requests, []);
+  assert.equal(ui.stoppedSlot, false); assert.equal(terminal.stopped, false); assert.equal(connection.closed, false);
+});
+
+test('/quit while Pi is working kills the slot after confirmation', async t => {
+  const initial = snapshot(); initial.live.busy = true;
+  const { ui, terminal, connection, submit, finished } = launch(t, initial);
+  submit('/quit'); await flush();
+  terminal.input('\x1b[B'); terminal.input('\r'); await finished;
+  assert.deepEqual(connection.requests, [{ method: 'kill', params: { slotId: 'slot' } }]);
+  assert.equal(ui.stoppedSlot, true);
+});
+
+test('/quit failure keeps the client attached and does not report a stopped slot', async t => {
+  const { ui, terminal, connection, submit } = launch(t);
+  connection.handler = () => { throw new Error('daemon unavailable'); };
+  submit('/quit'); await flush();
+  assert.equal(connection.requests.length, 1);
+  assert.equal(ui.stoppedSlot, false); assert.equal(terminal.stopped, false);
+  assert.match(stripTerminalSequences(terminal.output), /daemon unavailable/);
+});
+
+test('/quit while disconnected sends nothing and keeps the client', async t => {
+  const { ui, terminal, connection, submit } = launch(t);
+  connection.disconnect(); submit('/quit'); await flush();
+  assert.deepEqual(connection.requests, []);
+  assert.equal(ui.stoppedSlot, false); assert.equal(terminal.stopped, false);
+});
+
+test('/quit on an exited slot closes the client without another kill', async t => {
+  const initial = snapshot(); initial.slot.status = 'exited';
+  const { ui, connection, submit, finished } = launch(t, initial);
+  submit('/quit'); await finished;
+  assert.deepEqual(connection.requests, []); assert.equal(ui.stoppedSlot, true);
 });
 
 test('Esc clears the queue BEFORE abort and restores returned text plus draft', async t => {

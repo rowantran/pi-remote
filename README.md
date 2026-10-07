@@ -48,6 +48,8 @@ pi-remote new --cwd /remote/project --session /remote/session.jsonl
 pi-remote kill 1
 ```
 
+From an attached client, `/quit` does the same as `pi-remote kill` for the current slot, then closes the client and prints `Stopped slot NUMBER / UUID`. If Pi is running, compacting, running a shell command, or has queued prompts, `/quit` asks for confirmation first, because stopping Pi interrupts that work. The session file stays on disk; open it in a new slot with `--session` to continue. The stopped slot stays in `pi-remote ls`.
+
 The 0.2 daemon persists stable slot numbers in `slots.json`, including stopped slots. A still-running 0.1 daemon uses insertion-order numeric aliases until a later daemon startup migrates its metadata. UUIDs remain valid in both cases. Numeric input always means a slot number, never a UUID prefix.
 
 `Ctrl+D` or `/detach` closes only the client and prints `Detached from slot NUMBER / UUID`. An attached terminal UI automatically reconnects to the same slot after transport loss; use `--no-reconnect` to disable this. The power-user/debug commands `rpc` and `watch` do not reconnect. Accepted or uncertain commands are **never replayed automatically**. Check the restored session before resending an uncertain request.
@@ -106,6 +108,7 @@ For zsh or bash, put `pi-remote` on `PATH` with `npm link`, then install the mat
 | Ctrl+C | Clear the prompt (pending attachments stay) |
 | Esc | Cancel the current dialog, or clear queued input then abort; cleared queue text returns to the editor |
 | Ctrl+D / `/detach` | Detach only, including while a dialog is open |
+| `/quit` | Stop the remote Pi process for this slot, then close the client. Asks first if work is in progress |
 | Ctrl+O | Expand/collapse tool output |
 | Ctrl+T | Show/hide thinking. The starting state follows `hideThinkingBlock` in your local `~/.pi/agent/settings.json`; Ctrl+T changes only the current view |
 | PageUp/PageDown | Scroll transcript |
@@ -244,7 +247,7 @@ local pi-tui client -> SSH stdio -> bridge -> private Unix socket
 - A `0700` state directory and `0600` Unix socket restrict local access. This is not a sandbox: attached clients have the same tool authority as the remote Pi user.
 - `--state-dir` selects a **dedicated, private, user-owned** directory; do not use a project root or home directory. `--remote-bin` overrides the installed remote launcher.
 - The daemon validates protocol/Pi versions on connection and rechecks the remote Pi executable before starting each slot.
-- Only explicit slot kill or daemon shutdown closes Pi's stdin. A display parser/reducer failure does not kill a healthy Pi process.
+- Only explicit slot kill (`pi-remote kill` or `/quit`) or daemon shutdown closes Pi's stdin. A display parser/reducer failure does not kill a healthy Pi process.
 - Output queues/JSONL frames are bounded at 64 MiB. A slow client is disconnected rather than stalling Pi. Extremely large history records can fail attachment; pagination is not implemented.
 - `slots.json` contains process metadata and session paths, not credentials or a second transcript. `daemon.log` contains stderr, which may include sensitive extension diagnostics. It is private but not rotated automatically yet.
 

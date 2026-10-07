@@ -32,5 +32,14 @@ export function remoteSessionEnv(info: RemoteSessionInfo): Record<string, string
 
 /** Text for the user after the local UI closes. Remote work keeps running. */
 export function detachMessage(slotId: string, slotNumber?: number): string {
-  return `Detached from slot ${slotNumber === undefined ? slotId : `${slotNumber} / ${slotId}`}`;
+  return `Detached from slot ${slotLabel(slotId, slotNumber)}`;
+}
+
+/** Text for the user after /quit stopped the remote Pi process and closed the local UI. */
+export function stoppedMessage(slotId: string, slotNumber?: number): string {
+  return `Stopped slot ${slotLabel(slotId, slotNumber)}`;
+}
+
+function slotLabel(slotId: string, slotNumber?: number): string {
+  return slotNumber === undefined ? slotId : `${slotNumber} / ${slotId}`;
 }
