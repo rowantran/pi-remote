@@ -12,7 +12,7 @@ import {
 import { type Component, type TUI, Editor, matchesKey, Text } from '@earendil-works/pi-tui';
 import { WidthCache } from './width-cache.js';
 import type { RecordValue, Snapshot } from './protocol.js';
-import { activeBranch, messageKey } from './view.js';
+import { ReadonlyHistory, readonlyCopy } from './presentation-history.js';
 
 /**
  * Local presentation compatibility, NOT a JavaScript sandbox. Only explicitly trusted files may
@@ -80,17 +80,6 @@ const DISPLAY_EVENTS = new Set([
   'tool_execution_update', 'tool_execution_end',
 ]);
 
-/** Clone and freeze wire data; extension code never receives mutable snapshot objects. */
-function readonlyCopy<T>(value: T): T {
-  const copy = structuredClone(value);
-  const freeze = (item: any): void => {
-    if (!item || typeof item !== 'object' || Object.isFrozen(item)) return;
-    for (const child of Object.values(item)) freeze(child);
-    Object.freeze(item);
-  };
-  freeze(copy); return copy;
-}
-
 /** Public Theme constructor only; callers may supply their own live public theme getter. */
 export function createPresentationTheme(): Theme {
   const foreground = 'accent border borderAccent borderMuted success error warning muted dim text thinkingText scrollbarTrack scrollbarThumb searchMatchText userMessageText customMessageText customMessageLabel toolTitle toolOutput mdHeading mdLink mdLinkUrl mdCode mdCodeBlock mdCodeBlockBorder mdQuote mdQuoteBorder mdHr mdListBullet toolDiffAdded toolDiffRemoved toolDiffContext syntaxComment syntaxKeyword syntaxFunction syntaxVariable syntaxString syntaxNumber syntaxType syntaxOperator syntaxPunctuation thinkingOff thinkingMinimal thinkingLow thinkingMedium thinkingHigh thinkingXhigh thinkingMax bashMode'.split(' ');
@@ -121,6 +110,7 @@ export class PresentationHost {
   private readonly markdown: Hook[] = [];
   private readonly statuses = new Map<string, string>();
   private readonly branchListeners = new Set<() => void>();
+  private readonly history = new ReadonlyHistory();
   private readonly rows = new Map<string, ToolRow>();
   private readonly componentRows = new Map<string, ComponentRow>();
   private readonly componentContexts = new WeakMap<object, ComponentRow>();
@@ -228,6 +218,7 @@ export class PresentationHost {
     this.footer?.dispose?.(); this.header?.dispose?.();
     for (const widget of this.widgets.values()) widget.component.dispose?.();
     this.retainToolCalls([]); this.branchListeners.clear(); this.bus.clear();
+    this.history.dispose();
   }
   async command(name: string, args = ''): Promise<boolean> {
     const hook = this.commands.get(name.replace(/^\//, ''));
@@ -341,25 +332,15 @@ export class PresentationHost {
       setHiddenThinkingLabel: (label?: string) => { this.hiddenThinkingLabel = label; this.changed(); },
     };
     const sessionManager = this.restricted({
-      getEntries: () => readonlyCopy(this.snapshot.entries),
-      getBranch: (leafId?: string) => {
-        const snapshot = this.snapshot;
-        const branch = activeBranch(snapshot.entries, leafId ?? snapshot.leafId);
-        if (leafId === undefined) {
-          const seen = new Set(branch.filter(entry => entry.type === 'message').map(entry => messageKey(entry.message)));
-          for (const message of snapshot.live.messages) if (!seen.has(messageKey(message))) {
-            branch.push({ type: 'message', id: `live:${messageKey(message)}`, message });
-          }
-        }
-        return readonlyCopy(branch);
-      },
-      getEntry: (id: string) => readonlyCopy(this.snapshot.entries.find(entry => entry.id === id)),
+      getEntries: () => this.history.getEntries(this.snapshot),
+      getBranch: (leafId?: string) => this.history.getBranch(this.snapshot, leafId),
+      getEntry: (id: string) => this.history.getEntry(this.snapshot, id),
       getLeafId: () => this.snapshot.leafId,
       getSessionId: () => this.snapshot.state.sessionId ?? this.snapshot.slot.id,
       getSessionName: () => this.snapshot.state.sessionName ?? this.snapshot.slot.sessionName,
       getSessionFile: () => this.snapshot.slot.sessionFile,
       getCwd: () => this.snapshot.slot.cwd,
-      getHeader: () => readonlyCopy(this.snapshot.entries.find(entry => entry.type === 'session')),
+      getHeader: () => this.history.getHeader(this.snapshot),
     }, 'ctx.sessionManager');
     const models = () => this.snapshot.presentation?.models ?? [];
     const modelRegistry = this.restricted({
