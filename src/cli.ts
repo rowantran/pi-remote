@@ -8,6 +8,7 @@ import { configPath, defaultCwd, defaultHost } from './config.js';
 import { bridge } from './client.js';
 import { connectCompatibleLocal, connectCompatibleSsh } from './compat-client.js';
 import { ReconnectingConnection } from './reconnect.js';
+import { releaseName, restartDaemon } from './restart-daemon.js';
 import { PI_VERSION, PROTOCOL_VERSION, type SlotInfo, type Snapshot, type RemoteConnection } from './protocol.js';
 
 const HELP = `pi-remote — local terminal UI, persistent remote Pi RPC processes
@@ -17,6 +18,10 @@ Everyday commands:
   pi-remote ls [--host HOST] [--all] [--json]
   pi-remote attach [--host HOST] [SLOT]
   pi-remote kill [--host HOST] SLOT
+  pi-remote restart-daemon [--host HOST] [--wait | --force]
+    Restart the remote daemon on the installed release. Every running slot is
+    reopened from its session file with the same number, like /reload. Refuses
+    while a slot is busy; --wait retries until idle, --force interrupts.
   pi-remote completion fish|zsh|bash
 
 Power-user / debugging commands:
@@ -26,7 +31,7 @@ Power-user / debugging commands:
     Print a session snapshot, then stream live events as JSON.
   These are for scripts and debugging. Use attach for normal interactive work.
 
-Any unambiguous command prefix works: n = new, a = attach, k = kill, l = ls.
+Any unambiguous command prefix works: n = new, a = attach, k = kill, l = ls, re = restart-daemon.
 
 Options:
   --host HOST          SSH host (default: PI_REMOTE_HOST, then the config file)
@@ -39,6 +44,8 @@ Options:
   --local              No SSH; run against a daemon on this machine
   --json               Machine-readable list/create output
   --no-attach          Create a slot and print its ID without opening the TUI
+  --wait               restart-daemon: wait until no slot is busy
+  --force              restart-daemon: interrupt busy slots
   --ui-extension PATH  Load a local presentation adapter (repeatable)
   --ui-config PATH     Local presentation configuration
   --theme NAME         Local UI theme, or a LIGHT/DARK pair
@@ -61,8 +68,9 @@ remote home; --session completion uses --cwd, or the default directory.
 Quote remote '~' paths so your shell does not expand them to LOCAL home.
 
 Completion installation (prints scripts; never edits shell configuration):
-  fish: pi-remote completion fish | source
-        Add this line to ~/.config/fish/config.fish after setting PATH.
+  fish: command -q pi-remote; and pi-remote completion fish | source
+        Add this line to ~/.config/fish/config.fish after setting PATH. The guard
+        skips machines without pi-remote, such as a remote host sharing the file.
         Alternatively, save the output to ~/.config/fish/completions/pi-remote.fish.
   zsh:  pi-remote completion zsh > ~/.zsh/completions/_pi-remote
         Add ~/.zsh/completions to fpath before running compinit.
@@ -180,13 +188,21 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const stateDir = options.values.get('--state-dir');
   if (command === 'daemon') { await runDaemon({ stateDir: stateDir ?? defaultStateDir(), executable: process.env.PI_REMOTE_PI_BIN ?? 'pi' }); return; }
   if (command === 'bridge') { await bridge(stateDir); return; }
-  if (!['new', 'ls', 'attach', 'kill', 'rpc', 'watch'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
+  if (!['new', 'ls', 'attach', 'kill', 'rpc', 'watch', 'restart-daemon'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
   const local = options.flags.has('--local');
   const host = selectHost({ host: options.values.get('--host'), local, defaultHost: local ? undefined : defaultHost() });
   const maxPositionals = command === 'rpc' ? 2 : ['attach', 'kill', 'watch'].includes(command) ? 1 : 0;
   if (options.positionals.length > maxPositionals) throw new Error(`Too many arguments. Use --host HOST to select a host. See --help.`);
   if (!local && !host) throw new Error(`No host. Use --host HOST, set PI_REMOTE_HOST, add {"host": "HOST"} to ${configPath()}, or use --local.`);
   const factory = () => options.flags.has('--local') ? connectCompatibleLocal(stateDir) : connectCompatibleSsh({ host: host!, remoteBin: options.values.get('--remote-bin'), stateDir });
+  if (command === 'restart-daemon') {
+    if (options.flags.has('--wait') && options.flags.has('--force')) throw new Error('Use --wait or --force, not both.');
+    const result = await restartDaemon(factory, { force: options.flags.has('--force'), wait: options.flags.has('--wait'), log: line => console.error(line) });
+    console.log(`Daemon restarted: ${result.before.pid} (${releaseName(result.before.release)}) -> ${result.after.pid} (${releaseName(result.after.release)})`);
+    const active = numberSlots(result.slots).filter(slot => slot.status !== 'exited');
+    console.log(formatSlotList(active, result.slots.length - active.length));
+    return;
+  }
   const connection = shouldReconnect(command, options.flags) ? await ReconnectingConnection.connect(factory) : await factory();
   let removeSignal: (() => void) | undefined;
   try {
