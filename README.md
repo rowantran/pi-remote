@@ -131,7 +131,7 @@ For zsh or bash, put `pi-remote` on `PATH` with `npm link`, then install the mat
 | Ctrl+O | Expand/collapse tool output |
 | Ctrl+T | Show/hide thinking. The starting state follows `hideThinkingBlock` in your local `~/.pi/agent/settings.json`; Ctrl+T changes only the current view |
 | PageUp/PageDown | Scroll transcript |
-| Ctrl+End | Follow new output |
+| Ctrl+End | Follow new output. While scrolled up, a `↓ Jump to latest message` pill shows at the bottom of the transcript; click it to do the same |
 | Ctrl+Shift+F | Search transcript |
 | `/model` / Ctrl+L | Searchable picker of remote models |
 | Ctrl+P | Cycle the remote model |
