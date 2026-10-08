@@ -1180,3 +1180,24 @@ test('remote warnings are displayed without retrying requests or stopping the re
   assert.equal(ui.view.snapshot.slot.status, 'starting');
   assert.equal(connection.requests.length, 0); assert.equal(connection.closed, false);
 });
+
+test('scrolling up shows a jump-to-latest pill; Ctrl+End or clicking it follows output again', async t => {
+  const initial = snapshot();
+  initial.live.messages = Array.from({ length: 40 }, (_, i) =>
+    ({ role: 'assistant', timestamp: i + 1, stopReason: 'stop', content: [{ type: 'text', text: `line ${i}` }] }));
+  const { ui, terminal } = launch(t, initial);
+  assert.doesNotMatch(screen(ui), /Jump to latest message/);
+  ui.tui.scrollBy(-5);
+  const pill = screen(ui).split('\n').find(line => line.includes('Jump to latest message'));
+  assert.ok(pill?.includes('↓ Jump to latest message · Ctrl+End'));
+  terminal.input('\x1b[1;5F'); // Ctrl+End
+  assert.equal(ui.tui.isFollowingOutput, true);
+  assert.doesNotMatch(screen(ui), /Jump to latest message/);
+  ui.tui.scrollBy(-5);
+  const lines = screen(ui).split('\n');
+  const row = lines.findIndex(line => line.includes('Jump to latest message'));
+  const column = lines[row]!.indexOf('Jump') + 1;
+  terminal.input(`\x1b[<0;${column + 1};${row + 1}M`); terminal.input(`\x1b[<0;${column + 1};${row + 1}m`);
+  assert.equal(ui.tui.isFollowingOutput, true);
+  assert.doesNotMatch(screen(ui), /Jump to latest message/);
+});

@@ -52,7 +52,7 @@ Esc: cancel the dialog, or clear the prompt queue then abort; queue text returns
 Esc Esc (empty editor, idle): tree-style fork picker, unless local doubleEscapeAction is none.
 /fork /tree: browse user and assistant messages; choose a user prompt to fork into a new session.
 Ctrl+O: expand/collapse tool output. Ctrl+T: show/hide thinking.
-PageUp/PageDown: transcript scroll. Ctrl+End: follow output. Ctrl+Shift+F: transcript search.
+PageUp/PageDown: transcript scroll. Ctrl+End or the Jump to latest pill: follow output. Ctrl+Shift+F: transcript search.
 /detach /help /model /new /fork /resume /session /copy /name <name> /compact [instructions]
 /quit stops the remote Pi process for this slot, then closes the client.
 /reload restarts remote Pi in the same slot/session; confirm to discard running work and queued prompts.
@@ -174,7 +174,14 @@ export class RemoteTui {
     try { initial = options.theme && resolveThemeSelection(options.theme, terminalAppearance()); } catch { /* Reported by initialize(). */ }
     initTheme(initial, false);
     this.view = new RemoteView(snapshot);
-    this.tui = new ScheduledTuiAltScreen(terminal, true, undefined, { renderIntervalMs: options.renderIntervalMs, copySelection: async text => {
+    this.tui = new ScheduledTuiAltScreen(terminal, true, undefined, { renderIntervalMs: options.renderIntervalMs,
+      // Like Pi's fullscreen mode: a clickable pill while the transcript is not following output.
+      scrollToEndIndicator: () => {
+        const shortcut = keyDisplayText('tui.altScreen.bottom');
+        const label = ` ↓ Jump to latest message${shortcut ? ` · ${shortcut}` : ''} `;
+        return this.localTheme.bg('selectedBg', this.localTheme.fg('text', label));
+      },
+      copySelection: async text => {
       try { await copyToClipboard(text); return true; } catch (error) { return errorText(error); }
     } });
     this.editor = this.makeEditor();
