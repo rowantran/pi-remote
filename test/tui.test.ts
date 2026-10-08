@@ -321,7 +321,7 @@ test('working status stays in the editor border above the prompt and footer whil
   const rows = () => { ui.tui.renderNow(); return ui.tui.getScreenLines().map(stripTerminalSequences); };
   const checkOrder = () => {
     const screen = rows();
-    const markers = ['Steer: queued instruction', 'above-editor widget', ' Working ', 'prompt draft', 'below-editor widget', 'Working · slot'];
+    const markers = ['Steering: queued instruction', 'to edit all queued messages', 'above-editor widget', ' Working ', 'prompt draft', 'below-editor widget', 'Working · slot'];
     const positions = markers.map(marker => screen.findIndex(row => row.includes(marker)));
     assert.ok(positions.every(position => position >= 0), screen.join('\n'));
     assert.deepEqual([...positions].sort((a, b) => a - b), positions, screen.join('\n'));
@@ -413,6 +413,33 @@ test('Esc clears the queue BEFORE abort and restores returned text plus draft', 
   ui.editor.setText('draft'); terminal.input('\x1b'); await flush();
   assert.deepEqual(connection.requests.map(request => request.params?.command.type), ['clear_queue', 'abort']);
   assert.equal(ui.editor.getExpandedText(), 'first\n\nlast\n\ndraft');
+});
+
+test('queued messages render like Pi with the dequeue hint', async t => {
+  const initial = snapshot(); initial.live.busy = true;
+  initial.live.steering = ['steer one', 'multi\nline']; initial.live.followUp = ['later'];
+  const { ui } = launch(t, initial);
+  ui.tui.renderNow();
+  const screen = ui.tui.getScreenLines().map(stripTerminalSequences);
+  const start = screen.findIndex(row => row.startsWith(' Steering: steer one'));
+  assert.ok(start > 0, screen.join('\n'));
+  const key = process.platform === 'darwin' ? 'Option+Up' : 'Alt+Up';
+  assert.equal(screen[start - 1].trim(), '');
+  assert.deepEqual(screen.slice(start, start + 4).map(row => row.trimEnd()), [
+    ' Steering: steer one', ' Steering: multi', ' Follow-up: later', ` ↳ ${key} to edit all queued messages`,
+  ]);
+});
+
+test('Alt+Up restores queued messages to the editor without aborting', async t => {
+  const initial = snapshot(); initial.live.busy = true; initial.live.steering = ['queued'];
+  const { ui, terminal, connection } = launch(t, initial);
+  connection.handler = (_method, params) => params?.command.type === 'clear_queue' ? { steering: ['first'], followUp: ['last'] } : {};
+  ui.editor.setText('draft'); terminal.input('\x1b[1;3A'); await flush();
+  assert.deepEqual(connection.requests.map(request => request.params?.command.type), ['clear_queue']);
+  assert.equal(ui.editor.getExpandedText(), 'first\n\nlast\n\ndraft');
+  assert.deepEqual(ui.view.snapshot.live.steering, []);
+  ui.tui.renderNow();
+  assert.ok(!ui.tui.getScreenLines().some(row => row.includes('to edit all queued messages')));
 });
 
 test('failed clear_queue does not send abort or discard queue text', async t => {

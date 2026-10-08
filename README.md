@@ -121,6 +121,7 @@ For zsh or bash, put `pi-remote` on `PATH` with `npm link`, then install the mat
 |---|---|
 | Enter | Send a prompt; during a run, queue steering for the next tool boundary |
 | Alt+Enter | Queue a follow-up after the current run finishes |
+| Alt+Up | Restore all queued messages to the editor without aborting the run |
 | Shift+Enter / Ctrl+J | Newline |
 | Ctrl+C | Clear the prompt (pending attachments stay) |
 | Esc | Cancel the current dialog, or clear queued input then abort; cleared queue text returns to the editor. In the fork picker, the first Esc clears an active search |

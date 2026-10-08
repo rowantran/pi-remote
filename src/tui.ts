@@ -17,7 +17,7 @@ import {
 import {
   type Component, Container, Editor, type Focusable, fuzzyFilter, getKeybindings, Input, isKeyRelease, Key,
   matchesKey, ProcessTerminal, ScrollView, SelectList, type SelectItem, setKeybindings, Spacer,
-  Text, type Terminal, type TerminalColors, type TerminalColorScheme, TuiAltScreen, truncateToWidth, VStack,
+  Text, type Terminal, type TerminalColors, type TerminalColorScheme, TruncatedText, TuiAltScreen, truncateToWidth, VStack,
 } from '@earendil-works/pi-tui';
 import {
   errorText,
@@ -27,15 +27,24 @@ import {
   DIALOG_METHODS, RemoteView, restoredQueueText, safeText, transcriptMessages,
 } from './view.js';
 
+/** Pi's keyDisplayText (not exported publicly): capitalized keys, Option for Alt on macOS. */
+function keyDisplayText(action: string): string {
+  return getKeybindings().getKeys(action as Parameters<ReturnType<typeof getKeybindings>['getKeys']>[0])
+    .map(key => key.split('+').map(part => {
+      const display = process.platform === 'darwin' && part.toLowerCase() === 'alt' ? 'option' : part;
+      return display.charAt(0).toUpperCase() + display.slice(1);
+    }).join('+')).join('/');
+}
+
 const accent = (text: string) => `\x1b[36m${text}\x1b[39m`;
 const muted = (text: string) => `\x1b[2m${text}\x1b[22m`;
-const warning = (text: string) => `\x1b[33m${text}\x1b[39m`;
 const errorColor = (text: string) => `\x1b[31m${text}\x1b[39m`;
 /** Pi's interactive mode waits this long for terminal color replies before it falls back. */
 const TERMINAL_COLOR_TIMEOUT_MS = 100;
 const HELP = `Local Pi remote UI
 Enter: send; while running, queue a steering instruction.
 Alt+Enter: queue a follow-up (wait until the run finishes).
+Alt+Up: restore all queued messages to the editor without aborting.
 Shift+Enter / Ctrl+J: newline. Ctrl+C: clear the prompt. Ctrl+D: detach, even in a dialog.
 Esc: cancel the dialog, or clear the prompt queue then abort; queue text returns to the editor.
 Esc Esc (empty editor, idle): tree-style fork picker, unless local doubleEscapeAction is none.
@@ -465,6 +474,9 @@ export class RemoteTui {
           // Like Pi's app.clear. Pending attachments stay; /clear-attachments removes them.
           this.editor.setText(''); this.tui.requestRender(); return { consume: true };
         }
+        if (!this.activeRemote && !this.localDialog && getKeybindings().matches(data, 'app.message.dequeue')) {
+          void this.dequeue(); return { consume: true };
+        }
         if (!this.activeRemote && !this.localDialog && matchesKey(data, Key.alt('enter'))) {
           void this.submit(this.editor.getExpandedText(), 'followUp'); return { consume: true };
         }
@@ -566,6 +578,22 @@ export class RemoteTui {
   }
 
   private hasQueue(): boolean { const live = this.view.snapshot.live; return !!(live.steering.length || live.followUp.length); }
+  /** Like Pi's app.message.dequeue: move queued text into the editor; keep the run going. */
+  private async dequeue(): Promise<void> {
+    if (this.interruptPending) return;
+    this.interruptPending = true;
+    try {
+      const queue = await this.rpc({ type: 'clear_queue' });
+      if (this.detached) return;
+      const restored = (queue?.steering?.length ?? 0) + (queue?.followUp?.length ?? 0);
+      this.editor.setText(restoredQueueText(queue ?? {}, this.editor.getExpandedText()));
+      this.view.snapshot.live.steering = []; this.view.snapshot.live.followUp = [];
+      this.syncBottom();
+      this.notify(restored ? `Restored ${restored} queued message${restored > 1 ? 's' : ''} to editor` : 'No queued messages to restore');
+    } catch (error) { this.notify(`Restore queued messages failed: ${errorText(error)}`); }
+    finally { this.interruptPending = false; }
+  }
+
   private async interrupt(): Promise<void> {
     if (this.interruptPending) return;
     this.interruptPending = true;
@@ -701,7 +729,7 @@ export class RemoteTui {
     // Pi embeds status in supporting editors, or uses the padded Loader above widgets.
     const control = this.activeRemote?.component ?? this.localDialog?.component ?? this.editor;
     this.syncWorkingIndicator(control);
-    this.bottom.addChild(new DynamicLines(width => this.queueLines(width)));
+    this.addPendingMessages();
     if (this.working && !this.workingEditor) this.bottom.addChild(this.working);
     this.bottom.addChild(new Spacer(1)); // Native above-editor widget container's leading gap.
     widget('aboveEditor');
@@ -715,12 +743,15 @@ export class RemoteTui {
     this.tui.setFocus(control); this.tui.requestRender();
   }
 
-  private queueLines(width: number): string[] {
-    const live = this.view.snapshot.live;
-    const queue = [...live.steering.map(text => `Steer: ${safeText(text).replace(/\n/g, ' ↵ ')}`), ...live.followUp.map(text => `Follow-up: ${safeText(text).replace(/\n/g, ' ↵ ')}`)];
-    const lines = queue.slice(0, 4).map(text => warning(truncateToWidth(text, width)));
-    if (queue.length > 4) lines.push(muted(`… ${queue.length - 4} more queued prompts`));
-    return lines;
+  /** Mirror Pi's pending-messages container: spacer, dim one-line entries, then the dequeue hint. */
+  private addPendingMessages(): void {
+    const { steering, followUp } = this.view.snapshot.live;
+    if (!steering.length && !followUp.length) return;
+    const dim = (text: string) => this.localTheme.fg('dim', text);
+    this.bottom.addChild(new Spacer(1));
+    for (const message of steering) this.bottom.addChild(new TruncatedText(dim(`Steering: ${safeText(message)}`), 1, 0));
+    for (const message of followUp) this.bottom.addChild(new TruncatedText(dim(`Follow-up: ${safeText(message)}`), 1, 0));
+    this.bottom.addChild(new TruncatedText(dim(`↳ ${keyDisplayText('app.message.dequeue')} to edit all queued messages`), 1, 0));
   }
   private footer(): string {
     const s = this.view.snapshot;
