@@ -121,6 +121,77 @@ test('custom working messages use the editor border with a custom footer and res
   assert.ok(changed.findIndex(row => row.includes('Changed working message')) < changed.findIndex(row => row.includes('custom footer')));
 });
 
+test('local widget overrides follow remote updates, clearing, reconnect, theme changes and reload', async t => {
+  const dir = await mkdtemp(resolve(tmpdir(), 'remote-widget-display-'));
+  t.after(() => rm(dir, { recursive: true }));
+  const fixture = resolve(dir, 'widget.ts');
+  await writeFile(fixture, `export default function(pi) {
+    let broken = false;
+    pi.registerCommand('break-local-widget', { handler() { broken = true; } });
+    pi.on('session_start', (_, ctx) => {
+      ctx.ui.setWidget('tasks', () => ({
+        invalidate() {},
+        render() {
+          if (broken) throw new Error('Widget render failed');
+          const remote = ctx.ui.getRemoteWidget('tasks');
+          return remote ? remote.lines.map(line => ctx.ui.theme.fg('accent', 'local:' + line)) : [];
+        },
+      }), { placement: 'belowEditor' });
+    });
+  }`);
+  const initial = snapshot();
+  initial.ui = [
+    { method: 'setWidget', widgetKey: 'tasks', widgetLines: ['first task'], widgetPlacement: 'belowEditor' },
+    { method: 'setWidget', widgetKey: 'unrelated', widgetLines: ['other remote widget'] },
+  ];
+  const { ui, connection } = await launch(t, initial, [fixture]);
+  const screen = () => { ui.tui.renderNow(); return ui.tui.getScreenLines().join('\n'); };
+  ui.editor.setText('prompt draft');
+  const first = stripTerminalSequences(screen());
+  assert.equal((first.match(/first task/g) ?? []).length, 1, 'Hide the remote copy when a local widget has the same key');
+  assert.match(first, /other remote widget/);
+  assert.ok(first.indexOf('prompt draft') < first.indexOf('local:first task'));
+  assert.ok(first.indexOf('local:first task') < first.indexOf('Ready · slot'));
+  connection.listener?.({ type: 'event', slotId: 'slot', seq: 1, event: {
+    type: 'extension_ui_request', method: 'setWidget', widgetKey: 'tasks',
+    widgetLines: ['second task'], widgetPlacement: 'belowEditor',
+  } }); await flush();
+  assert.match(stripTerminalSequences(screen()), /local:second task/);
+  assert.doesNotMatch(stripTerminalSequences(screen()), /first task/);
+  connection.listener?.({ type: 'event', slotId: 'slot', seq: 2, event: {
+    type: 'extension_ui_request', method: 'setWidget', widgetKey: 'tasks',
+  } }); await flush();
+  assert.doesNotMatch(stripTerminalSequences(screen()), /local:|second task/);
+  const restored = snapshot(); restored.seq = 5;
+  restored.ui = [{ method: 'setWidget', widgetKey: 'tasks', widgetLines: ['restored task'], widgetPlacement: 'belowEditor' }];
+  connection.reconnected?.(restored); await flush();
+  assert.equal((stripTerminalSequences(screen()).match(/restored task/g) ?? []).length, 1);
+  await (ui as any).submit('/theme dark', 'steer'); await flush();
+  const before = ui.presentation!.widgets.get('tasks')!.component.render(140);
+  await (ui as any).submit('/theme light', 'steer'); await flush();
+  const after = ui.presentation!.widgets.get('tasks')!.component.render(140);
+  assert.notDeepEqual(after, before, 'Theme changes recolour remote content locally');
+  assert.ok(after[0].includes(ui.presentation!.theme.fg('accent', 'local:restored task')));
+  await (ui as any).submit('/reload-ui', 'steer'); await flush();
+  assert.match(stripTerminalSequences(screen()), /local:restored task/);
+  assert.deepEqual(ui.presentation!.widgets.get('tasks')!.component.render(140), after);
+  assert.equal(connection.requests.filter(request => request.params?.command?.type === 'prompt').length, 0);
+  await (ui as any).submit('/break-local-widget', 'steer'); await flush();
+  screen(); await flush();
+  assert.equal(ui.presentation!.widgets.has('tasks'), false, 'A failed replacement stops suppressing remote text');
+  const failed = stripTerminalSequences(screen());
+  assert.match(failed, /restored task/); assert.doesNotMatch(failed, /local:restored task/);
+  assert.match(failed, /Widget render failed/);
+  await (ui as any).submit('/reload-ui', 'steer'); await flush();
+  assert.match(stripTerminalSequences(screen()), /local:restored task/);
+
+  // Without an adapter, the exact same snapshot still has a plain-text display.
+  const plain = await launch(t, restored);
+  plain.ui.tui.renderNow();
+  const fallback = stripTerminalSequences(plain.ui.tui.getScreenLines().join('\n'));
+  assert.match(fallback, /restored task/); assert.doesNotMatch(fallback, /local:/);
+});
+
 test('metadata, status and streaming updates preserve historical Markdown caches', async t => {
   const key = Symbol.for('pi-remote.test.render-cache');
   const counts = { history: 0, live: 0 };
@@ -350,9 +421,9 @@ test('opt-in custom editors are trusted input controllers, not a security sandbo
   assert.equal(prompts[0].params?.command.message, 'trusted synthetic input');
 });
 
-const repo = '/Users/rowan/.pi/agent/git/github.com/rowantran/pi-extensions';
+const repo = process.env.PI_REMOTE_RENDERER_REPO ?? '/Users/rowan/.pi/agent/git/github.com/rowantran/pi-extensions';
 test('actual Rowan adapter renders virtual footer, caret, compact tools, codemode and worked-for locally', {
-  skip: !existsSync(resolve(repo, 'codex-footer.ts')),
+  skip: !['codex-footer.ts', 'background/widget.ts'].every(file => existsSync(resolve(repo, file))),
 }, async t => {
   const initial = snapshot();
   initial.live.messages = [{ role: 'assistant', timestamp: 1, provider: 'provider', model: 'physical', stopReason: 'stop', usage: { cost: { total: 0.25 } }, content: [

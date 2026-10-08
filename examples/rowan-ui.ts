@@ -2,7 +2,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createJiti } from 'jiti';
-import type { ExtensionAPI, MessageRenderer } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, MessageRenderer, Theme } from '@earendil-works/pi-coding-agent';
+import type { PresentationUIContext } from '../src/presentation.js';
 
 // Only this original factory may attempt its expected timing append locally. Remote Pi owns
 // persisted history, so suppress that append rather than forwarding it or changing host guards.
@@ -38,6 +39,10 @@ export default async function rowanUI(pi: ExtensionAPI) {
   const workedFor = await loader.import<any>(join(root, 'worked-for.ts'), { default: true });
   const codemode = await loader.import<any>(join(root, 'codemode/render.ts'));
   const { renderBackgroundMessage } = await loader.import<{ renderBackgroundMessage: MessageRenderer }>(join(root, 'background/render.ts'));
+  const { BACKGROUND_WIDGET_ID, renderBackgroundWidgetLines } = await loader.import<{
+    BACKGROUND_WIDGET_ID: string;
+    renderBackgroundWidgetLines: (lines: readonly string[], width: number, theme: Theme) => string[];
+  }>(join(root, 'background/widget.ts'));
   footer(pi);
   caret(pi);
   // The transcript uses the same public Pi classes this original factory decorates.
@@ -49,6 +54,21 @@ export default async function rowanUI(pi: ExtensionAPI) {
   await workedFor(workedForPresentationAPI(pi));
   // Completion/check-in notices share the renderer without loading background.ts workers.
   pi.registerMessageRenderer('background', renderBackgroundMessage);
+  pi.on('session_start', (_event, ctx) => {
+    const ui = ctx.ui as PresentationUIContext;
+    // Native benchmark runs can also load this visual adapter, but stock Pi has
+    // no remote-widget getter and should not replace its own background widget.
+    if (typeof ui.getRemoteWidget !== 'function') return;
+    // The matching key suppresses the remote plain-text copy. Read on every render,
+    // not only at attach: remote updates/clears/reconnects invalidate this component.
+    ui.setWidget(BACKGROUND_WIDGET_ID, () => ({
+      invalidate() {},
+      render(width) {
+        const remote = ui.getRemoteWidget(BACKGROUND_WIDGET_ID);
+        return remote ? renderBackgroundWidgetLines(remote.lines, width, ui.theme) : [];
+      },
+    }), { placement: 'belowEditor' });
+  });
 
   // Capture only the existing render functions. No codemode runtime is instantiated.
   const visualTool = { name: 'codemode', label: 'Codemode', description: '', parameters: { type: 'object', properties: {} } };

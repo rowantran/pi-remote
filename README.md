@@ -238,11 +238,36 @@ pi-remote attach 1 --ui-config ./remote-ui.json --no-reconnect
 
 `--theme NAME` overrides the config theme. Without either, the client uses the `theme` setting from local `~/.pi/agent/settings.json`, then `system`. Available themes include `system`, `dark`, `light`, and JSON themes from local `~/.pi/agent/themes/` (or `$PI_CODING_AGENT_DIR/themes/`). A `LIGHT/DARK` pair, such as `light/dark` or `gruvbox-light/gruvbox-dark`, selects the member for the local terminal, like Pi. The client asks the terminal for its background color (OSC 11) at startup, then falls back to the terminal's light/dark report and `COLORFGBG`, then dark. Pairs also follow live light/dark switches from terminals that send mode 2031 reports. A single theme name, such as `gruvbox-dark`, is always used as given, even in a light terminal. Use `/theme NAME` to change the current client and `/reload-ui` to reread its selected adapters/config. Neither command changes remote settings or restarts Pi; theme files are not watched automatically.
 
-[`examples/rowan-ui.ts`](examples/rowan-ui.ts) is a **user-specific selective adapter**, not a portable default. It expects Rowan's extension repository locally at `~/.pi/agent/git/github.com/rowantran/pi-extensions`, or at `$PI_REMOTE_RENDERER_REPO`. It loads the original footer, caret, assistant-background, and compact-tool factories unchanged, selects the existing codemode renderers and the display-only `background/render.ts` message renderer, and runs the full original `worked-for.ts` factory.
+[`examples/rowan-ui.ts`](examples/rowan-ui.ts) is a **user-specific selective adapter**, not a portable default. It expects Rowan's extension repository locally at `~/.pi/agent/git/github.com/rowantran/pi-extensions`, or at `$PI_REMOTE_RENDERER_REPO`. It loads the original footer, caret, assistant-background, and compact-tool factories unchanged, selects the existing codemode renderers and the display-only `background/render.ts` message and `background/widget.ts` active-task renderers, and runs the full original `worked-for.ts` factory.
 
 Worked-for uses a narrow local facade: its expected `worked-for` append is suppressed (other entry types throw), its model-context hook is not registered, and its normal display hooks, entry renderer, and Markdown transformer use the presentation host unchanged. Remote Pi alone persists timing entries; local settle events never write or forward them. Other extensions still cannot call `appendEntry` locally. The original timer updates the local working message and stops on settle, detach, and UI reload. The factory also patches native Pi's private `CustomEntryComponent` spacing, but this client's Transcript renders custom entries directly, so that patch does not establish native custom-entry spacing parity. Missing or incompatible original modules produce a load warning, not a handwritten fallback.
 
-The adapter avoids the provider, background-worker, MCP, Slack, and codemode execution factories. Background completion/check-in messages use the same compact header, five output lines, and hidden-line count as normal Pi. Full result content remains available to the remote agent and the background output tool. Update the local pi-extensions checkout to a version that includes `worked-for.ts` and `background/render.ts` before using this adapter. Review its imports and adapt paths before selecting it with `--ui-extension ./examples/rowan-ui.ts` or your config allowlist.
+The adapter avoids the provider, background-worker, MCP, Slack, and codemode execution factories. Background completion/check-in messages use the same compact header, five output lines, and hidden-line count as normal Pi. Active background tasks use the same bordered box as native Pi, coloured with the **local** theme and fitted to the local terminal width. Full result content remains available to the remote agent and the background output tool. Update the local pi-extensions checkout to a version that includes `worked-for.ts`, `background/render.ts`, and `background/widget.ts` before using this adapter. Review its imports and adapt paths before selecting it with `--ui-extension ./examples/rowan-ui.ts` or your config allowlist.
+
+The remote pi-extensions checkout also needs RPC widget support: its `background.ts` sends plain task lines once per second while work runs, and clears the widget when no tasks remain. Without a local adapter those lines are still readable. After updating remote extensions, start a new slot; existing Pi processes do not reload them. After updating the local adapter, use `/reload-ui` or reattach.
+
+### Read remote widgets in a local adapter
+
+`ctx.ui.getRemoteWidget(key)` is a **pi-remote-only** read API, not a stock Pi method. It returns an immutable object with `key`, `lines`, and `placement`, or `undefined` for an absent, cleared, empty, or malformed widget. The lines have terminal escape codes removed. Embedded newlines become separate rows, and tabs become spaces, so each string is safe to return as one component row. Reading sends no requests, runs no tools, and cannot change remote state.
+
+Call the getter from `render()` to read the current state after each remote update or reconnect. A local widget with the same key replaces the plain remote display, but the getter still reads the remote lines. Return `[]` when the remote widget is absent. If the local component fails, the client removes it and shows the plain remote copy; `/reload-ui` can restore the local renderer. For typed adapters, `PresentationUIContext` is exported from `src/presentation.ts`:
+
+```ts
+pi.on('session_start', (_event, ctx) => {
+  const ui = ctx.ui as PresentationUIContext;
+  if (typeof ui.getRemoteWidget !== 'function') return; // Stock Pi has no such method.
+  ui.setWidget('my-widget', () => ({
+    invalidate() {},
+    render(width) {
+      const remote = ui.getRemoteWidget('my-widget');
+      return remote ? remote.lines.map(line =>
+        truncateToWidth(ui.theme.fg('accent', line), width)) : [];
+    },
+  }), { placement: 'belowEditor' });
+});
+```
+
+Use the local theme for colour and the supplied width for layout. Choose the same placement as the remote widget. `examples/rowan-ui.ts` uses this API to render active background tasks without loading the background worker factory.
 
 ### Trust boundary
 
