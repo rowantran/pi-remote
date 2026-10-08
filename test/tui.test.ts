@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Terminal } from '@earendil-works/pi-tui';
-import { Loader, StdinBuffer, stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
+import { Loader, stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
 import type { RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../src/protocol.js';
 import { RemoteTui, type TuiOptions } from '../src/tui.js';
 import { detachMessage, stoppedMessage } from '../src/remote-session.js';
@@ -702,64 +702,6 @@ test('double Esc follows local settings without changing draft or history on can
   }
 });
 
-test('double Esc works through terminal buffering and keyboard release events', async t => {
-  for (const chunks of [
-    ['\x1b\x1b'], // Two Escape presses in one stdin chunk.
-    ['\x1b', '\x1b'], // Second press arrives before the lone-ESC timeout.
-    ['\x1b[27;1u', '\x1b[27;1:3u', '\x1b[27;1u'], // Kitty press/release/press.
-    ['\x1b\x1b[27;1:3u', '\x1b\x1b[27;1:3u'], // WezTerm raw press + Kitty release.
-  ]) {
-    const { ui, terminal, connection } = launch(t); serveFork(connection);
-    const buffer = new StdinBuffer();
-    buffer.on('data', data => terminal.input(data));
-    try { for (const chunk of chunks) buffer.process(chunk); await flush(); }
-    finally { buffer.destroy(); }
-    assert.deepEqual(connection.requests.map(request => request.params?.command), [{ type: 'get_tree' }], JSON.stringify(chunks));
-    assert.match(screen(ui), /Session Fork/);
-    assert.equal(ui.editor.getExpandedText(), '');
-    ui.detach();
-  }
-});
-
-test('batched Escape still respects drafts, opt-out, dialogs and running work', async t => {
-  for (const state of ['draft', 'none', 'dialog', 'busy'] as const) {
-    const initial = snapshot(); if (state === 'busy') initial.live.busy = true;
-    if (state === 'dialog') initial.ui = [{ id: 'confirm', method: 'confirm', title: 'Confirm' }];
-    const { ui, terminal, connection } = launch(t, initial, new FakeConnection(), { doubleEscapeAction: state === 'none' ? 'none' : 'tree' });
-    if (state === 'draft') ui.editor.setText('keep this draft');
-    terminal.input('\x1b\x1b'); await flush();
-    assert.ok(!connection.requests.some(request => request.params?.command?.type === 'get_tree'));
-    assert.equal(ui.editor.getExpandedText(), state === 'draft' ? 'keep this draft' : '');
-    if (state === 'busy') assert.deepEqual(connection.requests.map(request => request.params?.command.type), ['clear_queue', 'abort']);
-    if (state === 'dialog') assert.equal(connection.requests.filter(request => request.method === 'answer').length, 1);
-    ui.detach();
-  }
-});
-
-test('batched Escape follows the same search-overlay path as two separate presses', async t => {
-  for (const busy of [false, true]) for (const batched of [false, true]) {
-    const initial = snapshot(); initial.live.busy = busy;
-    const { ui, terminal, connection } = launch(t, initial); serveFork(connection);
-    terminal.input('\x1b[102;6u'); // Ctrl+Shift+F opens the native transcript search.
-    assert.equal(ui.tui.hasOverlay(), true);
-    if (batched) terminal.input('\x1b\x1b');
-    else { terminal.input('\x1b'); terminal.input('\x1b'); }
-    await flush();
-    assert.equal(ui.tui.hasOverlay(), false);
-    assert.deepEqual(connection.requests.map(request => request.params?.command.type), busy ? ['clear_queue', 'abort'] : []);
-    ui.detach();
-  }
-});
-
-test('native fullscreen shortcuts clear an armed Escape shortcut', async t => {
-  const { ui, terminal, connection } = launch(t); serveFork(connection);
-  terminal.input('\x1b');
-  terminal.input('\x1b[102;6u'); // The native search handler consumes this shortcut.
-  terminal.input('\x1b\x1b'); await flush();
-  assert.equal(ui.tui.hasOverlay(), false);
-  assert.equal(connection.requests.length, 0);
-});
-
 test('double Esc requires an empty editor, less than 500 ms, and no intervening input', async t => {
   let now = 1000; t.mock.method(Date, 'now', () => now);
   const { ui, terminal, connection } = launch(t); serveFork(connection);
@@ -817,7 +759,8 @@ test('tree commands and double Esc show loading immediately, then replace it wit
   for (const command of ['/tree', '/fork', 'shortcut']) {
     const { ui, terminal, connection, submit } = launch(t);
     const pending = deferred<RecordValue>(); connection.handler = () => pending.promise;
-    if (command === 'shortcut') terminal.input('\x1b\x1b'); else submit(command);
+    if (command === 'shortcut') { terminal.input('\x1b'); terminal.input('\x1b'); }
+    else submit(command);
     assert.match(stripTerminalSequences(ui.tui.getScreenLines().join('\n')), /Loading session tree/);
     assert.match(screen(ui), /Esc cancel/);
     pending.resolve(forkTree()); await flush();
@@ -843,17 +786,6 @@ test('Esc cancels tree loading and ignores late results or errors without blocki
     assert.deepEqual(connection.requests.map(request => request.params?.command), [{ type: 'get_tree' }, { type: 'get_tree' }]);
     ui.detach();
   }
-});
-
-test('batched Escape cancels tree loading without interrupting remote work', async t => {
-  const initial = snapshot(); initial.live.busy = true;
-  const { ui, terminal, connection, submit } = launch(t, initial);
-  const pending = deferred<RecordValue>(); connection.handler = () => pending.promise;
-  submit('/tree'); terminal.input('\x1b\x1b'); await flush();
-  assert.doesNotMatch(screen(ui), /Loading session tree|Session Fork/);
-  assert.deepEqual(connection.requests.map(request => request.params?.command), [{ type: 'get_tree' }]);
-  pending.resolve(forkTree()); await flush();
-  assert.doesNotMatch(screen(ui), /Session Fork/);
 });
 
 test('tree loading stops its animation on success, cancel, error, disconnect and detach', async t => {

@@ -62,22 +62,6 @@ Unknown slash commands go to remote Pi (extensions, skills, templates).
 Trusted local presentation extensions are opt-in with --ui-extension or --ui-config.
 No commands are restarted or replayed after a disconnect.`;
 
-/** Normalize before Pi's own search/overlay handlers, not just application shortcuts. */
-function splitEscapeInput(terminal: Terminal, beforeInput: (data: string) => void): Terminal {
-  return new Proxy(terminal, {
-    get(target, key) {
-      if (key === 'start') return (onInput: (data: string) => void, onResize: () => void) => target.start(data => {
-        // StdinBuffer combines adjacent raw ESC bytes as a meta-key (also legacy Alt+Esc).
-        for (const press of data === '\x1b\x1b' ? ['\x1b', '\x1b'] : [data]) {
-          beforeInput(press); onInput(press);
-        }
-      }, onResize);
-      const value = Reflect.get(target, key, target);
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  });
-}
-
 /** Keep the full document on detach; a zero transcript basis applies only to the viewport. */
 class DocumentLayout extends VStack {
   override render(width: number): string[] {
@@ -183,10 +167,7 @@ export class RemoteTui {
     try { initial = options.theme && resolveThemeSelection(options.theme, terminalAppearance()); } catch { /* Reported by initialize(). */ }
     initTheme(initial, false);
     this.view = new RemoteView(snapshot);
-    this.tui = new ScheduledTuiAltScreen(splitEscapeInput(terminal, data => {
-      // Fullscreen shortcuts can be consumed before our application listener sees them.
-      if (!isKeyRelease(data) && !matchesKey(data, Key.escape)) this.lastEscapeTime = undefined;
-    }), true, undefined, { renderIntervalMs: options.renderIntervalMs, copySelection: async text => {
+    this.tui = new ScheduledTuiAltScreen(terminal, true, undefined, { renderIntervalMs: options.renderIntervalMs, copySelection: async text => {
       try { await copyToClipboard(text); return true; } catch (error) { return errorText(error); }
     } });
     this.editor = this.makeEditor();
