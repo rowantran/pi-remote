@@ -153,6 +153,8 @@ For zsh or bash, put `pi-remote` on `PATH` with `npm link`, then install the mat
 | `/theme [NAME]` | Show or change the local theme for this client |
 | `/help` | Show local controls |
 
+Opening the fork picker immediately shows a **Loading session tree…** spinner while it reads remote history. Esc stops waiting and ignores any late result; Ctrl+D detaches without changing the remote session.
+
 The fork picker uses Pi's own tree rows, role colors, selected-row background, search, filters, and branch folding. It starts with tools hidden and the most recent user prompt selected. Use ↑/↓ to move, ←/→ to page, Alt+←/→ to fold/unfold branches, and Ctrl+X to copy the selected message. PageUp/PageDown still scroll the transcript. Ctrl+T/U/L/A toggle the no-tools/user-only/labeled-only/all filters; Ctrl+O and Shift+Ctrl+O cycle filters. Alt+D selects Pi's default filter (shows tools) because Ctrl+D always detaches. Labels are shown but cannot be edited through stock RPC. Assistant messages and other entries are context only, not fork points.
 
 Double-Esc reads `doubleEscapeAction` from your **local** `~/.pi/agent/settings.json` (or `$PI_CODING_AGENT_DIR/settings.json`) at startup; it defaults to `tree`. Esc still cancels dialogs and interrupts remote work before it can count toward a double-Esc. Draft text, a pending command, or a disconnect prevents the shortcut from opening the picker. These controls do not change remote Pi settings.

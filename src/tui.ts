@@ -16,7 +16,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import {
   type Component, Container, Editor, type Focusable, fuzzyFilter, getKeybindings, Input, isKeyRelease, Key,
-  matchesKey, ProcessTerminal, ScrollView, SelectList, type SelectItem, setKeybindings, Spacer,
+  Loader, matchesKey, ProcessTerminal, ScrollView, SelectList, type SelectItem, setKeybindings, Spacer,
   Text, type Terminal, type TerminalColors, type TerminalColorScheme, TruncatedText, TuiAltScreen, truncateToWidth, VStack,
 } from '@earendil-works/pi-tui';
 import {
@@ -61,6 +61,22 @@ Ctrl+V /paste: local clipboard files, image, or text. Ctrl+G /editor: local exte
 Unknown slash commands go to remote Pi (extensions, skills, templates).
 Trusted local presentation extensions are opt-in with --ui-extension or --ui-config.
 No commands are restarted or replayed after a disconnect.`;
+
+/** Normalize before Pi's own search/overlay handlers, not just application shortcuts. */
+function splitEscapeInput(terminal: Terminal, beforeInput: (data: string) => void): Terminal {
+  return new Proxy(terminal, {
+    get(target, key) {
+      if (key === 'start') return (onInput: (data: string) => void, onResize: () => void) => target.start(data => {
+        // StdinBuffer combines adjacent raw ESC bytes as a meta-key (also legacy Alt+Esc).
+        for (const press of data === '\x1b\x1b' ? ['\x1b', '\x1b'] : [data]) {
+          beforeInput(press); onInput(press);
+        }
+      }, onResize);
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
 
 /** Keep the full document on detach; a zero transcript basis applies only to the viewport. */
 class DocumentLayout extends VStack {
@@ -167,7 +183,10 @@ export class RemoteTui {
     try { initial = options.theme && resolveThemeSelection(options.theme, terminalAppearance()); } catch { /* Reported by initialize(). */ }
     initTheme(initial, false);
     this.view = new RemoteView(snapshot);
-    this.tui = new ScheduledTuiAltScreen(terminal, true, undefined, { renderIntervalMs: options.renderIntervalMs, copySelection: async text => {
+    this.tui = new ScheduledTuiAltScreen(splitEscapeInput(terminal, data => {
+      // Fullscreen shortcuts can be consumed before our application listener sees them.
+      if (!isKeyRelease(data) && !matchesKey(data, Key.escape)) this.lastEscapeTime = undefined;
+    }), true, undefined, { renderIntervalMs: options.renderIntervalMs, copySelection: async text => {
       try { await copyToClipboard(text); return true; } catch (error) { return errorText(error); }
     } });
     this.editor = this.makeEditor();
@@ -815,6 +834,26 @@ export class RemoteTui {
     } finally { this.commandPending = false; if (!this.detached) this.syncBottom(); }
   }
 
+  private async loadForkTree(): Promise<{ tree: SessionTreeNode[]; leafId: string | null } | undefined> {
+    const loader = new Loader(this.tui, text => this.localTheme.fg('accent', text),
+      text => this.localTheme.fg('muted', text), 'Loading session tree…');
+    let cancel!: () => void;
+    const cancelled = new Promise<undefined>(resolve => { cancel = () => resolve(undefined); });
+    const dialog = { component: new Dialog(loader, 'Session Fork', 'Esc cancel · Ctrl+D detach'), cancel };
+    try {
+      this.localDialog = dialog; this.syncBottom();
+      // Paint before starting the read, including when decoding/constructing a large tree is slow.
+      this.tui.renderNow();
+      return await Promise.race([
+        this.rpc<{ tree: SessionTreeNode[]; leafId: string | null }>({ type: 'get_tree' }), cancelled,
+      ]);
+    } finally {
+      loader.stop();
+      if (this.localDialog === dialog) this.localDialog = undefined;
+      this.syncBottom();
+    }
+  }
+
   private chooseFork(tree: SessionTreeNode[], leafId: string | null): Promise<string | undefined> {
     const pending = [...tree];
     let hasUser = false;
@@ -939,8 +978,8 @@ export class RemoteTui {
       case '/fork': {
         const generation = this.generation;
         const sessionId = this.view.snapshot.state.sessionId;
-        const data = await this.rpc<{ tree: SessionTreeNode[]; leafId: string | null }>({ type: 'get_tree' });
-        if (this.detached || !this.connected || generation !== this.generation || sessionId !== this.view.snapshot.state.sessionId) return true;
+        const data = await this.loadForkTree();
+        if (!data || this.detached || !this.connected || generation !== this.generation || sessionId !== this.view.snapshot.state.sessionId) return true;
         const entryId = await this.chooseFork(data.tree ?? [], data.leafId ?? null);
         if (entryId !== undefined && !this.detached && this.connected && generation === this.generation) {
           if (sessionId !== this.view.snapshot.state.sessionId) { this.notify('Session changed while the picker was open. Open /fork again; nothing was sent.'); return true; }

@@ -8,7 +8,8 @@ export const MAX_QUEUED_BYTES = 64 * 1024 * 1024;
 export function readJsonl(input: Readable, onRecord: (value: any) => void, onError: (error: Error) => void,
   options: { recover?: boolean; onHandlerError?: (error: Error) => void } = {}): () => void {
   const decoder = new StringDecoder('utf8');
-  let buffer = '';
+  let fragments: string[] = [];
+  let pendingBytes = 0;
   let failed = false;
   let discarding = false;
   const fail = (error: unknown) => {
@@ -24,11 +25,14 @@ export function readJsonl(input: Readable, onRecord: (value: any) => void, onErr
       discarding = false;
       chunk = chunk.slice(end + 1);
     }
-    buffer += chunk;
+    // Scan only new input. Join a fragmented frame once, when its LF arrives.
+    let start = 0;
     let index: number;
-    while ((index = buffer.indexOf('\n')) !== -1) {
-      const line = buffer.slice(0, index).replace(/\r$/, '');
-      buffer = buffer.slice(index + 1);
+    while ((index = chunk.indexOf('\n', start)) !== -1) {
+      const fragment = chunk.slice(start, index);
+      const line = (fragments.length ? [...fragments, fragment].join('') : fragment).replace(/\r$/, '');
+      fragments = []; pendingBytes = 0;
+      start = index + 1;
       if (Buffer.byteLength(line) > MAX_FRAME_BYTES) {
         fail(new Error('JSONL frame exceeds limit'));
         if (failed) return;
@@ -49,15 +53,23 @@ export function readJsonl(input: Readable, onRecord: (value: any) => void, onErr
         else { fail(handlerError); if (failed) return; }
       }
     }
-    if (Buffer.byteLength(buffer) > MAX_FRAME_BYTES) {
-      buffer = ''; discarding = true;
-      fail(new Error('JSONL frame exceeds limit'));
+    if (start < chunk.length) {
+      const fragment = chunk.slice(start);
+      pendingBytes += Buffer.byteLength(fragment);
+      // String inputs can split a surrogate pair; together it uses four bytes, not six.
+      const previous = fragments[fragments.length - 1];
+      if (previous && /[\uD800-\uDBFF]$/.test(previous) && /^[\uDC00-\uDFFF]/.test(fragment)) pendingBytes -= 2;
+      fragments.push(fragment);
+      if (pendingBytes > MAX_FRAME_BYTES) {
+        fragments = []; pendingBytes = 0; discarding = true;
+        fail(new Error('JSONL frame exceeds limit'));
+      }
     }
   };
   const onData = (chunk: Buffer | string) => parse(typeof chunk === 'string' ? chunk : decoder.write(chunk));
   const onEnd = () => {
     parse(decoder.end());
-    if (buffer.trim() && !failed) fail(new Error('Truncated JSONL record'));
+    if (!failed && fragments.some(fragment => fragment.trim())) fail(new Error('Truncated JSONL record'));
   };
   input.on('data', onData);
   input.on('end', onEnd);
