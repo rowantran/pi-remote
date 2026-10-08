@@ -18,6 +18,7 @@ export function createRemoteKeybindings(): KeybindingsManager {
     'app.thinking.toggle': { defaultKeys: 'ctrl+t' },
     'app.tools.expand': { defaultKeys: 'ctrl+o' },
     'app.message.followUp': { defaultKeys: 'alt+enter' },
+    'app.message.dequeue': { defaultKeys: 'alt+up' },
     'app.message.copy': { defaultKeys: 'ctrl+x' },
     'app.tree.foldOrUp': { defaultKeys: ['ctrl+left', 'alt+left'] },
     'app.tree.unfoldOrDown': { defaultKeys: ['ctrl+right', 'alt+right'] },
