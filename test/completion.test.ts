@@ -113,9 +113,10 @@ test('host comes only from --host, then the default; --local ignores both', () =
 });
 
 test('commands accept unambiguous prefixes; internal commands need exact names', () => {
-  const cases: [string, string][] = [['n', 'new'], ['ne', 'new'], ['a', 'attach'], ['k', 'kill'], ['l', 'ls'], ['r', 'rpc'], ['w', 'watch'], ['c', 'completion'], ['compl', 'completion'], ['h', 'help'], ['v', 'version'], ['complete', 'complete'], ['fs', 'fs'], ['daemon', 'daemon'], ['bridge', 'bridge']];
+  const cases: [string, string][] = [['n', 'new'], ['ne', 'new'], ['a', 'attach'], ['k', 'kill'], ['l', 'ls'], ['rp', 'rpc'], ['re', 'restart-daemon'], ['w', 'watch'], ['c', 'completion'], ['compl', 'completion'], ['h', 'help'], ['v', 'version'], ['complete', 'complete'], ['fs', 'fs'], ['daemon', 'daemon'], ['bridge', 'bridge']];
   for (const [input, command] of cases) assert.equal(resolveCommand(input), command, input);
   for (const input of ['d', 'b', 'f', 'x', 'newer', '']) assert.throws(() => resolveCommand(input), /Unknown command/, input);
+  assert.throws(() => resolveCommand('r'), /Ambiguous command 'r': rpc, restart-daemon/);
   assert.deepEqual(matchCommand('zz').candidates, []);
 });
 

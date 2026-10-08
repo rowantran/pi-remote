@@ -12,8 +12,8 @@ From this checkout on your local machine:
 
 ```sh
 npm ci --ignore-scripts
-npm link            # puts pi-remote on PATH, linked to this checkout
-./scripts/deploy.sh devbox
+npm link                     # puts pi-remote on PATH, linked to this checkout
+./scripts/deploy.sh devbox   # installs on the remote host; see "Deployment"
 
 # Set the default SSH host once (see "Configuration" below).
 mkdir -p ~/.config/pi-remote
@@ -23,7 +23,7 @@ echo '{"host": "devbox"}' > ~/.config/pi-remote/config.json
 pi-remote new --cwd /remote/project
 ```
 
-Remote Pi loads its normal settings, credentials, providers, extension factories, skills, and trusted project resources. Deployment copies application files, not your local Pi configuration, and does not restart existing daemons or slots.
+Remote Pi loads its normal settings, credentials, providers, extension factories, skills, and trusted project resources. Deployment copies application files, not your local Pi configuration.
 
 ```sh
 # List running slots with their short numbers and session names.
@@ -90,8 +90,10 @@ Invalid JSON or unknown keys cause an error, so a typo does not go unnoticed. Th
 Put `pi-remote` on `PATH` first (run `npm link` once from the checkout). Then add this line to **`~/.config/fish/config.fish`**, after your PATH setup:
 
 ```fish
-pi-remote completion fish | source
+command -q pi-remote; and pi-remote completion fish | source
 ```
+
+The `command -q` guard skips machines where `pi-remote` is not installed. Keep it if you share one fish config between your laptop and the remote host: the host needs no `pi-remote` on `PATH`, because the client reaches the deployed release by its full path (see [Deployment](#deployment)).
 
 The command prints the versioned [`completions/pi-remote.fish`](completions/pi-remote.fish) script shipped with the repo. Sourcing it registers completions in the current shell; it does not install files, edit your config, or contact a remote host. Reloading the config does not register duplicate rules. Remote directories and slots are queried only when completion runs.
 
@@ -186,7 +188,7 @@ While Pi starts, the client blocks remote submissions and retains your draft and
 
 Reload requests are never replayed after a disconnect. Check the slot before trying again. Only an explicit force confirmation after the server's busy refusal sends a second request; that refusal did not accept a restart.
 
-Existing deployed daemons must be upgraded before they support `/reload`; installing a newer client alone does not add the method to a running daemon. Follow [Upgrade without interrupting active work](#upgrade-without-interrupting-active-work). Pi's version is pinned and checked **before** stopping the old process, so an incompatible Pi executable leaves the old process running instead of killing it.
+Existing deployed daemons must be upgraded before they support `/reload`; installing a newer client alone does not add the method to a running daemon. See [Deployment](#deployment). `pi-remote restart-daemon` applies the same reload to every slot at once while replacing the daemon. Pi's version is pinned and checked **before** stopping the old process, so an incompatible Pi executable leaves the old process running instead of killing it.
 
 ## What survives disconnect
 
@@ -206,7 +208,7 @@ Dialogs have **no client-imposed timeout**. If an extension explicitly supplies 
 
 On attach or refresh, a successful history snapshot replaces completed live messages with saved branch entries. Its live buffer contains only unfinished messages; the client then applies events newer than the snapshot's sequence number. Completion comes from `message_end`, not timestamps or task IDs, so queued background notices do not appear again after the final answer. Failed queries and incomplete startup/session-transition snapshots do not retire live messages. A slot with no client attached keeps completed live messages until the next successful attach or snapshot. Reconstructed display state is never supplied back to the model or written into Pi's session file.
 
-The snapshot's optional `historyComplete` marker identifies this contract: `true` means saved history is current through the snapshot boundary; `false` means startup or a session transition is using cached history and an uncheckpointed live buffer. Neither form merges messages by timestamp. Unmarked snapshots from older daemons retain their legacy merge behavior. Both the client and daemon need this update to fix duplicate background notices. Deployment does not update a running daemon; follow the safe upgrade procedure below after its active work has finished.
+The snapshot's optional `historyComplete` marker identifies this contract: `true` means saved history is current through the snapshot boundary; `false` means startup or a session transition is using cached history and an uncheckpointed live buffer. Neither form merges messages by timestamp. Unmarked snapshots from older daemons retain their legacy merge behavior. Both the client and daemon need this update to fix duplicate background notices. The daemon runs new code only after [`restart-daemon`](#deployment).
 
 ## Terminal bell and workspace urgency
 
@@ -337,21 +339,53 @@ Pi's exported `RpcClient` is not used for transport ownership: in 1.0.4 it has n
 
 ### Daemon crash versus client disconnect
 
-Client disconnect is supported; daemon/host crash recovery of in-flight work is **not**. If the daemon dies, its pipes close and stock Pi exits. On daemon restart, known slots are listed as stopped, without rerunning tasks automatically. Open the recorded session file in a new slot to resume manually. Pi may defer creation of a new session file until the first assistant response.
+Client disconnect is supported; daemon/host crash recovery of in-flight work is **not**. If the daemon dies, its pipes close and stock Pi exits. On daemon restart, known slots are listed as stopped, without rerunning tasks automatically. Only a deliberate [`restart-daemon`](#deployment) reopens slots. Open the recorded session file in a new slot to resume manually. Pi may defer creation of a new session file until the first assistant response.
 
 An exclusive startup lock serializes stale-daemon reclamation. If the launcher itself crashes leaving `start.lock`, startup fails closed; inspect its PID and `daemon.log` before manually removing it. Never remove a live daemon's lock/socket. A reused PID also fails closed.
 
-### Upgrade without interrupting active work
+## Deployment
 
-`deploy.sh` stages each release and its dependencies under `~/.local/share/pi-remote/releases/release.XXXXXX`, validates it, then atomically switches the stable `~/.local/share/pi-remote/bin/pi-remote` launcher symlink. Prior releases and legacy installation files/dependencies remain untouched because live daemons may still import them. **Do not remove them until all old processes have stopped.** Deployment does not clean them up automatically.
+The remote host runs a copy of this checkout's compiled code. There is no package install, git checkout, or `PATH` entry on the host:
 
-Deploying 0.2 application files does **not** require restarting a live 0.1 daemon. The new client falls back to the newly installed remote filesystem helper when the old daemon does not support path completion, attachment reads, or filesystem metadata. These read-only calls use a separate SSH process; prompts and other mutations still go through the existing daemon. A transport error never triggers this fallback or mutation replay.
+```text
+~/.local/share/pi-remote/
+  releases/20261008T153000Z-9f6e91e/   one directory per deploy: dist/, node_modules/, bin/, completions/
+  bin/pi-remote -> ../releases/<current>/bin/pi-remote
+~/.pi/remote/                          daemon state: socket, slots.json, daemon.log; never touched by deploy
+```
 
-Keep the old daemon running while its slots are active. To adopt new daemon code later, finish or explicitly stop its slots, then deliberately stop the daemon using the PID in `daemon.lock/pid`. This interrupts any remaining work. The next connection starts the installed daemon and migrates stored slot numbers; it does not resume stopped tasks. Never restart merely to detach or enable the compatibility helper.
+The client runs `ssh HOST ~/.local/share/pi-remote/bin/pi-remote bridge`, so that symlink alone decides which release new connections use. If the daemon is not running, the bridge starts it from the same release. Use `--remote-bin` to point the client at another launcher.
+
+`scripts/deploy.sh [HOST]` (default host: `PI_REMOTE_HOST`, then the config file) does this:
+
+1. Builds `dist/` locally and copies it with `package.json`, the lockfile, `bin/`, `completions/` and `examples/` to a new release directory, named after the UTC time and git commit (`-dirty` with uncommitted changes).
+2. Runs `npm ci --omit=dev` there and checks that the release starts.
+3. Switches `bin/pi-remote` to the new release in one atomic rename.
+4. Deletes old releases. It keeps the new release, the previous one, and any release a running process uses. A release never changes after install, because a running daemon loads modules from its own release.
+5. Runs `pi-remote restart-daemon`. If a slot is busy, the new release stays installed and the old daemon keeps running; run `pi-remote restart-daemon --wait` later. `deploy.sh --wait` waits instead; `deploy.sh --no-restart` skips this step.
+
+### Restart the daemon without losing slots
+
+```sh
+pi-remote restart-daemon           # refuses if a slot is busy, and says which
+pi-remote restart-daemon --wait    # retries until no slot is busy
+pi-remote restart-daemon --force   # interrupts busy slots
+```
+
+This is [`/reload`](#reload-remote-pi) applied to every slot at once, plus a new daemon:
+
+- The daemon uses `/reload`'s rules for every slot: a slot that is starting, reloading or changing session blocks the restart, and a busy slot blocks it unless `--force` is given. It checks all slots and commits in one step, so a prompt cannot start in between. A refusal locks and stops nothing.
+- When it accepts, it marks each running slot `reopen` in `slots.json` and exits. The next daemon starts from the installed release and starts those slots again from their session files, with the same slot IDs, numbers and launch arguments.
+- Attached clients reconnect automatically and show the same slots. As with `/reload`, persisted history remains; in-memory state such as model or thinking-level changes is discarded.
+- Slots that were already stopped stay stopped. A crashed daemon never reopens anything.
+
+Daemons deployed before `restart-daemon` existed do not support it. Stop such a daemon once by hand when its slots are idle (`kill` the PID in `~/.pi/remote/daemon.lock/pid`), then reopen sessions with `pi-remote new --session`.
+
+A 0.2 client also works with a running 0.1 daemon: it uses the installed release's filesystem helper, over a separate SSH process, for path completion and attachment reads. Prompts and other mutations still go through the existing daemon, and a transport error never triggers this fallback.
 
 ## Development and verification
 
-Locally, `pi-remote` runs from `src/` through the `tsx` devDependency, so source edits take effect on the next run without `npm run build`. `npm link` creates a symlink to this checkout in npm's global bin directory; `npm unlink -g pi-remote` removes it. Deployed releases contain no `src/` and run the compiled `dist/`; `deploy.sh` builds it.
+Locally, `pi-remote` runs from `src/` through the `tsx` devDependency, so source edits take effect on the next run without `npm run build`. `npm link` creates a symlink to this checkout in npm's global bin directory; `npm unlink -g pi-remote` removes it. Deployed releases contain no `src/` and run the compiled `dist/`; `deploy.sh` builds it. To try daemon changes on the remote host, run `scripts/deploy.sh --wait`: attached clients reconnect to the same slots on the new code.
 
 ```sh
 npm run verify
@@ -433,6 +467,7 @@ pi-remote watch 1
 - `src/daemon.ts`: slots, attachment snapshots, dialogs, private socket, persistence.
 - `src/pi-process.ts`: stock Pi RPC child ownership, correlation, output draining.
 - `src/client.ts`, `src/reconnect.ts`: SSH/local transport, startup, snapshot-based reconnect without mutation replay.
+- `src/restart-daemon.ts`, `scripts/deploy.sh`: release install and daemon replacement; see [Deployment](#deployment).
 - `src/compat-client.ts`: read-only filesystem fallback for running legacy daemons.
 - `src/live.ts`: display-only streaming reconstruction on the daemon.
 - `src/tui.ts`, `src/view.ts`: local terminal UI and transcript projection.

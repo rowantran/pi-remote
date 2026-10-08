@@ -102,14 +102,23 @@ async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {
   const startDelayFile = join(dir, 'fixture-start-delay');
   const exitFile = join(dir, 'fixture-exit');
   await writeFile(versionFile, hello.piVersion + '\n');
-  const supervisor = new Supervisor({ stateDir: dir, executable: process.execPath,
+  const daemonOptions = { stateDir: dir, executable: process.execPath,
     prefixArgs: [fixture], skipVersionCheck: options.skipVersionCheck ?? true,
     env: { PI_OFFLINE: '1', PI_FIXTURE_VERSION_FILE: versionFile, PI_FIXTURE_VERSION_LOG: versionLog, PI_FIXTURE_ENV_LOG: envLog,
-      PI_FIXTURE_LAUNCH_LOG: launchLog, PI_FIXTURE_EXTENSION_FILE: extensionFile, PI_FIXTURE_START_DELAY_FILE: startDelayFile, PI_FIXTURE_EXIT_FILE: exitFile } });
+      PI_FIXTURE_LAUNCH_LOG: launchLog, PI_FIXTURE_EXTENSION_FILE: extensionFile, PI_FIXTURE_START_DELAY_FILE: startDelayFile, PI_FIXTURE_EXIT_FILE: exitFile } };
+  const supervisor = new Supervisor(daemonOptions);
+  let current = supervisor;
+  /** Stop the current daemon as runDaemon would, then start its successor in the same state directory. */
+  const successor = async () => {
+    await current.stop();
+    current = new Supervisor(daemonOptions);
+    await current.start();
+    return current;
+  };
   const peers: Peer[] = [];
   t.after(async () => {
     await Promise.all(peers.map(peer => peer.close()));
-    await supervisor.stop();
+    await current.stop();
     await rm(dir, { recursive: true, force: true });
   });
   await supervisor.start();
@@ -119,7 +128,7 @@ async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {
     if (verify) {
       const response = await peer.request('hello', hello);
       assert.deepEqual({protocol: response.protocol, piVersion: response.piVersion, pid: response.pid}, { ...hello, pid: process.pid });
-      assert.deepEqual(response.capabilities, ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart']);
+      assert.deepEqual(response.capabilities, ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon']);
     }
     return peer;
   };
@@ -130,7 +139,7 @@ async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {
     const snapshot = await peer.request<Snapshot>('attach', { slotId: info.id });
     return { info, snapshot };
   };
-  return { dir, supervisor, peer, connect, create, slot, versionFile, versionLog, envLog, launchLog, extensionFile, startDelayFile, exitFile };
+  return { dir, supervisor, successor, peer, connect, create, slot, versionFile, versionLog, envLog, launchLog, extensionFile, startDelayFile, exitFile };
 }
 const textOf = (message: RecordValue) => message.content.filter((block: RecordValue) => block.type === 'text').map((block: RecordValue) => block.text).join('');
 
@@ -979,4 +988,82 @@ test('failed replacement reports an exited slot with its original session file',
   const exit = await peer.event('remote_slot_exit', from);
   assert.match(exit.event.error, /fixture startup failed/);
   await assert.rejects(peer.request('restart', { slotId: info.id }), /Pi exited/);
+});
+
+test('restart_daemon refuses while any slot is busy, without locking slots or stopping anything', { timeout: 10_000 }, async t => {
+  const { peer, slot } = await setup(t);
+  const { info: idle } = await slot();
+  const busy = await peer.request<SlotInfo>('create', { cwd: idle.cwd });
+  await peer.request('attach', { slotId: busy.id });
+  await peer.request('rpc', { slotId: busy.id, command: { type: 'prompt', message: '/seed-live' } });
+  for (const force of ['true', 1, null]) await assert.rejects(peer.request('restart_daemon', { force }), /force must be a boolean/);
+  const refused = await peer.request('restart_daemon');
+  assert.equal(refused.accepted, false);
+  assert.equal(refused.pid, process.pid);
+  assert.deepEqual(refused.blocked.map((entry: RecordValue) => [entry.slot.id, entry.reason]), [[busy.id, refused.blocked[0].reason]]);
+  assert.match(refused.blocked[0].reason, /Remote Pi is busy/);
+  assert.deepEqual(refused.reopen, []);
+  const slots = await peer.request<SlotInfo[]>('list');
+  assert.deepEqual(slots.map(slot => [slot.id, slot.status, slot.pid]), [[idle.id, 'running', idle.pid], [busy.id, 'running', busy.pid]]);
+  // The refusal must not leave a lock behind: mutations still work.
+  await peer.request('rpc', { slotId: busy.id, command: { type: 'set_session_name', name: 'still usable' } });
+  const stored = JSON.parse(await readFile(join(idle.cwd, 'slots.json'), 'utf8'));
+  assert.ok(stored.every((slot: RecordValue) => slot.reopen === undefined));
+});
+
+test('restart_daemon reopens running slots in the next daemon with the same IDs, numbers and history', { timeout: 15_000 }, async t => {
+  const { dir, supervisor, successor, peer, connect, slot, launchLog } = await setup(t);
+  const args = ['--session-dir', join(dir, 'history')];
+  const { info } = await slot(args);
+  await peer.request('rpc', { slotId: info.id, command: { type: 'prompt', message: 'saved history' } });
+  await peer.event('agent_settled');
+  await peer.request('rpc', { slotId: info.id, command: { type: 'set_session_name', name: 'Kept' } });
+  const before = await peer.request<Snapshot>('snapshot', { slotId: info.id });
+  const stopped = await peer.request<SlotInfo>('create', { cwd: dir, args });
+  await peer.request('kill', { slotId: stopped.id });
+  const busy = await peer.request<SlotInfo>('create', { cwd: dir, args });
+  await peer.request('attach', { slotId: busy.id });
+  await peer.request('rpc', { slotId: busy.id, command: { type: 'prompt', message: '/seed-live' } });
+  const other = await connect();
+  await other.request('attach', { slotId: info.id });
+
+  // Same rules as /reload: --force overrides busy work.
+  const accepted = await peer.request('restart_daemon', { force: true });
+  assert.equal(accepted.accepted, true);
+  assert.deepEqual(accepted.reopen.map((slot: SlotInfo) => slot.id), [info.id, busy.id]);
+  await supervisor.exitRequested;
+  await assert.rejects(other.request('rpc', { slotId: info.id, command: { type: 'set_session_name', name: 'late' } }), /shutting down/);
+  await assert.rejects(other.request('create', { cwd: dir }), /shutting down/);
+
+  const next = await successor();
+  const stored = JSON.parse(await readFile(join(dir, 'slots.json'), 'utf8'));
+  assert.ok(stored.every((slot: RecordValue) => slot.reopen === undefined), 'The successor consumes the reopen marks');
+  const fresh = await Peer.connect(socketPath(dir));
+  t.after(() => fresh.close());
+  await fresh.request('hello', hello);
+  const slots = await fresh.request<SlotInfo[]>('list');
+  assert.deepEqual(slots.map(slot => [slot.id, slot.number, slot.status === 'exited' ? 'exited' : 'live']),
+    [[info.id, info.number, 'live'], [stopped.id, stopped.number, 'exited'], [busy.id, busy.number, 'live']]);
+  assert.notEqual(slots[0].pid, info.pid);
+  const after = await fresh.request<Snapshot>('attach', { slotId: info.id });
+  const ready = after.slot.status === 'running' ? after : (await fresh.event('remote_refresh'), await fresh.request<Snapshot>('snapshot', { slotId: info.id }));
+  assert.equal(ready.state.sessionId, before.state.sessionId);
+  assert.equal(ready.state.sessionName, 'Kept');
+  assert.deepEqual(ready.entries, before.entries);
+  const launches = (await readFile(launchLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(launches.at(-2).args.slice(-2), ['--session', info.sessionFile]);
+  assert.equal(next.stateDir, dir);
+});
+
+test('a daemon that stops without restart_daemon still leaves every slot stopped', { timeout: 10_000 }, async t => {
+  const { dir, successor, slot } = await setup(t);
+  const { info } = await slot();
+  await successor();
+  const fresh = await Peer.connect(socketPath(dir));
+  t.after(() => fresh.close());
+  await fresh.request('hello', hello);
+  const [stored] = await fresh.request<SlotInfo[]>('list');
+  assert.equal(stored.id, info.id);
+  assert.equal(stored.status, 'exited');
+  assert.match(stored.error!, /Daemon restarted/);
 });

@@ -1,4 +1,4 @@
-# Add to ~/.config/fish/config.fish: pi-remote completion fish | source
+# Add to ~/.config/fish/config.fish: command -q pi-remote; and pi-remote completion fish | source
 # Or save this output as ~/.config/fish/completions/pi-remote.fish.
 # No eval: completed words and the unfinished token are passed as arguments.
 function __pi_remote_complete

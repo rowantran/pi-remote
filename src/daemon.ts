@@ -1,10 +1,12 @@
 import { createServer, type Server, type Socket } from 'node:net';
 import { randomUUID } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import { mkdir, readFile, realpath, rename, rm, stat, writeFile, chmod, lstat } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { readJsonl, writeJsonl } from './jsonl.js';
 import { emptyLive, applyLiveEvent, captureLiveSnapshot } from './live.js';
 import { PiProcess, type PiLaunch } from './pi-process.js';
@@ -18,7 +20,13 @@ const RESERVED_ARGS = new Set(['--mode', '--print', '-p', '--session', '--sessio
 const QUERY_COMMANDS = new Set(['get_state', 'get_entries', 'get_tree', 'get_messages', 'get_available_models', 'get_session_stats', 'get_fork_messages', 'get_last_assistant_text', 'get_commands', 'get_available_thinking_levels']);
 const RPC_COMMANDS = new Set([...QUERY_COMMANDS, ...SESSION_CHANGES, 'prompt', 'steer', 'follow_up', 'abort', 'clear_queue', 'set_model', 'cycle_model', 'set_thinking_level', 'cycle_thinking_level', 'set_steering_mode', 'set_follow_up_mode', 'compact', 'set_auto_compaction', 'set_auto_retry', 'abort_retry', 'bash', 'abort_bash', 'export_html', 'set_session_name']);
 
-interface StoredSlot { id: string; number?: number; cwd: string; createdAt: string; args: string[]; sessionFile?: string; sessionName?: string }
+/** The installed code this daemon runs: a deployed release directory, or a source checkout. */
+const RELEASE = realpathSync(fileURLToPath(new URL('..', import.meta.url)));
+const BUSY = 'Remote Pi is busy. Confirm reload to interrupt running work and discard queued prompts.';
+
+/** `reopen` marks a slot that was running when `restart_daemon` stopped the daemon. The next
+ * daemon starts it again from its session file, exactly like /reload. Crashes never set it. */
+interface StoredSlot { id: string; number?: number; cwd: string; createdAt: string; args: string[]; sessionFile?: string; sessionName?: string; reopen?: boolean }
 interface Slot extends StoredSlot {
   process?: PiProcess;
   status: 'starting' | 'running' | 'exited';
@@ -63,12 +71,17 @@ export class Supervisor {
   private server?: Server;
   private saves = Promise.resolve();
   private stopping = false;
+  private reopen = new Set<string>();
+  private exitRequest!: () => void;
+  /** Resolves when a client asked this daemon to exit for a restart; runDaemon then stops it. */
+  readonly exitRequested = new Promise<void>(resolve => { this.exitRequest = resolve; });
   readonly stateDir: string;
   constructor(private options: DaemonOptions) { this.stateDir = resolve(options.stateDir); }
 
   async start(): Promise<void> {
     await prepareStateDir(this.stateDir);
     await this.checkVersion();
+    const reopening: Slot[] = [];
     try {
       const stored = JSON.parse(await readFile(join(this.stateDir, 'slots.json'), 'utf8')) as StoredSlot[];
       const reserved = new Set(stored.filter(slot => Number.isSafeInteger(slot.number) && slot.number! > 0).map(slot => slot.number!));
@@ -82,9 +95,16 @@ export class Supervisor {
         }
         assigned.add(number!);
         this.nextSlotNumber = Math.max(this.nextSlotNumber, number! + 1);
-        this.slots.set(metadata.id, { ...metadata, number, status: 'exited', error: 'Daemon restarted. Work stopped; session history is on disk. Resume explicitly.', live: emptyLive(), ui: new Map(), timers: new Map(), seq: 0, state: {}, changing: false, restarting: false, mutations: 0, incarnation: 0 });
+        const { reopen, ...rest } = metadata;
+        const slot: Slot = { ...rest, number, status: 'exited', error: 'Daemon restarted. Work stopped; session history is on disk. Resume explicitly.', live: emptyLive(), ui: new Map(), timers: new Map(), seq: 0, state: {}, changing: false, restarting: false, mutations: 0, incarnation: 0 };
+        this.slots.set(metadata.id, slot);
+        if (reopen && slot.sessionFile) reopening.push(slot);
       }
     } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+    // Reopen before listening, so reconnecting clients find the slots starting, not stopped.
+    for (const slot of reopening) { slot.status = 'starting'; slot.error = undefined; }
+    await Promise.all(reopening.map(slot => this.relaunch(slot)));
+    if (reopening.length) await this.save();
     this.server = createServer(socket => this.connect(socket));
     await new Promise<void>((accept, reject) => {
       this.server!.once('error', reject);
@@ -199,7 +219,7 @@ export class Supervisor {
     }
   }
   private save(): Promise<void> {
-    const stored: StoredSlot[] = [...this.slots.values()].map(({id,number,cwd,createdAt,args,sessionFile,sessionName}) => ({id,number,cwd,createdAt,args,sessionFile,sessionName}));
+    const stored: StoredSlot[] = [...this.slots.values()].map(({id,number,cwd,createdAt,args,sessionFile,sessionName}) => ({id,number,cwd,createdAt,args,sessionFile,sessionName, ...(this.reopen.has(id) ? { reopen: true } : {})}));
     this.saves = this.saves.catch(() => {}).then(async () => {
       const temp = join(this.stateDir, 'slots.json.tmp');
       await writeFile(temp, JSON.stringify(stored, null, 2) + '\n', { mode: 0o600 });
@@ -269,6 +289,18 @@ export class Supervisor {
     });
   }
 
+  /** Start Pi again from the slot's session file. Shared by /reload and by a daemon
+   * reopening the slots that the previous daemon marked during restart_daemon. */
+  private async relaunch(slot: Slot): Promise<void> {
+    try { this.launch(slot); }
+    catch (error) {
+      // A synchronous spawn failure has no child exit callback to finish the transition.
+      slot.process = undefined; slot.status = 'exited'; slot.error = errorText(error);
+      this.publish(slot, { type: 'remote_slot_exit', error: slot.error });
+    }
+    if (slot.process) await this.startupGrace(slot);
+  }
+
   private async startupGrace(slot: Slot): Promise<void> {
     // A slow startup or an extension awaiting UI must not cause us to kill Pi.
     let timer: NodeJS.Timeout | undefined;
@@ -284,15 +316,21 @@ export class Supervisor {
       || Object.keys(live.bash ?? {}).length || slot.mutations || [...slot.ui.keys()].some(key => key.startsWith('dialog:')));
   }
 
+  /** A slot in a transition cannot be stopped and reopened, even with force. */
+  private transitionBlocker(slot: Slot): string | undefined {
+    if (slot.restarting || slot.status === 'starting') return 'Pi is already starting or reloading';
+    if (slot.changing) return 'A session change is already in progress';
+  }
+
   /** Explicit restart only: retain the slot and disk session, never replay pending commands. */
   private async restart(slot: Slot, force: boolean): Promise<SlotInfo> {
     if (this.stopping) throw new Error('Daemon is shutting down');
-    if (slot.restarting || slot.status === 'starting') throw new Error('Pi is already starting or reloading');
-    if (slot.changing) throw new Error('A session change is already in progress');
+    const blocked = this.transitionBlocker(slot);
+    if (blocked) throw new Error(blocked);
     slot.restarting = true; // Lock before the first await, including against other clients.
     const process = slot.process!;
     const incarnation = slot.incarnation;
-    const busyError = () => new Error('Remote Pi is busy. Confirm reload to interrupt running work and discard queued prompts.');
+    const busyError = () => new Error(BUSY);
     let reserved: string | undefined;
     try {
       // Refuse an incompatible executable before touching the currently running process.
@@ -326,13 +364,7 @@ export class Supervisor {
       this.publish(slot, { type: 'remote_slot_restart', slot: this.info(slot) });
       await process.stop();
       if (this.stopping) throw new Error('Daemon shut down during reload; session history is on disk');
-      try { this.launch(slot); }
-      catch (error) {
-        // A synchronous spawn failure has no child exit callback to finish the transition.
-        slot.process = undefined; slot.status = 'exited'; slot.error = errorText(error);
-        this.publish(slot, { type: 'remote_slot_exit', error: slot.error });
-      }
-      if (slot.process) await this.startupGrace(slot);
+      await this.relaunch(slot);
       try { await this.save(); }
       catch (error) { this.publish(slot, { type: 'remote_warning', error: `Reload completed; metadata save failed: ${errorText(error)}` }); }
       return this.info(slot);
@@ -341,6 +373,38 @@ export class Supervisor {
       if (reserved) this.reservedPaths.delete(reserved);
     }
   }
+  /** /reload for every slot at once, across a daemon restart. Uses the same rules as /reload:
+   * a slot in a transition blocks the restart, and a busy slot blocks it unless forced. The
+   * daemon marks running slots `reopen` and exits; the next daemon relaunches them from their
+   * session files with the same IDs and numbers. Nothing stops unless every slot is ready. */
+  private async restartDaemon(force: boolean): Promise<{ accepted: boolean; pid: number; release: string; blocked: { slot: SlotInfo; reason: string }[]; reopen: SlotInfo[] }> {
+    if (this.stopping) throw new Error('Daemon is shutting down');
+    const live = () => [...this.slots.values()].filter(slot => slot.status !== 'exited' && slot.process);
+    // Read fresh state without locking slots, so polling with --wait never rejects a prompt.
+    const unsure = new Map<Slot, string>();
+    await Promise.all(live().map(async slot => {
+      if (this.transitionBlocker(slot)) return;
+      try {
+        const state = await this.refreshState(slot);
+        // Pi writes a new session file only once it has content. Reopening a missing file is
+        // safe only when there is nothing in memory to lose.
+        if (state.messageCount > 0) await stat(resolve(string(state.sessionFile, 'sessionFile')));
+      } catch (error) { unsure.set(slot, `Cannot confirm the session is saved: ${errorText(error)}`); }
+    }));
+    if (this.stopping) throw new Error('Daemon is shutting down');
+    // Decide synchronously from the latest state, and commit before any other request runs.
+    const blocked = live().flatMap(slot => {
+      const reason = this.transitionBlocker(slot) ?? unsure.get(slot) ?? (!force && this.isBusy(slot, slot.state) ? BUSY : undefined);
+      return reason ? [{ slot: this.info(slot), reason }] : [];
+    });
+    const result = { pid: process.pid, release: RELEASE, blocked };
+    if (blocked.length) return { accepted: false, ...result, reopen: [] };
+    const reopen = live().filter(slot => slot.sessionFile);
+    this.stopping = true;
+    for (const slot of reopen) this.reopen.add(slot.id);
+    return { accepted: true, ...result, reopen: reopen.map(slot => this.info(slot)) };
+  }
+
   private async snapshot(slot: Slot, retries = 2): Promise<Snapshot> {
     // A transition may be awaiting an extension dialog. Permit attachment using the last
     // verified history so disconnection cannot make that dialog impossible to answer.
@@ -392,7 +456,7 @@ export class Supervisor {
       if (request.method === 'hello') {
         if (params.protocol !== PROTOCOL_VERSION || params.piVersion !== PI_VERSION) throw new Error(`Version mismatch: daemon protocol ${PROTOCOL_VERSION}, Pi ${PI_VERSION}`);
         peer.verified = true;
-        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart'] };
+        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, release: RELEASE, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon'] };
       } else {
         if (!peer.verified) throw new Error('Send hello with matching versions first');
         switch (request.method) {
@@ -433,6 +497,16 @@ export class Supervisor {
             data = await SessionManager.list(slot.cwd, dirIndex === -1 ? undefined : resolve(slot.cwd, slot.args[dirIndex + 1]));
             break;
           }
+          case 'restart_daemon': {
+            if (params.force !== undefined && typeof params.force !== 'boolean') throw new Error('force must be a boolean');
+            data = await this.restartDaemon(params.force === true);
+            if (!data.accepted) break;
+            // Deliver the acceptance before shutdown closes every client connection.
+            this.send(peer, { type: 'result', id, success: true, data });
+            await new Promise<void>(resolve => peer.socket.write('', () => resolve()));
+            this.exitRequest();
+            return;
+          }
           case 'restart': {
             const slot = this.running(params.slotId);
             if (peer.slotId !== slot.id) throw new Error('Attach to the slot before reloading Pi');
@@ -447,6 +521,7 @@ export class Supervisor {
             if (!RPC_COMMANDS.has(command.type)) throw new Error(`Unsupported Pi RPC command: ${command.type}`);
             // Readers may inspect the newly launched process before the restart caller
             // gets its result. Block mutations, not other clients' command-cache refreshes.
+            if (this.stopping && !QUERY_COMMANDS.has(command.type)) throw new Error('Daemon is shutting down');
             if (slot.restarting && !QUERY_COMMANDS.has(command.type)) throw new Error('Pi is reloading; wait for startup to finish');
             if (slot.status === 'starting' && !QUERY_COMMANDS.has(command.type)) throw new Error('Pi is starting; wait before sending commands');
             const incarnation = slot.incarnation;
@@ -588,6 +663,7 @@ export async function runDaemon(options: DaemonOptions): Promise<void> {
       };
       process.once('SIGTERM', stop);
       process.once('SIGINT', stop);
+      void supervisor.exitRequested.then(stop);
     });
   } finally {
     if (owned && await readFile(join(lock, 'token'), 'utf8').catch(() => '') === token) await rm(lock, { recursive: true, force: true });
