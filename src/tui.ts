@@ -1,4 +1,5 @@
 import { readAttachment } from './files.js';
+import { emptyLive } from './live.js';
 import { Transcript } from './transcript.js';
 import { ForkSelector } from './fork-selector.js';
 import { ScheduledTuiAltScreen } from './scheduled-tui.js';
@@ -21,7 +22,7 @@ import {
 } from '@earendil-works/pi-tui';
 import {
   errorText,
-  type RecordValue, type RemoteConnection, type RemoteEvent, type Snapshot,
+  type RecordValue, type RemoteConnection, type RemoteEvent, type SlotInfo, type Snapshot,
 } from './protocol.js';
 import {
   DIALOG_METHODS, RemoteView, restoredQueueText, safeText, transcriptMessages,
@@ -41,6 +42,7 @@ const muted = (text: string) => `\x1b[2m${text}\x1b[22m`;
 const errorColor = (text: string) => `\x1b[31m${text}\x1b[39m`;
 /** Pi's interactive mode waits this long for terminal color replies before it falls back. */
 const TERMINAL_COLOR_TIMEOUT_MS = 100;
+const RELOAD_BUSY_ERROR = 'Remote Pi is busy. Confirm reload to interrupt running work and discard queued prompts.';
 const HELP = `Local Pi remote UI
 Enter: send; while running, queue a steering instruction.
 Alt+Enter: queue a follow-up (wait until the run finishes).
@@ -53,6 +55,8 @@ Ctrl+O: expand/collapse tool output. Ctrl+T: show/hide thinking.
 PageUp/PageDown: transcript scroll. Ctrl+End: follow output. Ctrl+Shift+F: transcript search.
 /detach /help /model /new /fork /resume /session /copy /name <name> /compact [instructions]
 /quit stops the remote Pi process for this slot, then closes the client.
+/reload restarts remote Pi in the same slot/session; confirm to discard running work and queued prompts.
+/reload-ui reloads only local presentation; it does not restart remote Pi or the daemon.
 Connection loss: automatically reattach when enabled; never replay submitted commands.
 @remote/path attaches remote text/images. /attach LOCAL_PATH attaches a local file.
 Ctrl+V /paste: local clipboard files, image, or text. Ctrl+G /editor: local external editor.
@@ -116,7 +120,10 @@ export class RemoteTui {
   private detached = false;
   /** True after /quit stopped the remote Pi process; the client then closed. */
   private quit = false;
-  private commandPending = false;
+  private commandPending = 0;
+  private reloadPending = false;
+  private reloadRequestPending = false;
+  private rpcWorkPending = 0;
   private interruptPending = false;
   private lastEscapeTime?: number;
   private refreshPromise?: Promise<void>;
@@ -186,9 +193,14 @@ export class RemoteTui {
     if (this.initialized || this.detached) return;
     this.initialized = true;
     this.completion = new RemoteAutocompleteProvider({
-      getCommands: () => this.rpc({ type: 'get_commands' }),
+      getCommands: async () => {
+        const generation = this.generation;
+        const result = await this.rpc<{ commands: { name: string; description?: string }[] }>({ type: 'get_commands' });
+        if (generation !== this.generation) throw new Error('Remote Pi changed while reading commands');
+        return result;
+      },
       completePath: prefix => this.connection.request('complete_path', { slotId: this.slotId, prefix }),
-      localCommands: ['attach', 'clear-attachments', 'detach', 'help', 'model', 'new', 'fork', 'tree', 'resume', 'session', 'copy', 'name', 'compact', 'thinking', 'export', 'reload-ui', 'theme', 'tool-call', 'paste', 'editor', 'quit'].map(name => ({ name })),
+      localCommands: ['attach', 'clear-attachments', 'detach', 'help', 'model', 'new', 'fork', 'tree', 'resume', 'session', 'copy', 'name', 'compact', 'thinking', 'export', 'reload', 'reload-ui', 'theme', 'tool-call', 'paste', 'editor', 'quit'].map(name => ({ name })),
     });
     this.editor.setAutocompleteProvider(this.completion);
     // Like Pi, learn whether the terminal is light or dark before building themed content.
@@ -348,7 +360,7 @@ export class RemoteTui {
 
   /** Separate best-effort reads: an unavailable model catalogue cannot delay branch or usage data. */
   private refreshPresentationData(): void {
-    if (!this.initialized || this.detached || !this.connected) return;
+    if (!this.initialized || this.detached || !this.connected || this.view.snapshot.slot.status !== 'running' || this.reloadRequestPending) return;
     const generation = this.generation;
     const read = (key: string, request: () => Promise<any>, apply: (value: any) => void) => {
       if (this.metadataPending.has(key)) return;
@@ -358,7 +370,7 @@ export class RemoteTui {
         this.view.snapshot.presentation ??= {};
         apply(value); this.presentation?.update(this.view.snapshot);
       }).catch(() => { /* Optional display metadata must never interfere with remote work. */ })
-        .finally(() => this.metadataPending.delete(key));
+        .finally(() => { if (generation === this.generation) this.metadataPending.delete(key); });
     };
     read('stats', () => this.rpc({ type: 'get_session_stats' }), value => { this.view.snapshot.presentation!.stats = value; });
     if (!this.view.snapshot.presentation?.models?.length) read('models', () => this.rpc({ type: 'get_available_models' }), value => {
@@ -406,11 +418,17 @@ export class RemoteTui {
     if (this.detached) return;
     this.transcript.notify(text, kind); this.tui.requestRender();
   }
-  private rpc<T = RecordValue>(command: RecordValue): Promise<T> {
+  private async rpc<T = RecordValue>(command: RecordValue): Promise<T> {
     if (this.detached || !this.connected || this.view.snapshot.slot.status === 'exited') {
       return Promise.reject(new Error('Disconnected. Nothing was sent. Detach, then run the same CLI attach command again.'));
     }
-    return this.connection.request<T>('rpc', { slotId: this.slotId, command });
+    const work = !String(command.type).startsWith('get_');
+    if ((work && this.view.snapshot.slot.status === 'starting') || this.reloadRequestPending) {
+      throw new Error('Remote Pi is starting or reloading. Nothing was sent. Your draft and local attachments are preserved.');
+    }
+    if (work) this.rpcWorkPending++;
+    try { return await this.connection.request<T>('rpc', { slotId: this.slotId, command }); }
+    finally { if (work) this.rpcWorkPending--; }
   }
 
   run(): Promise<void> {
@@ -421,8 +439,12 @@ export class RemoteTui {
       if (this.connection.onReconnect) this.unsubscribe.push(this.connection.onReconnect(snapshot => {
         if (this.detached) return;
         this.connected = true; this.generation++;
-        const presentation = this.view.snapshot.presentation;
-        const wasBusy = this.view.snapshot.live.busy;
+        this.resetSnapshotFlight();
+        const processChanged = snapshot.slot.status === 'starting'
+          || (snapshot.slot.pid !== undefined && this.view.snapshot.slot.pid !== undefined && snapshot.slot.pid !== this.view.snapshot.slot.pid);
+        const presentation = processChanged ? undefined : this.view.snapshot.presentation;
+        const wasBusy = processChanged ? false : this.view.snapshot.live.busy;
+        if (processChanged) this.resetRemoteProcess();
         this.view.replace(snapshot);
         this.view.snapshot.presentation = { ...presentation, ...snapshot.presentation };
         this.reconcileWorkingLifecycle(wasBusy);
@@ -440,6 +462,7 @@ export class RemoteTui {
       this.unsubscribe.push(this.connection.onDisconnect(error => {
         if (this.detached) return;
         this.connected = false; this.generation++;
+        this.resetSnapshotFlight();
         this.lastEscapeTime = undefined;
         this.localDialog?.cancel(); // A local selection must not survive into a different snapshot.
         // Do not resolve remote dialogs, clear the queue, abort, or replay requests.
@@ -534,6 +557,12 @@ export class RemoteTui {
     if (this.refreshing) this.journal.push(event);
     const wasBusy = this.view.snapshot.live.busy;
     if (!this.view.apply(event)) return;
+    if (event.event.type === 'remote_slot_restart') {
+      this.resetRemoteProcess();
+      this.notify('Remote Pi is reloading in the same slot. Running work and queued prompts were discarded.');
+      this.syncBottom(); return;
+    }
+    if (event.event.type === 'remote_refresh') this.completion?.invalidateCommands();
     this.transcript.changed();
     this.displayEvent(event.event);
     this.reconcileWorkingLifecycle(wasBusy, event.event.type);
@@ -546,6 +575,28 @@ export class RemoteTui {
     if (gap || legacyBashFinished || event.event.type === 'remote_refresh' || event.event.type === 'agent_settled' || event.event.type === 'compaction_end') {
       void this.refresh().catch(error => this.notify(`Snapshot refresh failed: ${errorText(error)}`));
     }
+  }
+
+  /** A retired snapshot request must not prevent a new generation from reading history. */
+  private resetSnapshotFlight(): void {
+    this.refreshPromise = undefined; this.refreshing = false; this.refreshAgain = false; this.journal = [];
+  }
+
+  /** Invalidate the old process without clearing local drafts, attachments, or cached history. */
+  private resetRemoteProcess(): void {
+    this.generation++;
+    this.view.snapshot.live = emptyLive(); this.view.snapshot.ui = []; delete this.view.snapshot.presentation;
+    this.resetSnapshotFlight();
+    this.metadataPending.clear(); this.completion?.invalidateCommands();
+    this.lastEscapeTime = undefined;
+    this.activeRemote = undefined; this.answering.clear();
+    this.appliedEditorId = undefined; this.appliedTitle = undefined;
+    this.tui.terminal.setTitle('');
+    this.localDialog?.cancel();
+    this.clearWorkingIndicator(); this.transcript.reset();
+    // Display adapters can retire their own working timers without treating restart as a normal completion.
+    this.displayEvent({ type: 'agent_settled' });
+    this.displayEvent({ type: 'session_switch', reason: 'restart' });
   }
 
   /** Only read-only snapshots may coalesce; mutating commands are never retried. */
@@ -567,6 +618,7 @@ export class RemoteTui {
         this.transcript.invalidate(); this.syncBottom();
         void this.refreshPresentationData();
       } finally {
+        if (generation !== this.generation) return;
         this.refreshPromise = undefined; this.refreshing = false; this.journal = [];
         if (this.refreshAgain) {
           this.refreshAgain = false;
@@ -638,12 +690,14 @@ export class RemoteTui {
       this.notify('Dialog preserved. Ctrl+D detaches; run the same CLI attach command again before answering.'); return;
     }
     this.answering.add(id);
+    const generation = this.generation;
     try {
       await this.connection.request('answer', { slotId: this.slotId, response: { id, ...response } });
-      if (this.detached) return;
+      if (this.detached || generation !== this.generation) return;
       this.view.snapshot.ui = this.view.snapshot.ui.filter(record => record.id !== id);
       this.syncBottom();
     } catch (error) {
+      if (generation !== this.generation) return;
       this.notify(`Dialog response failed: ${errorText(error)}. The response will not be replayed.`);
       // Leave an uncertain response disabled until a fresh attach verifies outstanding dialogs.
       if (this.connected) { this.answering.delete(id); void this.refresh().catch(() => {}); }
@@ -808,11 +862,11 @@ export class RemoteTui {
 
   private async openForkFromShortcut(): Promise<void> {
     if (this.commandPending) return;
-    this.commandPending = true;
+    this.commandPending++;
     try { await this.builtin('/fork', ''); }
     catch (error) {
       this.notify(`Fork request failed: ${errorText(error)}. Its remote outcome can be unknown after connection loss. Nothing will be replayed; check the session before trying again.`);
-    } finally { this.commandPending = false; if (!this.detached) this.syncBottom(); }
+    } finally { this.commandPending--; if (!this.detached) this.syncBottom(); }
   }
 
   private chooseFork(tree: SessionTreeNode[], leafId: string | null): Promise<string | undefined> {
@@ -858,10 +912,11 @@ export class RemoteTui {
     const args = text.trim().slice(command.length).trim();
     if (command === '/detach') { this.detach(); return; }
     if (command === '/help') { this.editor.setText(''); this.notify(HELP); return; }
-    if (this.commandPending) { this.restoreSubmission(text); this.notify('A local command is still pending. Your text remains in the editor.'); return; }
+    if (this.commandPending && (command !== '/reload' || this.reloadPending)) { this.restoreSubmission(text); this.notify('A local command is still pending. Your text remains in the editor.'); return; }
     this.editor.setText(''); this.editor.addToHistory(text);
     this.editorHistory.push(text); if (this.editorHistory.length > 100) this.editorHistory.shift();
-    this.commandPending = true;
+    this.commandPending++;
+    const generation = this.generation;
     try {
       if (text.startsWith('!')) {
         this.bashRunning = true;
@@ -872,28 +927,32 @@ export class RemoteTui {
       } else {
         const handled = await this.builtin(command, args) || (command.startsWith('/') && await this.presentation?.command(command, args));
         if (!handled) {
+          if (this.view.snapshot.slot.status === 'starting' || this.reloadRequestPending) throw new Error('Remote Pi is starting or reloading. Nothing was sent');
           const prepared = await transformPromptWithAttachments(text, path => this.connection.request('read_attachment', {slotId: this.slotId, path}));
+          if (this.detached || generation !== this.generation) throw new Error('Remote Pi changed while preparing the prompt. Nothing was sent');
           const attachments = this.pendingAttachments;
           const localText = attachments.filter(file => file.text !== undefined).map(file => `\n\nAttached local file ${file.path}:\n${file.text}`).join('');
           const images = [...(prepared.images ?? []), ...attachments.flatMap(file => file.image ? [file.image] : [])];
           const prompt = { type: 'prompt', message: prepared.message + localText, ...(images.length ? {images} : {}), streamingBehavior };
           if (Buffer.byteLength(JSON.stringify(prompt), 'utf8') > 24 * 1024 * 1024) throw new Error('Combined prompt and attachments exceed 24 MiB; nothing was sent');
           await this.rpc(prompt);
-          this.pendingAttachments = [];
+          if (generation === this.generation) this.pendingAttachments = [];
         }
       }
     } catch (error) {
       this.notify(`Request failed: ${errorText(error)}. After connection loss, its remote outcome can be unknown. Nothing will be replayed; attach again and check the session before resending.`);
       if (!this.detached) this.restoreSubmission(text);
-    } finally { this.commandPending = false; if (!this.detached) this.syncBottom(); }
+    } finally { this.commandPending--; if (!this.detached) this.syncBottom(); }
   }
 
   private async builtin(command: string, args: string): Promise<boolean> {
+    const generation = this.generation;
+    const valid = () => !this.detached && this.connected && generation === this.generation;
     switch (command) {
       case '/paste': await this.pasteLocal(); return true;
       case '/editor': await this.externalEditor(); return true;
       case '/reload-ui': await this.reloadPresentation(); this.notify('Local presentation reloaded. Remote Pi was not changed.'); return true;
-      case '/reload': this.notify('Stock Pi RPC cannot reload its remote harness. Use /reload-ui to reload local presentation only; remote Pi is not restarted.'); return true;
+      case '/reload': await this.reloadSlot(); return true;
       case '/theme': {
         if (!args) this.notify(`Local theme: ${this.localTheme.name ?? 'system'}. Usage: /theme NAME`);
         else { await loadLocalTheme(args, undefined, this.appearance); this.options.theme = args; await this.reloadPresentation(); }
@@ -912,8 +971,9 @@ export class RemoteTui {
       case '/clear-attachments': this.pendingAttachments = []; this.syncBottom(); return true;
       case '/thinking': {
         const data = await this.rpc({type:'get_available_thinking_levels'});
+        if (!valid()) return true;
         const level = args || await this.choose('Thinking level', (data.levels ?? []).map((value:string) => ({value,label:value})));
-        if (level !== undefined) { await this.rpc({type:'set_thinking_level',level}); await this.refresh(); }
+        if (level !== undefined && valid()) { await this.rpc({type:'set_thinking_level',level}); await this.refresh(); }
         return true;
       }
       case '/export': {
@@ -923,9 +983,10 @@ export class RemoteTui {
       case '/login': case '/settings': this.notify('Configure the remote harness with normal Pi over SSH. The local client does not change provider credentials or remote settings directly.'); return true;
       case '/model': {
         const data = await this.rpc({ type: 'get_available_models' });
+        if (!valid()) return true;
         const models: RecordValue[] = data.models ?? [];
         const selected = await this.choose('Choose model', models.map((model, index) => ({ value: String(index), label: `${model.provider}/${model.id}`, description: model.name })));
-        if (selected !== undefined && !this.detached) {
+        if (selected !== undefined && valid()) {
           const model = models[Number(selected)];
           await this.rpc({ type: 'set_model', provider: model.provider, modelId: model.id }); await this.refresh();
         }
@@ -953,8 +1014,9 @@ export class RemoteTui {
       case '/resume': {
         if (!this.connected || this.detached) throw new Error('Reconnect before listing sessions');
         const sessions = await this.connection.request<SessionInfo[]>('sessions', { slotId: this.slotId });
+        if (!valid()) return true;
         const sessionPath = await this.choose('Resume a remote session', sessions.map(session => ({ value: session.path, label: session.name ?? session.firstMessage ?? session.id, description: `${session.messageCount} messages · ${session.path}` })));
-        if (sessionPath !== undefined && !this.detached) {
+        if (sessionPath !== undefined && valid()) {
           const data = await this.rpc({ type: 'switch_session', sessionPath });
           if (data?.cancelled) this.notify('Session switch cancelled.'); else await this.refresh();
         }
@@ -975,6 +1037,60 @@ export class RemoteTui {
         await this.rpc({ type: 'compact', ...(args ? { customInstructions: args } : {}) }); await this.refresh(); return true;
       default: return false;
     }
+  }
+
+  /** Restart is sent once. Only an authoritative, non-mutating busy refusal permits force confirmation. */
+  private async reloadSlot(): Promise<void> {
+    if (this.reloadPending) return;
+    if (!this.connected || this.detached) throw new Error('Disconnected. Nothing was sent. Reconnect, then run /reload again');
+    if (this.view.snapshot.slot.status !== 'running') throw new Error('Remote Pi is not ready. Wait until it is running before /reload');
+    this.localDialog?.cancel();
+    const generation = this.generation;
+    const valid = () => !this.detached && this.connected && generation === this.generation;
+    const confirm = async () => {
+      const choice = await this.choose('Reload remote Pi? Running work, queued prompts, and unpersisted state will be discarded.', [
+        { value: 'cancel', label: 'Cancel' }, { value: 'reload', label: 'Reload remote Pi' },
+      ]);
+      if (choice === 'reload' && valid()) return true;
+      if (!this.detached) this.notify('Reload cancelled. Remote Pi was not restarted by this request.');
+      return false;
+    };
+    const restart = async (force: boolean) => {
+      if (!valid()) throw new Error('Remote connection or process changed. Nothing was sent');
+      this.reloadRequestPending = true;
+      try { return await this.connection.request<SlotInfo>('restart', { slotId: this.slotId, ...(force ? { force: true } : {}) }); }
+      finally { this.reloadRequestPending = false; }
+    };
+    this.reloadPending = true;
+    try {
+      const live = this.view.snapshot.live;
+      const force = live.busy || live.compacting || this.hasQueue() || this.bashRunning
+        || Object.keys(live.bash ?? {}).length > 0 || Object.values(live.tools).some(tool => tool.type !== 'tool_execution_end')
+        || this.rpcWorkPending > 0 || this.commandPending > 1 || this.interruptPending || this.answering.size > 0;
+      if (force && !await confirm()) return;
+      let slot: SlotInfo;
+      try { slot = await restart(force); }
+      catch (error) {
+        if (force || errorText(error) !== RELOAD_BUSY_ERROR || !valid()) throw error;
+        // No mutation was accepted. The server saw work that this display had not received yet.
+        if (!await confirm()) return;
+        slot = await restart(true);
+      }
+      if (this.detached || !this.connected) return;
+      // The restart event usually arrived first. Do not overwrite a newer ready snapshot with this response.
+      if (generation === this.generation) {
+        this.view.snapshot.slot = structuredClone(slot);
+        this.resetRemoteProcess();
+      }
+      if (slot.status === 'exited') {
+        if (this.view.snapshot.slot.status === 'starting') this.view.snapshot.slot = structuredClone(slot);
+        this.notify(`Remote Pi reload failed: ${slot.error ?? 'the new process exited during startup'}. This client stays attached. Ctrl+D detaches.`);
+        return;
+      }
+      if (slot.status === 'running') await this.refresh();
+      this.completion?.invalidateCommands(); this.refreshPresentationData();
+      this.notify('Reload accepted. This client stays attached; no prompts or commands were replayed.');
+    } finally { this.reloadPending = false; }
   }
 
   /** Stop the remote Pi process with the daemon's explicit kill, then close the client. */

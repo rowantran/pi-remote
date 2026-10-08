@@ -149,6 +149,7 @@ For zsh or bash, put `pi-remote` on `PATH` with `npm link`, then install the mat
 | `/clear-attachments` | Remove pending local attachments |
 | Ctrl+G / `/editor` | Edit the draft with local `$VISUAL`, `$EDITOR`, or `nano` |
 | `!command` / `!!command` | Run a remote shell command; `!!` excludes its output from model context |
+| `/reload` | Restart remote Pi in the same slot and session; asks before interrupting work or discarding queued prompts |
 | `/reload-ui` | Reload local presentation adapters and theme, not remote Pi |
 | `/theme [NAME]` | Show or change the local theme for this client |
 | `/help` | Show local controls |
@@ -175,9 +176,19 @@ A **slot** is a running Pi process, like a tmux pane. A **Pi session** is its cu
 
 The daemon rejects attempts through its create/resume commands to open a file already owned by another of its slots. This is not a system-wide lock: Pi instances outside this daemon and extension-internal session switches cannot be fenced through stock RPC. Do not open the same file in a separate normal Pi process.
 
+### Reload remote Pi
+
+Use `/reload` to stop and launch remote Pi again in the **same slot and stored session file**, so it reads remote extensions and configuration again. The original launch arguments are reapplied. The client stays attached and the daemon is not restarted. Persisted conversation history remains; running work, steering/follow-up queues, open dialogs, in-memory model or thinking-level changes, and other unpersisted process state are discarded. Before the first prompt is persisted, the session path can stay the same while the new process creates a different session ID. Busy reloads require confirmation, with **Cancel** selected by default. The server can also require confirmation when work starts before the client sees it.
+
+While Pi starts, the client blocks remote submissions and retains your draft and pending local attachments. The client can send startup dialog answers, but Pi 1.0.4 cannot read them while an initial `session_start` hook awaits a dialog; the [upstream RPC limitation](#upstream-rpc-limitations) still applies. When Pi is ready, a fresh snapshot restores authoritative history, widgets, and command suggestions. `/reload-ui` remains separate: it reloads only local presentation adapters and the local theme.
+
+Reload requests are never replayed after a disconnect. Check the slot before trying again. Only an explicit force confirmation after the server's busy refusal sends a second request; that refusal did not accept a restart.
+
+Existing deployed daemons must be upgraded before they support `/reload`; installing a newer client alone does not add the method to a running daemon. Follow [Upgrade without interrupting active work](#upgrade-without-interrupting-active-work). Pi's version is pinned and checked **before** stopping the old process, so an incompatible Pi executable leaves the old process running instead of killing it.
+
 ## What survives disconnect
 
-Automatic reconnect applies after a terminal client has attached successfully. It retries transport connections with backoff, obtains a fresh snapshot, and resumes display of the same slot. It does not create a replacement process or repeat prompts, shell commands, dialog answers, or session changes. Missing/exited slots and incompatible versions stop recovery. Draft text and pending local attachments remain in the same open client, not in durable storage.
+Automatic reconnect applies after a terminal client has attached successfully. It retries transport connections with backoff, obtains a fresh snapshot, and resumes display of the same slot. It does not create a replacement process or repeat prompts, shell commands, dialog answers, session changes, or reload requests. Missing/exited slots and incompatible versions stop recovery. Draft text and pending local attachments remain in the same open client, not in durable storage.
 
 Local notices stay beside the message they followed, so later messages push them up rather than leaving them at the transcript's bottom. Startup notices appear before the conversation. Successful reconnect removes old connection notices and adds one current reattachment notice; unrelated warnings remain. Notices are display-only, bounded to 50, and cleared when the slot's session changes or their message or tool row is no longer in the displayed history.
 
@@ -295,7 +306,7 @@ For example, a local footer adapter can show `PI_REMOTE_SESSION_HOST` to indicat
 - Pi 1.0.4 waits for initial `session_start` hooks before it starts reading RPC stdin. An extension that **awaits a dialog during initial startup** can therefore block startup before its answer can be read. The daemon retains the process and shows its starting state; it does not invent a timeout or patch the harness. Dialogs from commands or running tools were tested successfully.
 - RPC does not report cancellation of a dialog by an extension's abort signal. Explicit timeout expiry and client answers are tracked, but a signal-cancelled dialog can remain displayed until the user dismisses it.
 - In-place tree navigation is unavailable. `/tree` and double-Esc fall back to the tree-style `/fork` picker: they create a **new session file**, not another branch inside the existing file. Stock RPC can fork only before user prompts, so assistant entries are shown for context but cannot be selected as fork points. `/login` and `/settings` are unavailable here; configure the remote harness with normal Pi over SSH.
-- Remote `/reload` is unavailable through stock RPC. `/reload-ui` reloads only local presentation; it does not reload remote extensions or settings.
+- Stock RPC has no harness reload command. This client's `/reload` uses the daemon to stop and launch Pi again; it is not an in-process RPC reload. `/reload-ui` changes only local presentation.
 - Custom overlays through `ctx.ui.custom()` and built-in inline image display are not implemented.
 
 ## Process and security boundaries
@@ -316,7 +327,7 @@ local pi-tui client -> SSH stdio -> bridge -> private Unix socket
 - A `0700` state directory and `0600` Unix socket restrict local access. This is not a sandbox: attached clients have the same tool authority as the remote Pi user.
 - `--state-dir` selects a **dedicated, private, user-owned** directory; do not use a project root or home directory. `--remote-bin` overrides the installed remote launcher.
 - The daemon validates protocol/Pi versions on connection and rechecks the remote Pi executable before starting each slot.
-- Only explicit slot kill (`pi-remote kill` or `/quit`) or daemon shutdown closes Pi's stdin. A display parser/reducer failure does not kill a healthy Pi process.
+- Explicit slot kill (`pi-remote kill` or `/quit`), `/reload`, or daemon shutdown closes Pi's stdin. A display parser/reducer failure does not kill a healthy Pi process.
 - Output queues/JSONL frames are bounded at 64 MiB. A slow client is disconnected rather than stalling Pi. Extremely large history records can fail attachment; pagination is not implemented.
 - `slots.json` contains process metadata and session paths, not credentials or a second transcript. `daemon.log` contains stderr, which may include sensitive extension diagnostics. It is private but not rotated automatically yet.
 

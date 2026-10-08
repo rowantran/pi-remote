@@ -18,6 +18,12 @@ if (args.includes('--version')) {
   process.exit(0);
 }
 if (option('--mode') !== 'rpc') throw new Error('Fixture requires --mode rpc');
+if (process.env.PI_FIXTURE_LAUNCH_LOG) appendFileSync(process.env.PI_FIXTURE_LAUNCH_LOG, JSON.stringify({ pid: process.pid, cwd: process.cwd(), args }) + '\n');
+if (process.env.PI_FIXTURE_EXIT_FILE && existsSync(process.env.PI_FIXTURE_EXIT_FILE)) {
+  process.stderr.write('fixture startup failed\n'); process.exit(23);
+}
+const extension = process.env.PI_FIXTURE_EXTENSION_FILE && existsSync(process.env.PI_FIXTURE_EXTENSION_FILE)
+  ? JSON.parse(readFileSync(process.env.PI_FIXTURE_EXTENSION_FILE, 'utf8')) : {};
 if (process.env.PI_FIXTURE_ENV_LOG) appendFileSync(process.env.PI_FIXTURE_ENV_LOG, JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('PI_REMOTE_SESSION')))) + '\n');
 let sessionId = option('--session-id', randomUUID());
 const sessionDir = resolve(option('--session-dir', join(process.cwd(), '.fixture-sessions')));
@@ -54,6 +60,7 @@ function openSession() {
   const records = readFileSync(sessionFile, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
   sessionId = records[0].id;
   entries = records.slice(1);
+  sessionName = entries.filter(entry => entry.type === 'session_info').at(-1)?.name ?? sessionName;
 }
 openSession();
 function newSession(sameFile = false) {
@@ -255,9 +262,9 @@ function handle(command) {
     case 'get_messages': send(response(command, { messages: entries.filter(entry => entry.type === 'message').map(entry => entry.message) })); break;
     case 'get_last_assistant_text': send(response(command, { text: entries.filter(entry => entry.message?.role === 'assistant').at(-1)?.message.content[0]?.text ?? null })); break;
     case 'get_commands': send(response(command, { commands: ['dialog', 'confirm', 'select', 'editor', 'timeout',
-      'fail-next-state', 'seed-live', 'switch-on-snapshot', 'switch-session'].map(name => ({ name, source: 'extension' })) })); break;
+      'fail-next-state', 'seed-live', 'switch-on-snapshot', 'switch-session', ...(extension.commands ?? [])].map(name => ({ name, source: 'extension' })) })); break;
     case 'prompt': prompt(command); break;
-    case 'set_session_name': sessionName = command.name; send(response(command, {})); break;
+    case 'set_session_name': sessionName = command.name; appendEntry({ type: 'session_info', name: command.name }); send(response(command, {})); break;
     case 'switch_session': sessionFile = command.sessionPath; openSession(); streaming = false; send(response(command, { cancelled: false })); break;
     case 'new_session':
       if (args.includes('--fixture-new-session-dialog')) {
@@ -284,9 +291,16 @@ const consume = chunk => {
     catch (error) { send({ type: 'response', command: 'parse', success: false, error: String(error) }); }
   }
 };
-const startDelay = Number(option('--fixture-start-delay', '0'));
+const startDelay = Number(process.env.PI_FIXTURE_START_DELAY_FILE && existsSync(process.env.PI_FIXTURE_START_DELAY_FILE)
+  ? readFileSync(process.env.PI_FIXTURE_START_DELAY_FILE, 'utf8') : option('--fixture-start-delay', '0'));
 if (startDelay > 0) {
   send({ type: 'extension_ui_request', id: 'fixture-startup-status', method: 'setStatus', statusKey: 'startup', statusText: 'Starting fixture' });
   later(startDelay, () => process.stdin.on('data', consume));
 } else process.stdin.on('data', consume);
-process.stdin.on('end', () => { for (const timer of timers) clearTimeout(timer); process.exit(0); });
+for (const record of extension.ui ?? []) send({ type: 'extension_ui_request', ...record });
+process.stdin.on('end', () => {
+  for (const timer of timers) clearTimeout(timer);
+  if (args.includes('--fixture-shutdown-events')) send({ type: 'agent_settled' },
+    { type: 'extension_ui_request', id: 'retired', method: 'setWidget', widgetKey: 'retired', widgetLines: ['stale shutdown widget'] });
+  setTimeout(() => process.exit(0), Number(option('--fixture-stop-delay', '0')));
+});

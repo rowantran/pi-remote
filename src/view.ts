@@ -1,6 +1,6 @@
 import { stripTerminalSequences } from '@earendil-works/pi-tui';
 import type { RecordValue, RemoteEvent, Snapshot } from './protocol.js';
-import { messageKey, putLiveMessage } from './live.js';
+import { emptyLive, messageKey, putLiveMessage } from './live.js';
 export { messageKey } from './live.js';
 
 /** Remote content must not execute terminal control sequences. */
@@ -165,6 +165,10 @@ export class RemoteView {
         break;
       }
       case 'remote_dialog_resolved': s.ui = s.ui.filter(record => record.id !== event.id); break;
+      case 'remote_slot_restart':
+        s.slot = structuredClone(event.slot); s.live = emptyLive(); s.ui = [];
+        delete s.presentation;
+        break;
       case 'remote_slot_exit':
         s.slot.status = 'exited'; s.slot.error = event.error; live.busy = false; live.compacting = false;
         break;

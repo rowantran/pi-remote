@@ -357,6 +357,221 @@ test('detach message includes the slot number when known', () => {
   assert.equal(stoppedMessage('uuid'), 'Stopped slot uuid');
 });
 
+test('remote_slot_restart clears live/UI state but keeps cached history and increasing sequence', () => {
+  const initial = snapshot({ entries: [{ id: 'saved', type: 'message', parentId: null, message: { role: 'user', content: 'saved history', timestamp: 1 } }], leafId: 'saved', seq: 10 });
+  initial.live.busy = true; initial.live.compacting = true;
+  initial.live.messages = [message()]; initial.live.tools.old = { type: 'tool_execution_update' };
+  initial.live.steering = ['steering']; initial.live.followUp = ['follow-up']; initial.live.bash = { old: { output: 'partial' } };
+  initial.ui = [{ id: 'old', method: 'confirm' }]; initial.presentation = { models: [{ id: 'old' }] };
+  const view = new RemoteView(initial);
+  const slot = { ...initial.slot, status: 'starting' as const, pid: undefined };
+  assert.equal(view.apply(event(11, { type: 'remote_slot_restart', slot })), true);
+  assert.deepEqual(view.snapshot.live, snapshot().live); assert.deepEqual(view.snapshot.ui, []);
+  assert.deepEqual(view.snapshot.entries, initial.entries); assert.equal(view.snapshot.leafId, 'saved');
+  assert.deepEqual(view.snapshot.slot, slot); assert.equal(view.snapshot.presentation, undefined);
+  assert.equal(view.apply(event(10, { type: 'agent_start' })), false); assert.equal(view.snapshot.seq, 11);
+});
+
+test('/reload on an idle slot restarts through the daemon and keeps the client attached', async t => {
+  const { ui, terminal, connection, submit } = launch(t);
+  const slot = { ...ui.view.snapshot.slot, status: 'starting' as const };
+  connection.handler = method => {
+    assert.equal(method, 'restart');
+    connection.emit(event(1, { type: 'remote_slot_restart', slot }));
+    return slot;
+  };
+  (ui as any).pendingAttachments = [{ path: 'local.txt', text: 'keep this attachment' }];
+  submit('/reload'); ui.editor.setText('draft typed during reload'); await flush();
+  assert.deepEqual(connection.requests, [{ method: 'restart', params: { slotId: 'slot' } }]);
+  assert.equal(connection.closed, false); assert.equal(terminal.stopped, false); assert.equal(ui.stoppedSlot, false);
+  assert.equal(ui.editor.getExpandedText(), 'draft typed during reload');
+  assert.equal((ui as any).pendingAttachments.length, 1); assert.match(screen(ui), /Starting/);
+  submit('blocked @remote/file.txt'); await flush();
+  assert.equal(connection.requests.length, 1); assert.equal(ui.editor.getExpandedText(), 'blocked @remote/file.txt');
+  assert.equal((ui as any).pendingAttachments.length, 1);
+  const ready = snapshot({ seq: 2, state: { sessionId: 'same-session', model: { id: 'new-model' } } });
+  connection.handler = method => method === 'snapshot' ? ready : {};
+  connection.emit(event(2, { type: 'remote_refresh' })); await flush();
+  assert.equal(ui.view.snapshot.slot.status, 'running'); assert.match(screen(ui), /new-model/);
+  submit('new prompt'); await flush();
+  assert.equal(connection.requests.at(-1)?.params?.command?.message, 'new prompt\n\nAttached local file local.txt:\nkeep this attachment');
+  assert.equal((ui as any).pendingAttachments.length, 0);
+});
+
+test('/reload busy confirmation defaults to Cancel and only confirmation sends force', async t => {
+  for (const kind of ['streaming', 'compacting', 'steering', 'follow-up', 'bash', 'tool', 'inflight']) {
+    await t.test(kind, async t => {
+      const initial = snapshot();
+      if (kind === 'streaming') initial.live.busy = true;
+      if (kind === 'compacting') initial.live.compacting = true;
+      if (kind === 'steering') initial.live.steering = ['queued'];
+      if (kind === 'follow-up') initial.live.followUp = ['queued'];
+      if (kind === 'bash') initial.live.bash = { shell: { output: 'working' } };
+      if (kind === 'tool') initial.live.tools.shell = { type: 'tool_execution_start' };
+      const { ui, terminal, connection, submit } = launch(t, initial);
+      const pending = deferred<RecordValue>();
+      connection.handler = (method, params) => {
+        if (params?.command?.type === 'prompt') return pending.promise;
+        if (method === 'restart') {
+          const slot = { ...initial.slot, status: 'starting' as const };
+          connection.emit(event(1, { type: 'remote_slot_restart', slot })); return slot;
+        }
+        return {};
+      };
+      if (kind === 'inflight') { submit('work accepted but not yet visible'); await flush(); }
+      const before = connection.requests.length;
+      submit('/reload'); await flush(); assert.match(screen(ui), /Reload remote Pi\?/);
+      terminal.input('\r'); await flush();
+      assert.equal(connection.requests.length, before); assert.equal(connection.closed, false);
+      submit('/reload'); await flush(); terminal.input('\x1b[B'); terminal.input('\r'); await flush();
+      assert.deepEqual(connection.requests.at(-1), { method: 'restart', params: { slotId: 'slot', force: true } });
+      assert.equal(connection.closed, false); assert.equal(ui.view.snapshot.slot.status, 'starting');
+      pending.resolve({}); await flush();
+    });
+  }
+});
+
+test('/reload handles a late authoritative busy refusal with explicit confirm or cancel', async t => {
+  for (const confirm of [false, true]) await t.test(confirm ? 'confirm' : 'cancel', async t => {
+    const { ui, terminal, connection, submit } = launch(t);
+    connection.handler = (_method, params) => {
+      if (!params?.force) throw new Error('Remote Pi is busy. Confirm reload to interrupt running work and discard queued prompts.');
+      const slot = { ...ui.view.snapshot.slot, status: 'starting' as const };
+      connection.emit(event(1, { type: 'remote_slot_restart', slot })); return slot;
+    };
+    submit('/reload'); await flush();
+    assert.equal(connection.requests.length, 1); assert.match(screen(ui), /Reload remote Pi\?/);
+    if (confirm) terminal.input('\x1b[B');
+    terminal.input('\r'); await flush();
+    assert.equal(connection.requests.length, confirm ? 2 : 1);
+    if (confirm) assert.deepEqual(connection.requests[1], { method: 'restart', params: { slotId: 'slot', force: true } });
+    assert.equal(connection.closed, false);
+  });
+});
+
+test('/reload disconnect does not replay an uncertain restart on reconnect', async t => {
+  const connection = new ReconnectingFakeConnection();
+  const { ui, submit } = launch(t, snapshot(), connection);
+  const pending = deferred<RecordValue>(); connection.handler = () => pending.promise;
+  submit('/reload'); await flush(); connection.disconnect();
+  pending.reject(new Error('network lost after acceptance')); await flush();
+  connection.handler = () => ({});
+  connection.reconnected?.(snapshot({ seq: 5 })); await flush();
+  assert.deepEqual(connection.requests, [{ method: 'restart', params: { slotId: 'slot' } }]);
+  assert.equal(connection.closed, false); assert.match(screen(ui), /no submitted commands were replayed/);
+});
+
+test('/reload reports failed startup without detaching or claiming success', async t => {
+  const { ui, connection, submit } = launch(t);
+  connection.handler = () => {
+    connection.emit(event(1, { type: 'remote_slot_restart', slot: { ...ui.view.snapshot.slot, status: 'starting' } }));
+    return { ...ui.view.snapshot.slot, status: 'exited', error: 'failed to launch Pi' };
+  };
+  submit('/reload'); await flush();
+  assert.equal(connection.requests.length, 1); assert.equal(connection.closed, false);
+  assert.equal(ui.view.snapshot.slot.status, 'exited'); assert.equal(ui.stoppedSlot, false);
+  assert.match(screen(ui), /reload failed: failed to launch Pi/); assert.doesNotMatch(screen(ui), /Reload accepted/);
+});
+
+test('/reload non-busy rejection is not retried or offered force confirmation', async t => {
+  const { ui, connection, submit } = launch(t);
+  connection.handler = () => { throw new Error('Unsupported method: restart'); };
+  submit('/reload'); await flush();
+  assert.equal(connection.requests.length, 1); assert.equal((ui as any).localDialog, undefined);
+  assert.equal(ui.editor.getExpandedText(), '/reload'); assert.match(screen(ui), /Unsupported method/);
+});
+
+test('restart discards stale refresh and dialog answers and accepts new startup UI identities', async t => {
+  const initial = snapshot({ ui: [
+    { id: 'same-id', method: 'confirm', title: 'Old dialog' },
+    { id: 'reused-editor', method: 'set_editor_text', text: 'old editor text' },
+    { id: 'old-title', method: 'setTitle', title: 'old title' },
+  ] });
+  const { ui, terminal, connection } = launch(t, initial);
+  const answer = deferred<RecordValue>(); const oldRefresh = deferred<Snapshot>();
+  connection.handler = method => method === 'answer' ? answer.promise : oldRefresh.promise;
+  terminal.input('\r'); await flush();
+  connection.emit(event(1, { type: 'remote_refresh' }));
+  ui.editor.setText('preserved draft');
+  connection.emit(event(2, { type: 'remote_slot_restart', slot: { ...initial.slot, status: 'starting' } }));
+  assert.equal((ui as any).activeRemote, undefined); assert.equal((ui as any).answering.size, 0);
+  assert.equal(terminal.title, ''); assert.equal((ui as any).appliedEditorId, undefined);
+  assert.equal(ui.editor.getExpandedText(), 'preserved draft');
+  connection.emit(event(3, { type: 'extension_ui_request', id: 'same-id', method: 'confirm', title: 'New startup dialog' }));
+  answer.resolve({}); oldRefresh.resolve(snapshot({ seq: 1, ui: initial.ui })); await flush();
+  assert.match(screen(ui), /New startup dialog/); assert.equal(ui.view.snapshot.seq, 3);
+  assert.equal(ui.view.snapshot.slot.status, 'starting');
+  connection.handler = () => ({}); terminal.input('\r'); await flush();
+  assert.equal(connection.requests.filter(request => request.method === 'answer').length, 2);
+  assert.equal(ui.view.snapshot.ui.length, 0);
+  connection.emit(event(4, { type: 'extension_ui_request', id: 'reused-editor', method: 'set_editor_text', text: 'new editor text' }));
+  assert.equal(ui.editor.getExpandedText(), 'new editor text');
+});
+
+test('reconnect after a missed restart clears old metadata and remote UI identities', async t => {
+  const initial = snapshot({ ui: [{ id: 'same-id', method: 'confirm', title: 'Old process dialog' }], presentation: { models: [{ id: 'old-model' }] } });
+  initial.slot.pid = 10; initial.live.busy = true;
+  const connection = new ReconnectingFakeConnection();
+  const { ui } = launch(t, initial, connection);
+  ui.editor.setText('draft survives reconnect'); connection.disconnect();
+  const recovered = snapshot({ seq: 5, ui: [{ id: 'same-id', method: 'confirm', title: 'New process dialog' }] });
+  recovered.slot.pid = 20; recovered.live.busy = true;
+  connection.reconnected?.(recovered); await flush();
+  assert.match(screen(ui), /New process dialog/); assert.doesNotMatch(screen(ui), /Old process dialog/);
+  assert.equal(ui.view.snapshot.presentation?.models, undefined);
+  assert.equal(ui.editor.getExpandedText(), 'draft survives reconnect');
+  assert.equal(ui.view.snapshot.live.busy, true); assert.equal((ui as any).pendingBell, false);
+});
+
+test('same-process reconnect retires a pending snapshot and permits later refreshes', async t => {
+  const initial = snapshot(); initial.slot.pid = 10;
+  const connection = new ReconnectingFakeConnection();
+  const { ui } = launch(t, initial, connection);
+  const pending = deferred<Snapshot>(); connection.handler = () => pending.promise;
+  connection.emit(event(1, { type: 'remote_refresh' }));
+  connection.disconnect();
+  const reattached = snapshot({ seq: 5 }); reattached.slot.pid = 10;
+  connection.reconnected?.(reattached);
+  pending.resolve(snapshot({ seq: 1 })); await flush();
+  const fresh = snapshot({ seq: 6, state: { model: { id: 'fresh-model' } } }); fresh.slot.pid = 10;
+  connection.handler = () => fresh;
+  connection.emit(event(6, { type: 'remote_refresh' })); await flush();
+  assert.equal(connection.requests.filter(request => request.method === 'snapshot').length, 2);
+  assert.equal(ui.view.snapshot.state.model.id, 'fresh-model'); assert.equal(ui.view.snapshot.seq, 6);
+});
+
+test('a stale refresh cannot clear or overwrite a new process refresh', async t => {
+  const { ui, connection } = launch(t);
+  const oldRefresh = deferred<Snapshot>(), newRefresh = deferred<Snapshot>();
+  connection.handler = () => oldRefresh.promise;
+  connection.emit(event(1, { type: 'remote_refresh' }));
+  connection.emit(event(2, { type: 'remote_slot_restart', slot: { ...ui.view.snapshot.slot, status: 'starting' } }));
+  connection.handler = () => newRefresh.promise;
+  connection.emit(event(3, { type: 'remote_refresh' }));
+  oldRefresh.resolve(snapshot({ seq: 1 })); await flush();
+  assert.equal((ui as any).refreshing, true); assert.equal(ui.view.snapshot.slot.status, 'starting');
+  connection.emit(event(4, { type: 'agent_start' }));
+  newRefresh.resolve(snapshot({ seq: 3, state: { model: { id: 'new-process' } } })); await flush();
+  assert.equal(ui.view.snapshot.seq, 4); assert.equal(ui.view.snapshot.live.busy, true);
+  assert.equal(ui.view.snapshot.state.model.id, 'new-process'); assert.equal((ui as any).refreshing, false);
+  assert.equal(connection.requests.filter(request => request.method === 'snapshot').length, 2);
+});
+
+test('restart cancels local pickers and discards model reads from the old process', async t => {
+  for (const awaitingRead of [false, true]) await t.test(awaitingRead ? 'read pending' : 'picker open', async t => {
+    const { ui, connection, submit } = launch(t);
+    const pending = deferred<RecordValue>();
+    const models = { models: [{ provider: 'old', id: 'old-model' }] };
+    connection.handler = () => awaitingRead ? pending.promise : models;
+    submit('/model'); await flush();
+    if (!awaitingRead) assert.match(screen(ui), /Choose model/);
+    connection.emit(event(1, { type: 'remote_slot_restart', slot: { ...ui.view.snapshot.slot, status: 'starting' } }));
+    pending.resolve(models); await flush();
+    assert.equal((ui as any).localDialog, undefined); assert.equal(connection.requests.length, 1);
+    assert.doesNotMatch(screen(ui), /Choose model/);
+  });
+});
+
 test('/quit on an idle slot kills it through the daemon, not Pi, then closes the client', async t => {
   const { ui, terminal, connection, submit, finished } = launch(t);
   submit('/quit'); await finished;
