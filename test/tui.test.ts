@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Terminal } from '@earendil-works/pi-tui';
-import { stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
+import { Loader, stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
 import type { RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../src/protocol.js';
 import { RemoteTui, type TuiOptions } from '../src/tui.js';
 import { detachMessage, stoppedMessage } from '../src/remote-session.js';
@@ -968,6 +968,69 @@ test('fork picker remains visible on a small screen with widgets above and below
   const screen = ui.tui.getScreenLines().map(stripTerminalSequences);
   assert.ok(screen.some(row => row.startsWith('› ') && row.includes('user: original prompt')), screen.join('\n'));
   assert.match(screen.join('\n'), /below 3/);
+});
+
+test('tree commands and double Esc show loading immediately, then replace it with the picker', async t => {
+  for (const command of ['/tree', '/fork', 'shortcut']) {
+    const { ui, terminal, connection, submit } = launch(t);
+    const pending = deferred<RecordValue>(); connection.handler = () => pending.promise;
+    if (command === 'shortcut') { terminal.input('\x1b'); terminal.input('\x1b'); }
+    else submit(command);
+    assert.match(stripTerminalSequences(ui.tui.getScreenLines().join('\n')), /Loading session tree/);
+    assert.match(screen(ui), /Esc cancel/);
+    pending.resolve(forkTree()); await flush();
+    assert.match(screen(ui), /user: original prompt/);
+    assert.doesNotMatch(screen(ui), /Loading session tree/);
+    terminal.input('\x1b'); await flush(); ui.detach();
+  }
+});
+
+test('Esc cancels tree loading and ignores late results or errors without blocking new commands', async t => {
+  for (const late of ['result', 'error'] as const) {
+    const { ui, terminal, connection, submit } = launch(t);
+    const pending = deferred<RecordValue>(); connection.handler = () => pending.promise;
+    submit('/tree'); terminal.input('\x1b'); await flush();
+    assert.doesNotMatch(screen(ui), /Loading session tree|Session Fork/);
+    assert.equal(ui.editor.getExpandedText(), '');
+    connection.handler = () => forkTree(); submit('/fork'); await flush();
+    assert.match(screen(ui), /Session Fork/);
+    if (late === 'result') pending.resolve(forkTree()); else pending.reject(new Error('late tree failure'));
+    await flush();
+    assert.match(screen(ui), /Session Fork/); assert.doesNotMatch(screen(ui), /late tree failure|Request failed/);
+    terminal.input('\x1b'); await flush();
+    assert.deepEqual(connection.requests.map(request => request.params?.command), [{ type: 'get_tree' }, { type: 'get_tree' }]);
+    ui.detach();
+  }
+});
+
+test('tree loading stops its animation on success, cancel, error, disconnect and detach', async t => {
+  const stop = t.mock.method(Loader.prototype, 'stop');
+  for (const outcome of ['success', 'cancel', 'error', 'disconnect', 'detach'] as const) {
+    const { ui, terminal, connection, submit } = launch(t);
+    const pending = deferred<RecordValue>(); connection.handler = () => pending.promise;
+    submit('/tree');
+    const before = stop.mock.callCount(); // Loader construction restarts its animation.
+    if (outcome === 'success') pending.resolve(forkTree());
+    else if (outcome === 'cancel') terminal.input('\x1b');
+    else if (outcome === 'error') pending.reject(new Error('unavailable'));
+    else if (outcome === 'disconnect') connection.disconnect();
+    else ui.detach();
+    await flush(); assert.equal(stop.mock.callCount(), before + 1, outcome);
+    if (outcome !== 'detach') assert.doesNotMatch(screen(ui), /Loading session tree/);
+    pending.resolve(forkTree()); await flush(); ui.detach();
+    assert.equal(stop.mock.callCount(), before + 1, `${outcome}: late result or detach must not restart/stop another loader`);
+  }
+});
+
+test('failed tree reads remove the loader and allow retry', async t => {
+  const { ui, connection, submit, terminal } = launch(t);
+  const pending = deferred<RecordValue>(); connection.handler = () => pending.promise;
+  submit('/tree'); pending.reject(new Error('tree unavailable')); await flush();
+  assert.match(screen(ui), /tree unavailable/); assert.doesNotMatch(screen(ui), /Loading session tree/);
+  assert.equal(ui.editor.getExpandedText(), '/tree');
+  serveFork(connection); submit('/tree'); await flush();
+  assert.match(screen(ui), /Session Fork/);
+  terminal.input('\x1b'); await flush();
 });
 
 test('/tree uses the fork fallback and Ctrl+D still detaches', async t => {

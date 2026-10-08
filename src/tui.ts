@@ -17,7 +17,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import {
   type Component, Container, Editor, type Focusable, fuzzyFilter, getKeybindings, Input, isKeyRelease, Key,
-  matchesKey, ProcessTerminal, ScrollView, SelectList, type SelectItem, setKeybindings, Spacer,
+  Loader, matchesKey, ProcessTerminal, ScrollView, SelectList, type SelectItem, setKeybindings, Spacer,
   Text, type Terminal, type TerminalColors, type TerminalColorScheme, TruncatedText, TuiAltScreen, truncateToWidth, VStack,
 } from '@earendil-works/pi-tui';
 import {
@@ -869,6 +869,26 @@ export class RemoteTui {
     } finally { this.commandPending--; if (!this.detached) this.syncBottom(); }
   }
 
+  private async loadForkTree(): Promise<{ tree: SessionTreeNode[]; leafId: string | null } | undefined> {
+    const loader = new Loader(this.tui, text => this.localTheme.fg('accent', text),
+      text => this.localTheme.fg('muted', text), 'Loading session tree…');
+    let cancel!: () => void;
+    const cancelled = new Promise<undefined>(resolve => { cancel = () => resolve(undefined); });
+    const dialog = { component: new Dialog(loader, 'Session Fork', 'Esc cancel · Ctrl+D detach'), cancel };
+    try {
+      this.localDialog = dialog; this.syncBottom();
+      // Paint before starting the read, including when decoding/constructing a large tree is slow.
+      this.tui.renderNow();
+      return await Promise.race([
+        this.rpc<{ tree: SessionTreeNode[]; leafId: string | null }>({ type: 'get_tree' }), cancelled,
+      ]);
+    } finally {
+      loader.stop();
+      if (this.localDialog === dialog) this.localDialog = undefined;
+      this.syncBottom();
+    }
+  }
+
   private chooseFork(tree: SessionTreeNode[], leafId: string | null): Promise<string | undefined> {
     const pending = [...tree];
     let hasUser = false;
@@ -1000,8 +1020,8 @@ export class RemoteTui {
       case '/fork': {
         const generation = this.generation;
         const sessionId = this.view.snapshot.state.sessionId;
-        const data = await this.rpc<{ tree: SessionTreeNode[]; leafId: string | null }>({ type: 'get_tree' });
-        if (this.detached || !this.connected || generation !== this.generation || sessionId !== this.view.snapshot.state.sessionId) return true;
+        const data = await this.loadForkTree();
+        if (!data || this.detached || !this.connected || generation !== this.generation || sessionId !== this.view.snapshot.state.sessionId) return true;
         const entryId = await this.chooseFork(data.tree ?? [], data.leafId ?? null);
         if (entryId !== undefined && !this.detached && this.connected && generation === this.generation) {
           if (sessionId !== this.view.snapshot.state.sessionId) { this.notify('Session changed while the picker was open. Open /fork again; nothing was sent.'); return true; }
