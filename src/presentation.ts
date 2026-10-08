@@ -13,6 +13,7 @@ import { type Component, type TUI, Editor, matchesKey, Text } from '@earendil-wo
 import { WidthCache } from './width-cache.js';
 import type { RecordValue, Snapshot } from './protocol.js';
 import { ReadonlyHistory, readonlyCopy } from './presentation-history.js';
+import { safeText } from './view.js';
 
 /**
  * Local presentation compatibility, NOT a JavaScript sandbox. Only explicitly trusted files may
@@ -51,6 +52,16 @@ type EditorFactory = NonNullable<Parameters<ExtensionUIContext['setEditorCompone
 type RenderContext = Parameters<NonNullable<ToolDefinition<any, any>['renderCall']>>[2];
 export type PresentationToolContext = Partial<RenderContext> & { toolCallId: string };
 export interface PresentationWidget { component: DisposableComponent; placement: 'aboveEditor' | 'belowEditor' }
+/** Sanitized, immutable data from a remote string-array widget, not a local component. */
+export interface RemotePresentationWidget {
+  readonly key: string;
+  readonly lines: readonly string[];
+  readonly placement: 'aboveEditor' | 'belowEditor';
+}
+/** pi-remote-only UI additions; these are not methods on stock Pi's ExtensionUIContext. */
+export interface PresentationUIContext extends ExtensionUIContext {
+  getRemoteWidget(key: string): RemotePresentationWidget | undefined;
+}
 export type PresentationChange = 'layout' | 'transcript';
 export interface PresentationHostOptions {
   snapshot: () => Snapshot;
@@ -120,6 +131,7 @@ export class PresentationHost {
   private readonly reported = new Set<string>();
   private readonly disabled = new WeakSet<Function>();
   private readonly guardedComponents = new WeakMap<object, DisposableComponent>();
+  private readonly failedComponents = new WeakSet<object>();
   private readonly originalComponents = new WeakMap<object, DisposableComponent>();
   private _rendererRevision = 0;
   /** Changes when transcript registrations change; cached Pi components must be recreated. */
@@ -304,6 +316,20 @@ export class PresentationHost {
         this.header = factory ? this.component('header', this.call('header factory', factory as any, this.options.tui, this.theme)) : undefined;
         this.changed('transcript');
       },
+      getRemoteWidget: (key: string): RemotePresentationWidget | undefined => {
+        // Read remote state even when a local widget overrides this key. A clear event can
+        // remain in the client's UI list until its next full snapshot; treat it as absent.
+        const record = this.snapshot.ui.find(item => item.method === 'setWidget' && item.widgetKey === key);
+        if (!Array.isArray(record?.widgetLines) || record.widgetLines.length === 0
+          || record.widgetLines.some((line: unknown) => typeof line !== 'string')) return undefined;
+        // A component's render() must return one terminal row per string. Text widgets
+        // accept embedded newlines/tabs, but passing those straight to a custom component
+        // can bypass width checks and move the terminal cursor unexpectedly.
+        const lines = record.widgetLines.flatMap((line: string) =>
+          safeText(line).replace(/\t/g, ' ').split(/[\n\u2028\u2029]/));
+        return readonlyCopy({ key, lines,
+          placement: record.widgetPlacement === 'belowEditor' ? 'belowEditor' : 'aboveEditor' });
+      },
       setWidget: (key: string, content?: string[] | string | Function, options?: RecordValue) => {
         this.widgets.get(key)?.component.dispose?.(); this.widgets.delete(key);
         if (content !== undefined) {
@@ -383,7 +409,7 @@ export class PresentationHost {
   private component(key: string, value?: DisposableComponent): DisposableComponent | undefined {
     if (!value || typeof value.render !== 'function') return undefined;
     const existing = this.guardedComponents.get(value);
-    if (existing) return existing;
+    if (existing) return this.failedComponents.has(existing) ? undefined : existing;
     let failed = false;
     const widthCache = new WidthCache();
     const guarded = new Proxy(value, { get: (target, property) => {
@@ -395,7 +421,20 @@ export class PresentationHost {
           const result = member.apply(target, args);
           if (property === 'dispose') widthCache.clear();
           return property === 'render' ? widthCache.clamp(result, args[0]) : result;
-        } catch (error) { failed = true; widthCache.clear(); this.report(key, error); return property === 'render' ? [] : undefined; }
+        } catch (error) {
+          failed = true; this.failedComponents.add(guarded); widthCache.clear(); this.report(key, error);
+          // Remove only widgets using this failed component, including shared/cached
+          // components. A replacement under the same key must not be removed instead.
+          let removed = false;
+          for (const [widgetKey, widget] of this.widgets) if (widget.component === guarded) {
+            this.widgets.delete(widgetKey); removed = true;
+          }
+          if (removed) {
+            if (property !== 'dispose') guarded.dispose?.();
+            this.changed(); // The next layout shows any matching remote plain-text copy.
+          }
+          return property === 'render' ? [] : undefined;
+        }
       };
     }, set: (target, property, value) => Reflect.set(target, property, value, target) });
     this.guardedComponents.set(value, guarded); this.guardedComponents.set(guarded, guarded);

@@ -74,6 +74,10 @@ async function withRepo(run: (root: string) => Promise<void>, timingSource = wor
     'compact-tools.ts': 'export default function() {}\nexport function withCompactToolRendering(pi) { return pi; }',
     'codemode/render.ts': 'export function compactCodemodeTool() { return {}; }',
     'background/render.ts': 'export function renderBackgroundMessage() {}',
+    'background/widget.ts': `
+      export const BACKGROUND_WIDGET_ID = 'background-running';
+      export function renderBackgroundWidgetLines(lines) { return lines; }
+    `,
     'worked-for.ts': timingSource,
     'background.ts': 'throw new Error("Worker factory must never load");',
     'codemode.ts': 'throw new Error("Execution factory must never load");',
@@ -163,7 +167,7 @@ test('Rowan adapter loads the full selected factory through a narrow facade and 
   await withRepo(async () => {
     const captured = captureAPI();
     await rowanUI(captured.api);
-    assert.deepEqual([...captured.hooks.keys()], ['agent_start', 'agent_settled', 'session_shutdown']);
+    assert.deepEqual([...captured.hooks.keys()], ['agent_start', 'agent_settled', 'session_shutdown', 'session_start']);
     assert.equal(captured.markdown[0]('fixture legacy timing', markdownContext), '');
     assert.equal(captured.markdown[0]('fixture legacy timing', { ...markdownContext, messageType: 'user' }), 'fixture legacy timing');
     let working: string | undefined;

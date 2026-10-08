@@ -47,6 +47,12 @@ async function withFakeRendererRepo(run: () => Promise<void>) {
     // Any accidental worker or executor import must fail the adapter load.
     'background.ts': 'throw new Error("BACKGROUND WORKER FACTORY MUST NOT LOAD");',
     'background/executors.ts': 'throw new Error("BACKGROUND EXECUTORS MUST NOT LOAD");',
+    'background/widget.ts': `
+      export const BACKGROUND_WIDGET_ID = 'background-running';
+      export function renderBackgroundWidgetLines(lines, width, theme) {
+        return [theme.fg('accent', 'shared widget:' + lines[0]), ...lines.slice(1)];
+      }
+    `,
     'background/render.ts': `
       export function renderBackgroundMessage(message, { expanded, outputPad }, theme) {
         const { id, state } = message.details;
@@ -110,8 +116,10 @@ const plain = (lines: string[]) => stripTerminalSequences(lines.join('\n'));
 test('Rowan adapter registers the named background renderer without loading workers or executors', async () => {
   await withFakeRendererRepo(async () => {
     const messages = new Map<string, MessageRenderer>();
+    const hooks = new Map<string, Function>();
     const pi = {
       registerMessageRenderer: (name: string, renderer: MessageRenderer) => messages.set(name, renderer),
+      on(name: string, handler: Function) { hooks.set(name, handler); },
       registerToolRenderer() {}, registerEntryRenderer() {}, registerMarkdownTransformer() {},
       registerTool() { assert.fail('The presentation adapter must not register an executable tool'); },
     } as unknown as ExtensionAPI;
@@ -119,6 +127,9 @@ test('Rowan adapter registers the named background renderer without loading work
     assert.deepEqual([...messages.keys()], ['background']);
     assert.equal(typeof messages.get('background'), 'function');
     assert.equal(messages.get('background')!.name, 'renderBackgroundMessage');
+    hooks.get('session_start')!({}, { ui: {
+      setWidget() { assert.fail('Stock Pi has no remote-widget getter; leave its native widgets alone'); },
+    } });
   });
 });
 
@@ -151,6 +162,62 @@ test('Rowan adapter renders live and persisted background notices compactly with
           }
         }
       }
+      assert.deepEqual(notices, []);
+    } finally { transcript.reset(); await host.shutdown(); }
+  });
+});
+
+test('Rowan active-task widget reads remote updates and clears without loading workers', async () => {
+  await withFakeRendererRepo(async () => {
+    const { view, host, transcript, notices } = setup();
+    view.snapshot.ui = [{ method: 'setWidget', widgetKey: 'background-running',
+      widgetLines: ['Background: 2 running', '  (1s) Task: test 世界'], widgetPlacement: 'belowEditor' }];
+    try {
+      await host.load([adapter]); await host.start();
+      const widget = host.widgets.get('background-running')!;
+      assert.equal(widget.placement, 'belowEditor');
+      assert.match(plain(widget.component.render(80)), /shared widget:Background: 2 running/);
+      assert.match(widget.component.render(80)[0], /\x1b\[/, 'Colours are created by the local theme');
+      view.apply({ type: 'event', slotId: 'slot', seq: 2, event: {
+        type: 'extension_ui_request', method: 'setWidget', widgetKey: 'background-running',
+        widgetLines: ['Background: 1 running', '  (2s) Agent: review'], widgetPlacement: 'belowEditor',
+      } });
+      host.update(view.snapshot);
+      assert.match(plain(widget.component.render(80)), /shared widget:Background: 1 running/);
+      assert.doesNotMatch(plain(widget.component.render(80)), /test 世界/);
+      for (const width of [0, 1, 2, 8, 40, 80]) assert.ok(widget.component.render(width).every(line => visibleWidth(line) <= width));
+      view.apply({ type: 'event', slotId: 'slot', seq: 3, event: {
+        type: 'extension_ui_request', method: 'setWidget', widgetKey: 'background-running',
+      } });
+      host.update(view.snapshot);
+      assert.deepEqual(widget.component.render(80), []);
+      assert.deepEqual(notices, []);
+    } finally { transcript.reset(); await host.shutdown(); }
+  });
+});
+
+test('explicit renderer repository renders real active-task box using the local theme', {
+  skip: !integrationRepo,
+}, async t => {
+  await withRendererRepo(integrationRepo!, async () => {
+    const { view, host, transcript, notices } = setup();
+    view.snapshot.ui = [{ method: 'setWidget', widgetKey: 'background-running', widgetPlacement: 'belowEditor',
+      widgetLines: ['Background: 3 running', '  (2m14s) Agent: review auth refactor',
+        '  (48s) Task: npm test', '  (5s) Task: tsc --watch'] }];
+    try {
+      await host.load([adapter]); await host.start();
+      const widget = host.widgets.get('background-running')!;
+      assert.ok(widget, notices.join('\n'));
+      const lines = widget.component.render(80);
+      assert.equal(lines.length, 5);
+      assert.match(plain(lines), /╭─ Background .* 3 running ─╮/);
+      assert.match(lines[0], /\x1b\[/);
+      // Duration and label each use the client's theme.
+      assert.ok(lines[1].includes(host.theme.fg('dim', '(2m14s)')));
+      assert.ok(lines[1].includes(host.theme.fg('muted', 'Agent:')));
+      assert.doesNotMatch(plain(lines), /Background: 3 running/);
+      for (const width of [0, 1, 2, 8, 40, 80]) assert.ok(widget.component.render(width).every(line => visibleWidth(line) <= width));
+      t.diagnostic(`Active-task preview:\n${plain(lines)}`);
       assert.deepEqual(notices, []);
     } finally { transcript.reset(); await host.shutdown(); }
   });
