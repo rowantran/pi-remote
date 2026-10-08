@@ -97,10 +97,15 @@ async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {
   const versionFile = join(dir, 'fixture-version');
   const versionLog = join(dir, 'fixture-version-log');
   const envLog = join(dir, 'fixture-env-log');
+  const launchLog = join(dir, 'fixture-launch-log');
+  const extensionFile = join(dir, 'fixture-extension.json');
+  const startDelayFile = join(dir, 'fixture-start-delay');
+  const exitFile = join(dir, 'fixture-exit');
   await writeFile(versionFile, hello.piVersion + '\n');
   const supervisor = new Supervisor({ stateDir: dir, executable: process.execPath,
     prefixArgs: [fixture], skipVersionCheck: options.skipVersionCheck ?? true,
-    env: { PI_OFFLINE: '1', PI_FIXTURE_VERSION_FILE: versionFile, PI_FIXTURE_VERSION_LOG: versionLog, PI_FIXTURE_ENV_LOG: envLog } });
+    env: { PI_OFFLINE: '1', PI_FIXTURE_VERSION_FILE: versionFile, PI_FIXTURE_VERSION_LOG: versionLog, PI_FIXTURE_ENV_LOG: envLog,
+      PI_FIXTURE_LAUNCH_LOG: launchLog, PI_FIXTURE_EXTENSION_FILE: extensionFile, PI_FIXTURE_START_DELAY_FILE: startDelayFile, PI_FIXTURE_EXIT_FILE: exitFile } });
   const peers: Peer[] = [];
   t.after(async () => {
     await Promise.all(peers.map(peer => peer.close()));
@@ -114,7 +119,7 @@ async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {
     if (verify) {
       const response = await peer.request('hello', hello);
       assert.deepEqual({protocol: response.protocol, piVersion: response.piVersion, pid: response.pid}, { ...hello, pid: process.pid });
-      assert.deepEqual(response.capabilities, ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata']);
+      assert.deepEqual(response.capabilities, ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart']);
     }
     return peer;
   };
@@ -125,7 +130,7 @@ async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {
     const snapshot = await peer.request<Snapshot>('attach', { slotId: info.id });
     return { info, snapshot };
   };
-  return { dir, supervisor, peer, connect, create, slot, versionFile, versionLog, envLog };
+  return { dir, supervisor, peer, connect, create, slot, versionFile, versionLog, envLog, launchLog, extensionFile, startDelayFile, exitFile };
 }
 const textOf = (message: RecordValue) => message.content.filter((block: RecordValue) => block.type === 'text').map((block: RecordValue) => block.text).join('');
 
@@ -671,4 +676,307 @@ test('an explicit kill records a clean stop reason without startup stderr', { ti
   const [stopped] = await peer.request<SlotInfo[]>('list');
   assert.equal(stopped.status, 'exited');
   assert.equal(stopped.error, 'Stopped by request (code=0, signal=null).');
+});
+
+test('reload replaces Pi in the same slot, restores disk history, and reloads extension resources for every client', { timeout: 10_000 }, async t => {
+  const { dir, peer, connect, slot, launchLog, envLog, extensionFile } = await setup(t);
+  const ui = (version: string) => ({ commands: [`command-${version}`], ui: [
+    { id: version, method: 'setWidget', widgetKey: version, widgetLines: [version] },
+    { id: `status-${version}`, method: 'setStatus', statusKey: version, statusText: version },
+  ] });
+  await writeFile(extensionFile, JSON.stringify(ui('old')));
+  const args = ['--session-dir', join(dir, 'history'), '--fixture-shutdown-events'];
+  const { info, snapshot: initial } = await slot(args);
+  await peer.request('rpc', { slotId: info.id, command: { type: 'prompt', message: 'saved history' } });
+  await peer.event('agent_settled');
+  await peer.request('rpc', { slotId: info.id, command: { type: 'set_session_name', name: 'Retained name' } });
+  const before = await peer.request<Snapshot>('snapshot', { slotId: info.id });
+  const other = await connect();
+  await other.request('attach', { slotId: info.id });
+  const view = new RemoteView(before);
+  const from = peer.records.length;
+  await writeFile(extensionFile, JSON.stringify(ui('new')));
+  const result = await peer.request<SlotInfo>('restart', { slotId: info.id });
+  assert.equal(result.id, info.id); assert.equal(result.number, info.number);
+  assert.equal(result.createdAt, info.createdAt); assert.equal(result.cwd, info.cwd);
+  assert.equal(result.sessionFile, info.sessionFile); assert.notEqual(result.pid, info.pid);
+  const restart = await peer.event('remote_slot_restart', from);
+  assert.equal(restart.event.slot.status, 'starting');
+  view.apply(restart);
+  assert.deepEqual(view.snapshot.ui, []);
+  assert.deepEqual(view.snapshot.live, emptyLive());
+  assert.deepEqual(view.snapshot.entries, before.entries, 'Transition must retain saved history');
+  await other.event('remote_slot_restart');
+  const after = await other.request<Snapshot>('snapshot', { slotId: info.id });
+  assert.equal(after.slot.status, 'running');
+  assert.equal(after.state.sessionId, initial.state.sessionId);
+  assert.equal(after.state.sessionName, 'Retained name');
+  assert.deepEqual(after.entries, before.entries);
+  assert.deepEqual(after.live, emptyLive());
+  assert.deepEqual(after.ui.map(record => record.widgetKey ?? record.statusKey), ['new', 'new']);
+  const commands = await peer.request('rpc', { slotId: info.id, command: { type: 'get_commands' } });
+  assert.ok(commands.commands.some((command: RecordValue) => command.name === 'command-new'));
+  assert.ok(!commands.commands.some((command: RecordValue) => command.name === 'command-old'));
+  const events = peer.records.slice(from).filter((record): record is RemoteEvent => record.type === 'event');
+  assert.ok(events.every((record, index) => !index || record.seq > events[index - 1].seq));
+  assert.ok(!events.some(record => record.event.type === 'remote_slot_exit' || record.event.widgetKey === 'retired'));
+  const launches = (await readFile(launchLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(launches.length, 2);
+  assert.deepEqual(launches[1].args, ['--mode', 'rpc', ...args, '--session', info.sessionFile]);
+  assert.equal(launches[1].cwd, dir);
+  const environments = (await readFile(envLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(environments[0], environments[1]);
+  const stored = JSON.parse(await readFile(join(dir, 'slots.json'), 'utf8'));
+  assert.equal(stored.length, 1); assert.equal(stored[0].sessionFile, info.sessionFile);
+  await assert.rejects(peer.request('create', { cwd: dir, sessionPath: info.sessionFile }), /already open/);
+});
+
+test('reload requires attachment, validates force, and refuses busy work unless explicitly confirmed', { timeout: 10_000 }, async t => {
+  const { peer, connect, slot } = await setup(t);
+  const { info } = await slot();
+  const unattached = await connect();
+  await assert.rejects(unattached.request('restart', { slotId: info.id, force: true }), /Attach/);
+  for (const force of ['true', 1, null]) await assert.rejects(peer.request('restart', { slotId: info.id, force }), /force must be a boolean/);
+  await peer.request('rpc', { slotId: info.id, command: { type: 'prompt', message: '/seed-live' } });
+  const before = await peer.request<Snapshot>('snapshot', { slotId: info.id });
+  await assert.rejects(peer.request('restart', { slotId: info.id }), /Remote Pi is busy/);
+  assert.equal((await peer.request<SlotInfo[]>('list'))[0].pid, info.pid);
+  const unchanged = await peer.request<Snapshot>('snapshot', { slotId: info.id });
+  assert.deepEqual(unchanged.live, before.live);
+  const result = await peer.request<SlotInfo>('restart', { slotId: info.id, force: true });
+  assert.notEqual(result.pid, info.pid);
+  const after = await peer.request<Snapshot>('snapshot', { slotId: info.id });
+  assert.deepEqual(after.live, emptyLive());
+  assert.deepEqual(after.ui, []);
+});
+
+test('reload checks pending shell and extension commands even when get_state reports idle', { timeout: 10_000 }, async t => {
+  const { peer, slot } = await setup(t);
+  const { info } = await slot();
+  const shell = peer.request('rpc', { slotId: info.id, command: { type: 'bash', command: 'pending shell' } });
+  await assert.rejects(peer.request('restart', { slotId: info.id }), /Remote Pi is busy/);
+  assert.equal((await shell).output, 'pending shell');
+  const pending = peer.request('rpc', { slotId: info.id, command: { type: 'prompt', message: '/dialog' } })
+    .then(() => 'completed', () => 'interrupted');
+  const dialog = (await peer.event('extension_ui_request')).event;
+  await assert.rejects(peer.request('restart', { slotId: info.id }), /Remote Pi is busy/);
+  await peer.request('restart', { slotId: info.id, force: true });
+  assert.equal(await pending, 'interrupted');
+  const after = await peer.request<Snapshot>('snapshot', { slotId: info.id });
+  assert.deepEqual(after.ui, []);
+  await assert.rejects(peer.request('answer', { slotId: info.id, response: { id: dialog.id, value: 'late' } }), /already answered or expired/);
+});
+
+test('reload serializes against other clients and session changes without dropping the transport', { timeout: 10_000 }, async t => {
+  const { peer, connect, slot } = await setup(t);
+  const { info } = await slot(['--fixture-new-session-dialog', '--fixture-stop-delay', '150']);
+  const other = await connect(); await other.request('attach', { slotId: info.id });
+  const transition = peer.request('rpc', { slotId: info.id, command: { type: 'new_session' } });
+  const dialog = (await peer.event('extension_ui_request')).event;
+  await assert.rejects(other.request('restart', { slotId: info.id, force: true }), /session change is already in progress/);
+  await peer.request('answer', { slotId: info.id, response: { id: dialog.id, confirmed: false } });
+  await transition;
+  const from = peer.records.length;
+  const restart = peer.request('restart', { slotId: info.id });
+  await peer.event('remote_slot_restart', from);
+  await assert.rejects(other.request('restart', { slotId: info.id }), /already starting or reloading/);
+  await assert.rejects(other.request('rpc', { slotId: info.id, command: { type: 'prompt', message: 'do not send' } }), /reloading/);
+  await assert.rejects(other.request('kill', { slotId: info.id }), /reloading/);
+  const partial = await other.request<Snapshot>('snapshot', { slotId: info.id });
+  assert.equal(partial.slot.status, 'starting'); assert.equal(partial.historyComplete, false);
+  const result = await restart;
+  assert.equal(result.status, 'running');
+  assert.equal((await other.request<SlotInfo[]>('list')).length, 1);
+});
+
+test('version or session inspection failure refuses reload before stopping Pi', { timeout: 10_000 }, async t => {
+  const { peer, slot, versionFile, versionLog } = await setup(t, { skipVersionCheck: false });
+  const { info } = await slot();
+  await writeFile(versionFile, 'incompatible\n');
+  await assert.rejects(peer.request('restart', { slotId: info.id, force: true }), /does not match required/);
+  assert.equal((await peer.request<SlotInfo[]>('list'))[0].pid, info.pid);
+  await writeFile(versionFile, hello.piVersion);
+  await peer.request('rpc', { slotId: info.id, command: { type: 'prompt', message: '/fail-next-entries' } });
+  await assert.rejects(peer.request('restart', { slotId: info.id }), /get_entries failure/);
+  assert.equal((await peer.request<SlotInfo[]>('list'))[0].pid, info.pid);
+  await peer.request('restart', { slotId: info.id });
+  assert.equal((await readFile(versionLog, 'utf8')).trim().split('\n').length, 5);
+});
+
+test('reload resumes the current session after /new, not the original launch session', { timeout: 10_000 }, async t => {
+  const { peer, slot } = await setup(t);
+  const { info } = await slot();
+  await peer.request('rpc', { slotId: info.id, command: { type: 'new_session' } });
+  const before = await peer.request<Snapshot>('snapshot', { slotId: info.id });
+  assert.notEqual(before.state.sessionFile, info.sessionFile);
+  await peer.request('restart', { slotId: info.id });
+  const after = await peer.request<Snapshot>('snapshot', { slotId: info.id });
+  assert.equal(after.state.sessionFile, before.state.sessionFile);
+  assert.equal(after.state.sessionId, before.state.sessionId);
+});
+
+test('disconnect during reload does not cancel it or require a new slot', { timeout: 10_000 }, async t => {
+  const { peer, connect, slot, launchLog } = await setup(t);
+  const { info } = await slot(['--fixture-stop-delay', '150']);
+  const from = peer.records.length;
+  const restart = peer.request('restart', { slotId: info.id }).then(() => 'completed', () => 'disconnected');
+  await peer.event('remote_slot_restart', from);
+  await peer.close(); assert.equal(await restart, 'disconnected');
+  const other = await connect();
+  await other.request('attach', { slotId: info.id });
+  await other.event('remote_state');
+  const after = await other.request<Snapshot>('snapshot', { slotId: info.id });
+  assert.equal(after.slot.id, info.id); assert.notEqual(after.slot.pid, info.pid);
+  assert.equal(after.slot.status, 'running');
+  assert.equal((await readFile(launchLog, 'utf8')).trim().split('\n').length, 2);
+});
+
+test('slow replacement startup remains attachable and rejects mutations until ready', { timeout: 10_000 }, async t => {
+  const { peer, connect, slot, startDelayFile } = await setup(t);
+  const { info } = await slot();
+  await writeFile(startDelayFile, '3000');
+  const result = await peer.request<SlotInfo>('restart', { slotId: info.id });
+  assert.equal(result.status, 'starting');
+  const other = await connect();
+  const attached = await other.request<Snapshot>('attach', { slotId: info.id });
+  assert.equal(attached.slot.status, 'starting');
+  await assert.rejects(other.request('rpc', { slotId: info.id, command: { type: 'prompt', message: 'not ready' } }), /starting/);
+  await other.event('remote_state');
+  assert.equal((await other.request<Snapshot>('snapshot', { slotId: info.id })).slot.status, 'running');
+});
+
+test('other clients can refresh commands from ready Pi before the restart request returns', { timeout: 10_000 }, async t => {
+  const { supervisor, peer, connect, slot } = await setup(t);
+  const { info } = await slot();
+  const other = await connect(); await other.request('attach', { slotId: info.id });
+  let seen!: () => void, release!: () => void;
+  const reached = new Promise<void>(resolve => { seen = resolve; });
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  const original = (supervisor as any).startupGrace.bind(supervisor);
+  t.mock.method(supervisor as any, 'startupGrace', async (slot: any) => { await original(slot); seen(); await hold; });
+  const restart = peer.request('restart', { slotId: info.id });
+  await reached;
+  const commands = await other.request('rpc', { slotId: info.id, command: { type: 'get_commands' } });
+  assert.ok(commands.commands.length);
+  await assert.rejects(other.request('rpc', { slotId: info.id, command: { type: 'prompt', message: 'wait' } }), /reloading/);
+  release(); await restart;
+});
+
+test('reload rechecks work, session identity, and liveness after the path reservation', { timeout: 15_000 }, async t => {
+  for (const change of ['busy', 'session', 'exit']) await t.test(change, async t => {
+    const { supervisor, peer, slot, launchLog } = await setup(t);
+    const { info } = await slot();
+    const internal = (supervisor as any).slots.get(info.id);
+    let seen!: () => void, release!: () => void;
+    const reached = new Promise<void>(resolve => { seen = resolve; });
+    const hold = new Promise<void>(resolve => { release = resolve; });
+    const original = (supervisor as any).checkPath.bind(supervisor);
+    t.mock.method(supervisor as any, 'checkPath', async (...args: any[]) => {
+      const path = await original(...args); seen(); await hold; return path;
+    });
+    const restart = peer.request('restart', { slotId: info.id });
+    const rejected = assert.rejects(restart, change === 'busy' ? /Remote Pi is busy/ : change === 'session' ? /Session changed during reload/ : /Stopped by request/);
+    await reached;
+    if (change === 'busy') (supervisor as any).recordEvent(internal, { type: 'agent_start' });
+    if (change === 'session') await internal.process.command({ type: 'prompt', message: '/switch-session' });
+    if (change === 'exit') await internal.process.stop();
+    release(); await rejected;
+    assert.equal((await readFile(launchLog, 'utf8')).trim().split('\n').length, 1);
+    if (change !== 'exit') assert.equal((await peer.request<SlotInfo[]>('list'))[0].pid, info.pid);
+    assert.equal(peer.records.some(record => record.type === 'event' && record.event.type === 'remote_slot_restart'), false);
+  });
+});
+
+test('a snapshot rejected by the retiring process recovers the cached starting snapshot', async () => {
+  const supervisor = new Supervisor({ stateDir: '/tmp/unused-reload-snapshot-test' });
+  let reading!: () => void, rejectEntries!: (error: Error) => void;
+  const reached = new Promise<void>(resolve => { reading = resolve; });
+  const slot: RecordValue = { id: 'slot', cwd: '/tmp', status: 'running', seq: 2, state: { sessionId: 'saved' },
+    live: emptyLive(), ui: new Map(), changing: false, incarnation: 1,
+    history: { entries: [{ id: 'saved-entry' }], leafId: 'saved-entry', seq: 2 },
+    process: { child: { pid: 1 }, command: () => { reading(); return new Promise((_resolve, reject) => { rejectEntries = reject; }); } } };
+  (supervisor as any).refreshState = async () => slot.state;
+  const snapshot = (supervisor as any).snapshot(slot) as Promise<Snapshot>;
+  await reached;
+  slot.incarnation++; slot.status = 'starting'; slot.seq++;
+  rejectEntries(new Error('Stopped by request'));
+  const recovered = await snapshot;
+  assert.equal(recovered.slot.status, 'starting'); assert.equal(recovered.historyComplete, false);
+  assert.deepEqual(recovered.entries, slot.history.entries); assert.equal(recovered.seq, 3);
+});
+
+test('a synchronous replacement launch failure cannot strand the slot in starting', { timeout: 10_000 }, async t => {
+  const { supervisor, peer, slot } = await setup(t);
+  const { info } = await slot();
+  t.mock.method(supervisor as any, 'launch', () => { throw new Error('synchronous spawn failure'); });
+  const result = await peer.request<SlotInfo>('restart', { slotId: info.id });
+  assert.equal(result.status, 'exited'); assert.equal(result.pid, undefined);
+  assert.equal(result.sessionFile, info.sessionFile); assert.equal(result.error, 'synchronous spawn failure');
+  await peer.event('remote_slot_exit');
+  await peer.request('kill', { slotId: info.id });
+  assert.equal((await peer.request<SlotInfo[]>('list'))[0].status, 'exited');
+});
+
+test('daemon shutdown during reload does not launch an orphan replacement', { timeout: 15_000 }, async t => {
+  for (const phase of ['stopping-old', 'starting-new']) await t.test(phase, async t => {
+    const { supervisor, peer, slot, launchLog, startDelayFile } = await setup(t);
+    const { info } = await slot(['--fixture-stop-delay', '150']);
+    if (phase === 'starting-new') await writeFile(startDelayFile, '3000');
+    const from = peer.records.length;
+    const restart = peer.request('restart', { slotId: info.id }).catch(() => undefined);
+    await peer.event('remote_slot_restart', from);
+    if (phase === 'starting-new') await peer.waitFor(record => record.type === 'event' && record.event.statusKey === 'startup', from);
+    await supervisor.stop(); await restart;
+    const launches = (await readFile(launchLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    assert.equal(launches.length, phase === 'stopping-old' ? 1 : 2);
+    for (const launch of launches) assert.throws(() => process.kill(launch.pid, 0), { code: 'ESRCH' });
+  });
+});
+
+test('late state replies from retired Pi cannot revive the slot or clear a newer state request', async () => {
+  const supervisor = new Supervisor({ stateDir: '/tmp/unused-reload-state-test' });
+  const replies: ((state: RecordValue) => void)[] = [];
+  const slot: RecordValue = { id: 'slot', cwd: '/tmp', status: 'starting', seq: 0, state: {}, live: emptyLive(),
+    ui: new Map(), incarnation: 1, process: {
+      child: { pid: 1 }, command: (_command: RecordValue, _timeout: number, atResponse: (state: RecordValue) => RecordValue) =>
+        new Promise<RecordValue>((resolve, reject) => replies.push(state => { try { resolve(atResponse(state)); } catch (error) { reject(error); } })),
+    } };
+  const old = (supervisor as any).refreshState(slot) as Promise<RecordValue>;
+  const failed = assert.rejects(old, /process changed/);
+  slot.incarnation++; slot.stateRequest = undefined;
+  const current = (supervisor as any).refreshState(slot) as Promise<RecordValue>;
+  const request = slot.stateRequest;
+  replies[0]({ sessionId: 'old', sessionFile: '/tmp/old.jsonl' });
+  await failed;
+  assert.equal(slot.status, 'starting'); assert.deepEqual(slot.state, {});
+  assert.equal(slot.stateRequest, request);
+  // An exit of the new process also invalidates its outstanding inspection.
+  slot.status = 'exited';
+  const exited = assert.rejects(current, /process changed/);
+  replies[1]({ sessionId: 'new', sessionFile: '/tmp/new.jsonl' });
+  await exited;
+  assert.equal(slot.status, 'exited'); assert.deepEqual(slot.state, {});
+  assert.equal(slot.stateRequest, undefined);
+});
+
+test('deleted nonempty sessions refuse reload without stopping their running writer', { timeout: 10_000 }, async t => {
+  const { peer, slot } = await setup(t);
+  const { info } = await slot();
+  await peer.request('rpc', { slotId: info.id, command: { type: 'prompt', message: 'retain this history' } });
+  await peer.event('agent_settled');
+  await rm(info.sessionFile!);
+  await assert.rejects(peer.request('restart', { slotId: info.id, force: true }), /ENOENT/);
+  assert.equal((await peer.request<SlotInfo[]>('list'))[0].pid, info.pid);
+});
+
+test('failed replacement reports an exited slot with its original session file', { timeout: 10_000 }, async t => {
+  const { peer, slot, exitFile } = await setup(t);
+  const { info } = await slot();
+  await writeFile(exitFile, 'fail');
+  const from = peer.records.length;
+  const result = await peer.request<SlotInfo>('restart', { slotId: info.id });
+  assert.equal(result.status, 'exited'); assert.equal(result.sessionFile, info.sessionFile);
+  const exit = await peer.event('remote_slot_exit', from);
+  assert.match(exit.event.error, /fixture startup failed/);
+  await assert.rejects(peer.request('restart', { slotId: info.id }), /Pi exited/);
 });

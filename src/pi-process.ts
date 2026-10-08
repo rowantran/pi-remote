@@ -97,7 +97,8 @@ export class PiProcess {
     if (this.closing) return this.exited;
     this.closing = true;
     if (this.child.exitCode !== null || this.child.signalCode !== null) return;
-    // End-of-input is Pi's documented orderly shutdown. Explicit kill is the only place we do this.
+    // End-of-input is Pi's documented orderly shutdown. Only explicit stop/reload
+    // requests and daemon shutdown use it; client detach never stops Pi.
     this.child.stdin.end();
     const term = setTimeout(() => this.child.kill('SIGTERM'), 3000);
     const kill = setTimeout(() => this.child.kill('SIGKILL'), 8000);

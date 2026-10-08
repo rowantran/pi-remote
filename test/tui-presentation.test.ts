@@ -64,7 +64,7 @@ test('presentation initialization does not wait for unavailable metadata or bloc
   terminal.input('\r'); await flush(); assert.equal(connection.requests.at(-1)?.method, 'answer');
 });
 
-test('local widgets, commands, shortcuts, metadata and reload leave the remote harness unchanged', async t => {
+test('local widgets, commands, shortcuts, metadata and /reload-ui leave the remote harness unchanged', async t => {
   const { ui, connection, terminal, submit } = await launch(t, snapshot(), [display]);
   assert.equal(ui.view.snapshot.presentation?.gitBranch, 'remote-git');
   assert.equal(ui.view.snapshot.presentation?.stats?.contextUsage.tokens, 50000);
@@ -72,7 +72,7 @@ test('local widgets, commands, shortcuts, metadata and reload leave the remote h
   const requests = connection.requests.length;
   await submit('/local preserved draft'); assert.equal(ui.editor.getExpandedText(), 'preserved draft');
   terminal.input('\x1bo'); await flush(); assert.equal(ui.presentation?.workingMessage, 'shortcut');
-  await submit('/reload'); assert.equal(connection.requests.length, requests);
+  await submit('/reload-ui'); assert.equal(connection.requests.length, requests);
   ui.editor.setText('draft survives editor replacement');
   await (ui as any).reloadPresentation(); await flush();
   assert.equal(ui.editor.getExpandedText(), 'draft survives editor replacement');
@@ -84,6 +84,64 @@ test('local widgets, commands, shortcuts, metadata and reload leave the remote h
   assert.equal(ui.view.snapshot.seq, 4); assert.equal(ui.view.snapshot.presentation?.gitBranch, 'remote-git');
   connection.listener?.({ type: 'event', slotId: 'slot', seq: 5, event: { type: 'agent_start' } }); await flush();
   assert.equal(ui.presentation?.workingMessage, 'agent');
+});
+
+test('remote restart clears metadata and command caches and ignores reads from the old process', async t => {
+  const { ui, connection } = await launch(t);
+  const completion = (ui as any).completion;
+  const suggestions = () => completion.getSuggestions(['/'], 0, 1, { signal: new AbortController().signal });
+  const oldHandler = connection.handler;
+  connection.handler = (method, params) => params?.command?.type === 'get_commands' ? { commands: [{ name: 'old-command' }] } : oldHandler(method, params);
+  assert.ok((await suggestions()).items.some((item: any) => item.value === '/old-command'));
+  const delayed: { resolve: (value: any) => void; type: string }[] = [];
+  connection.handler = (method, params) => new Promise(resolve => delayed.push({ resolve, type: params?.command?.type ?? method }));
+  delete ui.view.snapshot.presentation!.models;
+  (ui as any).refreshPresentationData();
+  completion.invalidateCommands();
+  const oldCommands = suggestions(); await flush();
+  assert.equal(delayed.length, 4);
+  ui.editor.setText('draft survives process change');
+  connection.listener?.({ type: 'event', slotId: 'slot', seq: 1, event: { type: 'remote_slot_restart', slot: { ...ui.view.snapshot.slot, status: 'starting' } } });
+  assert.equal(ui.view.snapshot.presentation, undefined); assert.equal(ui.editor.getExpandedText(), 'draft survives process change');
+  const ready = snapshot(); ready.seq = 2; ready.state.model = { provider: 'new', id: 'new-model' };
+  ready.ui = [{ id: 'new-widget', method: 'setWidget', widgetKey: 'remote-new', widgetLines: ['new remote widget'] }];
+  connection.handler = (method, params) => method === 'snapshot' ? ready
+    : params?.command?.type === 'get_commands' ? { commands: [{ name: 'new-command' }] }
+      : params?.command?.type === 'get_available_models' ? { models: [{ id: 'new-catalog-model' }] }
+        : params?.command?.type === 'get_session_stats' ? { contextUsage: { tokens: 123 } }
+          : { gitBranch: 'new-branch', homeDir: '/new-home' };
+  connection.listener?.({ type: 'event', slotId: 'slot', seq: 2, event: { type: 'remote_refresh' } }); await flush();
+  const fresh = await suggestions();
+  assert.ok(fresh.items.some((item: any) => item.value === '/new-command'));
+  assert.ok(fresh.items.some((item: any) => item.value === '/reload'));
+  assert.ok(!fresh.items.some((item: any) => item.value === '/old-command'));
+  for (const request of delayed) request.resolve(request.type === 'get_commands' ? { commands: [{ name: 'stale-command' }] }
+    : request.type === 'get_available_models' ? { models: [{ id: 'stale-model' }] }
+      : request.type === 'get_session_stats' ? { contextUsage: { tokens: 999 } } : { gitBranch: 'stale-branch' });
+  const obsolete = await oldCommands; await flush();
+  assert.ok(!obsolete?.items.some((item: any) => item.value === '/stale-command'));
+  assert.deepEqual(ui.view.snapshot.presentation?.models, [{ id: 'new-catalog-model' }]);
+  assert.equal(ui.view.snapshot.presentation?.stats?.contextUsage.tokens, 123);
+  assert.equal(ui.view.snapshot.presentation?.gitBranch, 'new-branch');
+  assert.ok((await suggestions()).items.some((item: any) => item.value === '/new-command'));
+  ui.tui.renderNow(); assert.match(stripTerminalSequences(ui.tui.getScreenLines().join('\n')), /new remote widget/);
+});
+
+test('remote restart retires partial tool renderer timers before the new process starts', async t => {
+  const active = new Set<ReturnType<typeof setInterval>>();
+  const originalSet = globalThis.setInterval, originalClear = globalThis.clearInterval;
+  t.mock.method(globalThis, 'setInterval', (callback: (...args: any[]) => void, ms: number, ...args: any[]) => {
+    const timer = originalSet(callback, ms, ...args); if (ms === 1000) active.add(timer); return timer;
+  });
+  t.mock.method(globalThis, 'clearInterval', (timer: ReturnType<typeof setInterval>) => { active.delete(timer); originalClear(timer); });
+  const initial = snapshot(); initial.live.busy = true;
+  initial.live.messages = [{ role: 'assistant', timestamp: 1, stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'old-tool', name: 'bash', arguments: { command: 'fixture' } }] }];
+  initial.live.tools['old-tool'] = { toolCallId: 'old-tool', toolName: 'bash', type: 'tool_execution_update', partialResult: { content: [{ type: 'text', text: 'old partial output' }] } };
+  const { ui, connection } = await launch(t, initial);
+  ui.tui.renderNow(); assert.equal(active.size, 1);
+  connection.listener?.({ type: 'event', slotId: 'slot', seq: 1, event: { type: 'remote_slot_restart', slot: { ...initial.slot, status: 'starting' } } });
+  await flush(); ui.tui.renderNow(); assert.equal(active.size, 0);
+  assert.deepEqual(ui.view.snapshot.live.tools, {}); assert.equal(connection.requests.some(request => request.method === 'kill'), false);
 });
 
 test('custom working messages use the editor border with a custom footer and respect visibility', async t => {
