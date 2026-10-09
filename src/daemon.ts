@@ -11,7 +11,7 @@ import { readJsonl, writeJsonl } from './jsonl.js';
 import { emptyLive, applyLiveEvent, captureLiveSnapshot } from './live.js';
 import { PiProcess, type PiLaunch } from './pi-process.js';
 import { remoteSessionEnv } from './remote-session.js';
-import { PI_VERSION, PROTOCOL_VERSION, errorText, type CreateOptions, type LiveState, type RecordValue, type Request, type SlotInfo, type Snapshot } from './protocol.js';
+import { PI_VERSION, PROTOCOL_VERSION, errorText, type CreateOptions, type HistoryCursor, type LiveState, type RecordValue, type Request, type SlotInfo, type Snapshot } from './protocol.js';
 
 const exec = promisify(execFile);
 const DIALOGS = new Set(['select', 'confirm', 'input', 'editor']);
@@ -60,6 +60,13 @@ function object(value: any, name: string): RecordValue {
 function string(value: any, name: string): string {
   if (typeof value !== 'string' || !value.length) throw new Error(`Missing ${name}`);
   return value;
+}
+/** Malformed optional cursors use the full-response path, just like older clients. */
+function historyCursor(value: unknown): HistoryCursor | undefined {
+  try {
+    const cursor = object(value, 'historyCursor');
+    return { sessionId: string(cursor.sessionId, 'sessionId'), entryId: string(cursor.entryId, 'entryId') };
+  } catch { return undefined; }
 }
 function expandHome(path: string): string { return path === '~' ? homedir() : path.startsWith('~/') ? join(homedir(), path.slice(2)) : path; }
 
@@ -405,7 +412,7 @@ export class Supervisor {
     return { accepted: true, ...result, reopen: reopen.map(slot => this.info(slot)) };
   }
 
-  private async snapshot(slot: Slot, retries = 2): Promise<Snapshot> {
+  private async snapshot(slot: Slot, retries = 2, cursor?: HistoryCursor): Promise<Snapshot> {
     // A transition may be awaiting an extension dialog. Permit attachment using the last
     // verified history so disconnection cannot make that dialog impossible to answer.
     if (slot.status === 'starting' || slot.changing) return { slot: this.info(slot), state: slot.state, entries: slot.history?.entries ?? [], leafId: slot.history?.leafId ?? null, live: structuredClone(slot.live), ui: structuredClone([...slot.ui.values()]), seq: slot.seq, historyComplete: false };
@@ -413,15 +420,29 @@ export class Supervisor {
     try {
       const state = await this.refreshState(slot);
       if (incarnation !== slot.incarnation) return this.snapshot(slot, retries);
+      // Keep a complete, immutable baseline for both merging and transition fallback.
+      // A client's cursor alone is not enough to prove that we can retain its prefix.
+      const history = slot.history;
+      const cursorIndex = cursor && history && cursor.sessionId === state.sessionId && history.sessionId === state.sessionId
+        ? history.entries.findIndex(entry => entry.id === cursor.entryId) : -1;
+      const delta = cursorIndex >= 0 ? cursor : undefined;
       let retire = () => {};
-      const snapshot = await slot.process!.command<Snapshot>({ type: 'get_entries' }, 30_000, data => {
-        const entries = data.entries as RecordValue[];
-        const leafId = data.leafId as string | null;
-        const tail = captureLiveSnapshot(slot.live);
-        retire = tail.retire;
-        return { slot: this.info(slot), state, entries, leafId, live: tail.state,
-          ui: structuredClone([...slot.ui.values()]), seq: slot.seq, historyComplete: true };
-      });
+      let snapshot: Snapshot;
+      try {
+        snapshot = await slot.process!.command<Snapshot>({ type: 'get_entries', ...(delta ? { since: delta.entryId } : {}) }, 30_000, data => {
+          const entries = data.entries as RecordValue[];
+          const leafId = data.leafId as string | null;
+          const tail = captureLiveSnapshot(slot.live);
+          retire = tail.retire;
+          return { slot: this.info(slot), state, entries, ...(delta ? { historyDelta: delta } : {}), leafId, live: tail.state,
+            ui: structuredClone([...slot.ui.values()]), seq: slot.seq, historyComplete: true };
+        });
+      } catch (error) {
+        // Pi may have removed the entry or switched sessions since get_state. Reinspect
+        // with a full read; unrelated RPC failures must still reject the snapshot.
+        if (delta && errorText(error) === `Entry not found: ${delta.entryId}`) return this.snapshot(slot, retries);
+        throw error;
+      }
       // Extension commands can switch sessions without a switch_session RPC. Check identity
       // again; never combine one session's history with another one's state/live messages.
       if (incarnation !== slot.incarnation) return this.snapshot(slot, retries);
@@ -433,7 +454,8 @@ export class Supervisor {
       }
       // Overlapping readers must not roll the cached baseline back behind an already retired tail.
       if (!slot.history || slot.history.seq <= snapshot.seq) {
-        slot.history = { sessionId: state.sessionId, entries: snapshot.entries, leafId: snapshot.leafId, seq: snapshot.seq };
+        const entries = snapshot.historyDelta ? [...history!.entries.slice(0, cursorIndex + 1), ...snapshot.entries] : snapshot.entries;
+        slot.history = { sessionId: state.sessionId, entries, leafId: snapshot.leafId, seq: snapshot.seq };
         retire();
       }
       return snapshot;
@@ -456,7 +478,7 @@ export class Supervisor {
       if (request.method === 'hello') {
         if (params.protocol !== PROTOCOL_VERSION || params.piVersion !== PI_VERSION) throw new Error(`Version mismatch: daemon protocol ${PROTOCOL_VERSION}, Pi ${PI_VERSION}`);
         peer.verified = true;
-        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, release: RELEASE, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon'] };
+        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, release: RELEASE, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots'] };
       } else {
         if (!peer.verified) throw new Error('Send hello with matching versions first');
         switch (request.method) {
@@ -489,7 +511,7 @@ export class Supervisor {
               if (!peer.ready) peer.slotId = undefined;
             }
           }
-          case 'snapshot': data = await this.snapshot(this.running(params.slotId)); break;
+          case 'snapshot': data = await this.snapshot(this.running(params.slotId), 2, historyCursor(params.historyCursor)); break;
           case 'sessions': {
             const slot = this.slot(params.slotId);
             const { SessionManager } = await import('@earendil-works/pi-coding-agent');

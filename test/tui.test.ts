@@ -1181,6 +1181,160 @@ test('remote warnings are displayed without retrying requests or stopping the re
   assert.equal(connection.requests.length, 0); assert.equal(connection.closed, false);
 });
 
+function localForkSnapshot(): Snapshot {
+  const tree = forkTree();
+  return snapshot({ state: { sessionId: 'session' }, historyComplete: true,
+    entries: [tree.tree[0]!.entry, tree.tree[0]!.children[0]!.entry], leafId: tree.leafId });
+}
+
+test('fork/tree/shortcut use verified local history without any remote read', async t => {
+  for (const command of ['/fork', '/tree', 'shortcut']) {
+    const { ui, terminal, connection, submit } = launch(t, localForkSnapshot());
+    connection.handler = () => { throw new Error('Unexpected remote read'); };
+    if (command === 'shortcut') { terminal.input('\x1b'); terminal.input('\x1b'); }
+    else submit(command);
+    await flush();
+    assert.match(screen(ui), /user: original prompt/);
+    assert.match(screen(ui), /assistant: assistant context/);
+    assert.equal(connection.requests.length, 0);
+    terminal.input('\x1b'); await flush(); ui.detach();
+  }
+});
+
+test('selecting a local fork point sends its original id and fully replaces the new session history', async t => {
+  const { ui, terminal, connection, submit } = launch(t, localForkSnapshot());
+  connection.handler = (method, params) => {
+    if (method === 'rpc' && params?.command.type === 'fork') return { text: 'original prompt' };
+    if (method === 'snapshot') return snapshot({ state: { sessionId: 'forked' }, historyComplete: true });
+    throw new Error('Unexpected request');
+  };
+  submit('/fork'); await flush(); terminal.input('\r'); await flush();
+  assert.deepEqual(connection.requests.map(r => r.method), ['rpc', 'snapshot']);
+  assert.deepEqual(connection.requests[0]!.params?.command, { type: 'fork', entryId: 'u' });
+  assert.equal(ui.editor.getExpandedText(), 'original prompt');
+  assert.deepEqual(ui.view.snapshot.entries, []);
+  assert.equal(ui.view.snapshot.state.sessionId, 'forked');
+});
+
+test('a gap before a refresh omits the history cursor and restores the complete checkpoint', async t => {
+  const initial = localForkSnapshot();
+  const { ui, connection } = launch(t, initial);
+  connection.handler = () => ({ ...initial, seq: 2 });
+  connection.emit(event(2, { type: 'agent_settled' })); await flush();
+  assert.deepEqual(connection.requests[0], { method: 'snapshot', params: { slotId: 'slot' } });
+  assert.equal(ui.view.hasCompleteHistory(), true);
+});
+
+test('fork refreshes incomplete history, then builds locally without requesting a tree', async t => {
+  const initial = localForkSnapshot(); initial.historyComplete = false;
+  const { ui, terminal, connection, submit } = launch(t, initial);
+  connection.handler = method => {
+    assert.equal(method, 'snapshot'); return localForkSnapshot();
+  };
+  submit('/fork'); await flush();
+  assert.match(screen(ui), /user: original prompt/);
+  assert.deepEqual(connection.requests, [{ method: 'snapshot', params: { slotId: 'slot' } }]);
+  terminal.input('\x1b'); await flush();
+});
+
+test('turn refresh requests only entries after the verified checkpoint, and accepts old full replies', async t => {
+  for (const incremental of [true, false]) {
+    const initial = localForkSnapshot();
+    const { ui, connection } = launch(t, initial);
+    const newer = { ...initial.entries[0], id: 'u2', parentId: 'a', message: { role: 'user', content: 'new prompt' } };
+    connection.handler = () => snapshot({ state: initial.state, seq: 1, historyComplete: true, leafId: 'u2',
+      entries: incremental ? [newer] : [...initial.entries, newer],
+      ...(incremental ? { historyDelta: { sessionId: 'session', entryId: 'a' } } : {}) });
+    connection.emit(event(1, { type: 'agent_settled' })); await flush();
+    assert.deepEqual(connection.requests[0], { method: 'snapshot', params: { slotId: 'slot',
+      historyCursor: { sessionId: 'session', entryId: 'a' } } });
+    assert.deepEqual(ui.view.snapshot.entries.map(e => e.id), ['u', 'a', 'u2']);
+    assert.equal(ui.view.historyCursor()!.entryId, 'u2'); ui.detach();
+  }
+});
+
+test('fork waits for the running incremental refresh instead of requesting the whole tree again', async t => {
+  const initial = localForkSnapshot();
+  const { ui, terminal, connection, submit } = launch(t, initial);
+  const pending = deferred<Snapshot>(); connection.handler = () => pending.promise;
+  connection.emit(event(1, { type: 'agent_settled' }));
+  submit('/fork');
+  assert.match(screen(ui), /Loading session tree/);
+  pending.resolve(snapshot({ state: initial.state, seq: 1, historyComplete: true, leafId: 'u2',
+    entries: [{ ...initial.entries[0], id: 'u2', parentId: 'a', message: { role: 'user', content: 'latest prompt' } }],
+    historyDelta: { sessionId: 'session', entryId: 'a' } }));
+  await flush();
+  assert.match(screen(ui), /user: latest prompt/);
+  assert.equal(connection.requests.length, 1);
+  terminal.input('\x1b'); await flush();
+});
+
+test('fork fetches saved IDs for messages that finish after an already-running refresh cut', async t => {
+  const initial = localForkSnapshot();
+  const { ui, terminal, connection, submit } = launch(t, initial);
+  const pending = deferred<Snapshot>();
+  const newer = { ...initial.entries[0], id: 'u2', parentId: 'a', message: { role: 'user', content: 'post-cut prompt' } };
+  const notice = { type: 'custom', id: 'notice', parentId: 'u2', timestamp: '2026-01-01', customType: 'background' };
+  connection.handler = (method, params) => {
+    if (method === 'rpc') return { cancelled: true };
+    if (connection.requests.length === 1) return pending.promise;
+    return snapshot({ state: initial.state, seq: 3, historyComplete: true, leafId: 'notice',
+      entries: [newer, notice], historyDelta: params?.historyCursor });
+  };
+  connection.emit(event(1, { type: 'remote_refresh' }));
+  connection.emit(event(2, { type: 'message_end', message: newer.message }));
+  connection.emit(event(3, { type: 'entry_appended', entry: notice }));
+  submit('/fork');
+  pending.resolve(snapshot({ state: initial.state, seq: 1, historyComplete: true, leafId: 'a',
+    entries: [], historyDelta: { sessionId: 'session', entryId: 'a' } }));
+  await flush();
+  assert.match(screen(ui), /user: post-cut prompt/);
+  assert.equal(connection.requests.length, 2);
+  assert.ok(connection.requests.every(r => r.method === 'snapshot' && r.params?.historyCursor));
+  assert.deepEqual(ui.view.snapshot.entries.map(e => e.id), ['u', 'a', 'u2', 'notice']);
+  terminal.input('\r'); await flush();
+  assert.deepEqual(connection.requests.at(-1)!.params?.command, { type: 'fork', entryId: 'u2' });
+});
+
+test('a disconnected client cannot open a cached fork picker', async t => {
+  const { ui, connection, submit } = launch(t, localForkSnapshot());
+  connection.disconnect(); submit('/fork'); await flush();
+  assert.doesNotMatch(screen(ui), /Session Fork|Loading session tree/);
+  assert.match(screen(ui), /Reconnect before/);
+  assert.equal(ui.editor.getExpandedText(), '/fork');
+  assert.equal(connection.requests.length, 0);
+});
+
+test('an event gap during a delta read triggers a full recovery without losing later live events', async t => {
+  const initial = localForkSnapshot();
+  const { ui, connection } = launch(t, initial);
+  const delta = deferred<Snapshot>(), full = deferred<Snapshot>();
+  connection.handler = (_method, params) => connection.requests.length === 1 ? delta.promise
+    : connection.requests.length === 2 ? full.promise
+    : { ...initial, seq: 3, entries: [], historyDelta: params?.historyCursor,
+      live: { ...initial.live, busy: true } };
+  connection.emit(event(1, { type: 'agent_settled' }));
+  connection.emit(event(3, { type: 'agent_start' })); // seq 2 was lost
+  delta.resolve(snapshot({ state: initial.state, seq: 1, historyComplete: true, entries: [], leafId: 'a',
+    historyDelta: { sessionId: 'session', entryId: 'a' } }));
+  await flush();
+  assert.deepEqual(connection.requests[1], { method: 'snapshot', params: { slotId: 'slot' } });
+  full.resolve({ ...initial, seq: 1 }); await flush();
+  assert.equal(ui.view.snapshot.live.busy, true);
+  assert.equal(ui.view.snapshot.seq, 3);
+});
+
+test('fork cancellation while waiting for history ignores late refresh results', async t => {
+  const initial = localForkSnapshot();
+  const { ui, terminal, connection, submit } = launch(t, initial);
+  const pending = deferred<Snapshot>(); connection.handler = () => pending.promise;
+  connection.emit(event(1, { type: 'agent_settled' }));
+  submit('/fork'); terminal.input('\x1b'); await flush();
+  pending.resolve({ ...initial, seq: 1 }); await flush();
+  assert.doesNotMatch(screen(ui), /Session Fork|Loading session tree/);
+  assert.equal(connection.requests.filter(r => r.params?.command?.type === 'fork').length, 0);
+});
+
 test('scrolling up shows a jump-to-latest pill; Ctrl+End or clicking it follows output again', async t => {
   const initial = snapshot();
   initial.live.messages = Array.from({ length: 40 }, (_, i) =>

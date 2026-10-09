@@ -156,7 +156,7 @@ For zsh or bash, put `pi-remote` on `PATH` with `npm link`, then install the mat
 | `/theme [NAME]` | Show or change the local theme for this client |
 | `/help` | Show local controls |
 
-Opening the fork picker immediately shows a **Loading session tree…** spinner while it reads remote history. Esc stops waiting and ignores any late result; Ctrl+D detaches without changing the remote session.
+The fork picker builds its tree from verified history already held by the client, including branches and labels. It does not download the full tree again. If a turn's history refresh is still running, the picker shows a **Loading session tree…** spinner until that refresh finishes. Esc stops waiting and ignores any late result; Ctrl+D detaches without changing the remote session. Daemons without verified history support use the existing full-tree read.
 
 The fork picker uses Pi's own tree rows, role colors, selected-row background, search, filters, and branch folding. It starts with tools hidden and the most recent user prompt selected. Use ↑/↓ to move, ←/→ to page, Alt+←/→ to fold/unfold branches, and Ctrl+X to copy the selected message. PageUp/PageDown still scroll the transcript. Ctrl+T/U/L/A toggle the no-tools/user-only/labeled-only/all filters; Ctrl+O and Shift+Ctrl+O cycle filters. Alt+D selects Pi's default filter (shows tools) because Ctrl+D always detaches. Labels are shown but cannot be edited through stock RPC. Assistant messages and other entries are context only, not fork points.
 
@@ -336,6 +336,12 @@ local pi-tui client -> SSH stdio -> bridge -> private Unix socket
 - `slots.json` contains process metadata and session paths, not credentials or a second transcript. `daemon.log` contains stderr, which may include sensitive extension diagnostics. It is private but not rotated automatically yet.
 
 Pi's exported `RpcClient` is not used for transport ownership: in 1.0.4 it has no public dialog-response method and imposes a fixed request timeout. `src/pi-process.ts` implements the documented stdio framing directly, with unique request IDs and no deadlines on agent commands that may await a dialog. This changes no Pi code.
+
+### Incremental history refreshes
+
+Attach and reconnect still download the full session history. After a turn, the client requests only entries after its last verified history checkpoint. The checkpoint follows session-file order, not the active branch's leaf. Live events never advance it. The daemon combines the new entries with its cached history and preserves the same saved-history/live-message boundary as a full snapshot.
+
+Session changes, missing checkpoints, and missed events use a full snapshot. Older clients continue to receive full snapshots; newer clients also accept full replies from older daemons. Both an updated client and daemon are needed to reduce refresh traffic. The local fork picker can reuse verified history from existing daemons that send `historyComplete`. Forking still downloads a full snapshot of the new session; reusing the copied history across session files is not implemented.
 
 ### Daemon crash versus client disconnect
 

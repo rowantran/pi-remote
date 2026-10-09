@@ -1,5 +1,5 @@
 import { stripTerminalSequences } from '@earendil-works/pi-tui';
-import type { RecordValue, RemoteEvent, Snapshot } from './protocol.js';
+import type { HistoryCursor, RecordValue, RemoteEvent, Snapshot } from './protocol.js';
 import { emptyLive, messageKey, putLiveMessage } from './live.js';
 export { messageKey } from './live.js';
 
@@ -96,13 +96,42 @@ function uiKey(record: RecordValue): string {
   return `dialog:${record.id}`;
 }
 
+export class HistoryMismatchError extends Error {
+  constructor() { super('Snapshot history checkpoint mismatch; a full snapshot is required'); }
+}
+
 /** Mutable display state; individual messages remain immutable for render caching. */
 export class RemoteView {
-  snapshot: Snapshot;
-  constructor(snapshot: Snapshot) { this.snapshot = structuredClone(snapshot); }
+  snapshot!: Snapshot;
+  // Keep the verified prefix separate from entries appended speculatively by live events.
+  private history?: { sessionId: string; entries: RecordValue[] };
+  constructor(snapshot: Snapshot) { this.replace(snapshot); }
+
+  hasCompleteHistory(): boolean {
+    return this.history !== undefined && this.history.sessionId === this.snapshot.state.sessionId;
+  }
+
+  historyCursor(): HistoryCursor | undefined {
+    const entryId = this.history?.entries.at(-1)?.id;
+    return this.hasCompleteHistory() && typeof entryId === 'string'
+      ? { sessionId: this.history!.sessionId, entryId } : undefined;
+  }
+
+  invalidateHistory(): void { this.history = undefined; }
 
   replace(snapshot: Snapshot, events: RemoteEvent[] = []): void {
-    this.snapshot = structuredClone(snapshot);
+    const delta = snapshot.historyDelta;
+    if (delta && (snapshot.historyComplete !== true || !this.history
+      || this.snapshot.slot.id !== snapshot.slot.id || delta.sessionId !== snapshot.state.sessionId
+      || delta.sessionId !== this.history.sessionId || delta.entryId !== this.history.entries.at(-1)?.id)) {
+      throw new HistoryMismatchError();
+    }
+    const next = structuredClone(snapshot);
+    if (delta) next.entries = [...this.history!.entries, ...next.entries];
+    delete next.historyDelta; // Only wire replies can be partial; display snapshots always contain full history.
+    this.history = next.historyComplete === true && typeof next.state.sessionId === 'string'
+      ? { sessionId: next.state.sessionId, entries: [...next.entries] } : undefined;
+    this.snapshot = next;
     for (const event of events) this.apply(event);
   }
 
