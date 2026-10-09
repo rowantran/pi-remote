@@ -11,7 +11,7 @@ import { Supervisor, socketPath } from '../src/daemon.js';
 import { readJsonl, writeJsonl } from '../src/jsonl.js';
 import { RemoteView, transcriptMessages } from '../src/view.js';
 import { applyLiveEvent, emptyLive } from '../src/live.js';
-import type { RecordValue, RemoteEvent, Result, SlotInfo, Snapshot } from '../src/protocol.js';
+import type { HistoryCursor, RecordValue, RemoteEvent, Result, SlotInfo, Snapshot } from '../src/protocol.js';
 
 const fixture = fileURLToPath(new URL('./fixture-pi.mjs', import.meta.url));
 const hello = { protocol: 1, piVersion: '1.0.4' };
@@ -98,6 +98,7 @@ async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {
   const versionLog = join(dir, 'fixture-version-log');
   const envLog = join(dir, 'fixture-env-log');
   const launchLog = join(dir, 'fixture-launch-log');
+  const entriesLog = join(dir, 'fixture-entries-log');
   const extensionFile = join(dir, 'fixture-extension.json');
   const startDelayFile = join(dir, 'fixture-start-delay');
   const exitFile = join(dir, 'fixture-exit');
@@ -105,7 +106,7 @@ async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {
   const daemonOptions = { stateDir: dir, executable: process.execPath,
     prefixArgs: [fixture], skipVersionCheck: options.skipVersionCheck ?? true,
     env: { PI_OFFLINE: '1', PI_FIXTURE_VERSION_FILE: versionFile, PI_FIXTURE_VERSION_LOG: versionLog, PI_FIXTURE_ENV_LOG: envLog,
-      PI_FIXTURE_LAUNCH_LOG: launchLog, PI_FIXTURE_EXTENSION_FILE: extensionFile, PI_FIXTURE_START_DELAY_FILE: startDelayFile, PI_FIXTURE_EXIT_FILE: exitFile } };
+      PI_FIXTURE_LAUNCH_LOG: launchLog, PI_FIXTURE_ENTRIES_LOG: entriesLog, PI_FIXTURE_EXTENSION_FILE: extensionFile, PI_FIXTURE_START_DELAY_FILE: startDelayFile, PI_FIXTURE_EXIT_FILE: exitFile } };
   const supervisor = new Supervisor(daemonOptions);
   let current = supervisor;
   /** Stop the current daemon as runDaemon would, then start its successor in the same state directory. */
@@ -128,7 +129,7 @@ async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {
     if (verify) {
       const response = await peer.request('hello', hello);
       assert.deepEqual({protocol: response.protocol, piVersion: response.piVersion, pid: response.pid}, { ...hello, pid: process.pid });
-      assert.deepEqual(response.capabilities, ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon']);
+      assert.deepEqual(response.capabilities, ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots']);
     }
     return peer;
   };
@@ -139,9 +140,196 @@ async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {
     const snapshot = await peer.request<Snapshot>('attach', { slotId: info.id });
     return { info, snapshot };
   };
-  return { dir, supervisor, successor, peer, connect, create, slot, versionFile, versionLog, envLog, launchLog, extensionFile, startDelayFile, exitFile };
+  return { dir, supervisor, successor, peer, connect, create, slot, versionFile, versionLog, envLog, launchLog, entriesLog, extensionFile, startDelayFile, exitFile };
 }
 const textOf = (message: RecordValue) => message.content.filter((block: RecordValue) => block.type === 'text').map((block: RecordValue) => block.text).join('');
+
+function cursorOf(snapshot: Snapshot): HistoryCursor {
+  return { sessionId: snapshot.state.sessionId, entryId: snapshot.entries.at(-1)!.id };
+}
+async function seedHistory(peer: Peer, slotId: string): Promise<Snapshot> {
+  await peer.request('rpc', { slotId, command: { type: 'set_session_name', name: 'baseline' } });
+  return peer.request<Snapshot>('snapshot', { slotId });
+}
+async function entryReads(path: string): Promise<RecordValue[]> {
+  return (await readFile(path, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+}
+
+test('incremental snapshots omit unchanged entries, append after the cursor, and retain a full transition cache', { timeout: 10_000 }, async t => {
+  const { peer, slot, entriesLog } = await setup(t);
+  const { info } = await slot(['--fixture-new-session-dialog']);
+  const baseline = await seedHistory(peer, info.id), historyCursor = cursorOf(baseline);
+  const unchanged = await peer.request<Snapshot>('snapshot', { slotId: info.id, historyCursor });
+  assert.deepEqual(unchanged.historyDelta, historyCursor);
+  assert.deepEqual(unchanged.entries, []);
+  assert.equal(unchanged.leafId, baseline.leafId);
+  assert.deepEqual(unchanged.state, baseline.state);
+  assert.deepEqual(unchanged.live, baseline.live);
+  assert.deepEqual(unchanged.ui, baseline.ui);
+  assert.equal(unchanged.historyComplete, true);
+  assert.ok(unchanged.seq > baseline.seq);
+  const appended: RecordValue[] = [];
+  for (const name of ['second', 'third']) {
+    await peer.request('rpc', { slotId: info.id, command: { type: 'set_session_name', name } });
+    const delta = await peer.request<Snapshot>('snapshot', { slotId: info.id, historyCursor });
+    assert.deepEqual(delta.historyDelta, historyCursor);
+    assert.deepEqual(delta.entries.map(entry => entry.name), name === 'second' ? ['second'] : ['second', 'third']);
+    assert.equal(delta.leafId, delta.entries.at(-1)!.id);
+    assert.equal(delta.historyComplete, true);
+    if (name === 'third') appended.push(...delta.entries);
+  }
+  assert.deepEqual((await entryReads(entriesLog)).slice(-3), Array(3).fill({ since: historyCursor.entryId }));
+  const changing = peer.request('rpc', { slotId: info.id, command: { type: 'new_session' } });
+  const dialog = (await peer.event('extension_ui_request')).event;
+  const fallback = await peer.request<Snapshot>('snapshot', { slotId: info.id, historyCursor });
+  assert.equal(fallback.historyDelta, undefined);
+  assert.equal(fallback.historyComplete, false);
+  assert.deepEqual(fallback.entries, [...baseline.entries, ...appended], 'Repeated old cursors must not duplicate the cached suffix');
+  await peer.request('answer', { slotId: info.id, response: { id: dialog.id, cancelled: true } });
+  await changing;
+  const fromMiddle = await peer.request<Snapshot>('snapshot', { slotId: info.id,
+    historyCursor: { sessionId: historyCursor.sessionId, entryId: appended[0].id } });
+  assert.deepEqual(fromMiddle.entries, [appended[1]], 'The cursor is an append-order entry, not necessarily the leaf');
+});
+
+test('missing or malformed cursors and cache mismatches return full snapshots; attach is always full', { timeout: 10_000 }, async t => {
+  const { peer, slot, supervisor, entriesLog } = await setup(t);
+  const { info } = await slot();
+  const baseline = await seedHistory(peer, info.id), valid = cursorOf(baseline);
+  for (const historyCursor of [undefined, null, false, 'cursor', [], {}, { sessionId: valid.sessionId },
+    { entryId: valid.entryId }, { ...valid, sessionId: '' }, { ...valid, entryId: '' },
+    { ...valid, sessionId: 1 }, { ...valid, entryId: {} }, { ...valid, sessionId: 'other-session' },
+    { ...valid, entryId: 'unknown' }]) {
+    const full = await peer.request<Snapshot>('snapshot', { slotId: info.id, historyCursor });
+    assert.equal(full.historyDelta, undefined);
+    assert.equal(full.historyComplete, true);
+    assert.deepEqual(full.entries, baseline.entries);
+    assert.deepEqual((await entryReads(entriesLog)).at(-1), {}, 'An untrusted cursor must never reach Pi');
+  }
+  const cached = (supervisor as any).slots.get(info.id);
+  for (const history of [undefined, { ...cached.history, sessionId: 'wrong-cache-session' }]) {
+    cached.history = history;
+    const full = await peer.request<Snapshot>('snapshot', { slotId: info.id, historyCursor: valid });
+    assert.equal(full.historyDelta, undefined);
+    assert.deepEqual(full.entries, baseline.entries);
+    assert.deepEqual((await entryReads(entriesLog)).at(-1), {});
+  }
+  const attached = await peer.request<Snapshot>('attach', { slotId: info.id, historyCursor: valid });
+  assert.equal(attached.historyDelta, undefined);
+  assert.deepEqual(attached.entries, baseline.entries);
+  assert.deepEqual((await entryReads(entriesLog)).at(-1), {});
+});
+
+test('a stock missing-since error falls back to a newly verified full snapshot', { timeout: 10_000 }, async t => {
+  const { peer, slot, entriesLog } = await setup(t);
+  const { info } = await slot();
+  const baseline = await seedHistory(peer, info.id), historyCursor = cursorOf(baseline);
+  await peer.request('rpc', { slotId: info.id, command: { type: 'prompt', message: '/reset-history' } });
+  const fallback = await peer.request<Snapshot>('snapshot', { slotId: info.id, historyCursor });
+  assert.equal(fallback.historyDelta, undefined);
+  assert.equal(fallback.historyComplete, true);
+  assert.equal(fallback.state.sessionId, baseline.state.sessionId);
+  assert.deepEqual(fallback.entries, []);
+  assert.equal(fallback.leafId, null);
+  assert.deepEqual((await entryReads(entriesLog)).slice(-2), [{ since: historyCursor.entryId }, {}]);
+  // The repaired empty cache cannot serve the former cursor again.
+  await peer.request('snapshot', { slotId: info.id, historyCursor });
+  assert.deepEqual((await entryReads(entriesLog)).at(-1), {});
+});
+
+test('incremental session switches before or after the entries cut return full new-session history', { timeout: 15_000 }, async t => {
+  for (const message of ['/switch-on-snapshot', '/switch-before-entries', '/switch-after-entries']) await t.test(message, async t => {
+    const { peer, slot, entriesLog } = await setup(t);
+    const { info } = await slot();
+    const baseline = await seedHistory(peer, info.id), historyCursor = cursorOf(baseline);
+    await seedOldLive(peer, info.id);
+    await peer.request('rpc', { slotId: info.id, command: { type: 'prompt', message } });
+    const switched = await peer.request<Snapshot>('snapshot', { slotId: info.id, historyCursor });
+    assert.notEqual(switched.state.sessionId, baseline.state.sessionId);
+    assert.equal(switched.state.sessionFile, baseline.state.sessionFile);
+    assert.equal(switched.historyDelta, undefined);
+    assert.equal(switched.historyComplete, true);
+    assert.deepEqual(switched.entries, []);
+    assert.deepEqual(switched.live, clearedLive);
+    assert.deepEqual((await entryReads(entriesLog)).slice(message === '/switch-on-snapshot' ? -1 : -2),
+      message === '/switch-on-snapshot' ? [{}] : [{ since: historyCursor.entryId }, {}]);
+  });
+});
+
+test('failed incremental reads and identity validation preserve the complete cache and unretired live tail', { timeout: 15_000 }, async t => {
+  for (const message of ['/fail-next-entries', '/fail-snapshot-validation']) await t.test(message, async t => {
+    const { peer, slot, entriesLog } = await setup(t);
+    const { info } = await slot(['--fixture-new-session-dialog']);
+    const baseline = await seedHistory(peer, info.id), historyCursor = cursorOf(baseline);
+    await peer.request('rpc', { slotId: info.id, command: { type: 'prompt', message: '/background-tail' } });
+    await peer.request('rpc', { slotId: info.id, command: { type: 'prompt', message } });
+    const readsBefore = (await entryReads(entriesLog)).length;
+    await assert.rejects(peer.request('snapshot', { slotId: info.id, historyCursor }), /Fixture get_(entries|state) failure/);
+    assert.deepEqual((await entryReads(entriesLog)).slice(readsBefore), [{ since: historyCursor.entryId }], 'Other errors must not trigger a full-read retry');
+    const changing = peer.request('rpc', { slotId: info.id, command: { type: 'new_session' } });
+    const dialog = (await peer.event('extension_ui_request')).event;
+    const fallback = await peer.request<Snapshot>('snapshot', { slotId: info.id, historyCursor });
+    assert.equal(fallback.historyComplete, false);
+    assert.equal(fallback.historyDelta, undefined);
+    assert.deepEqual(fallback.entries, baseline.entries);
+    assert.equal(fallback.live.messages.length, 14);
+    await peer.request('answer', { slotId: info.id, response: { id: dialog.id, cancelled: true } });
+    await changing;
+    const repaired = await peer.request<Snapshot>('snapshot', { slotId: info.id, historyCursor });
+    assert.deepEqual(repaired.historyDelta, historyCursor);
+    assert.equal(repaired.entries.length, 13);
+    assert.deepEqual(repaired.live.messages.map(textOf), ['PARTIAL_BACKGROUND_ANSWER']);
+    const nextChange = peer.request('rpc', { slotId: info.id, command: { type: 'new_session' } });
+    const nextDialog = (await peer.waitFor(record => record.type === 'event' && record.event.method === 'confirm'
+      && record.event.id !== dialog.id)).event;
+    const cached = await peer.request<Snapshot>('snapshot', { slotId: info.id, historyCursor });
+    assert.equal(cached.historyDelta, undefined);
+    assert.equal(cached.historyComplete, false);
+    assert.deepEqual(cached.entries, [...baseline.entries, ...repaired.entries]);
+    assert.deepEqual(cached.live.messages, repaired.live.messages, 'The complete cache must cover the retired incremental tail');
+    await peer.request('answer', { slotId: info.id, response: { id: nextDialog.id, cancelled: true } });
+    await nextChange;
+  });
+});
+
+test('incremental snapshots preserve the synchronous cut before same-stdout events', { timeout: 10_000 }, async t => {
+  const { peer, slot } = await setup(t);
+  const { info } = await slot();
+  const baseline = await seedHistory(peer, info.id), historyCursor = cursorOf(baseline);
+  await peer.request('rpc', { slotId: info.id, command: { type: 'prompt', message: '/boundary' } });
+  const from = peer.records.length;
+  const cut = await peer.request<Snapshot>('snapshot', { slotId: info.id, historyCursor });
+  assert.deepEqual(cut.historyDelta, historyCursor);
+  assert.deepEqual(cut.entries, []);
+  assert.deepEqual(cut.live.messages, []);
+  assert.equal(cut.live.busy, false);
+  const events = peer.records.slice(from).filter((record): record is RemoteEvent => record.type === 'event' && record.seq > cut.seq);
+  assert.deepEqual(events.slice(0, 6).map(record => record.event.type),
+    ['agent_start', 'message_start', 'message_update', 'message_end', 'agent_end', 'agent_settled']);
+  assert.deepEqual(events.slice(0, 6).map(record => record.seq), Array.from({ length: 6 }, (_, i) => cut.seq + i + 1));
+  const recovered = await peer.request<Snapshot>('snapshot', { slotId: info.id, historyCursor });
+  assert.deepEqual(recovered.historyDelta, historyCursor);
+  assert.equal(textOf(recovered.entries[0].message), 'boundary complete');
+  assert.deepEqual(recovered.live.messages, []);
+  assert.equal(recovered.live.busy, false);
+});
+
+test('incremental snapshots omit a multi-megabyte baseline from the wire', { timeout: 10_000 }, async t => {
+  const { peer, slot, entriesLog } = await setup(t);
+  const { info } = await slot();
+  await peer.request('rpc', { slotId: info.id, command: { type: 'prompt', message: '/large-history' } });
+  const baseline = await peer.request<Snapshot>('snapshot', { slotId: info.id }), historyCursor = cursorOf(baseline);
+  const baselineBytes = Buffer.byteLength(JSON.stringify(baseline));
+  assert.ok(baselineBytes > 3_000_000, `Expected a multi-MB baseline, received ${baselineBytes} bytes`);
+  await peer.request('rpc', { slotId: info.id, command: { type: 'set_session_name', name: 'small delta' } });
+  const delta = await peer.request<Snapshot>('snapshot', { slotId: info.id, historyCursor });
+  assert.deepEqual(delta.historyDelta, historyCursor);
+  assert.deepEqual(delta.entries.map(entry => entry.name), ['small delta']);
+  const deltaBytes = Buffer.byteLength(JSON.stringify(delta));
+  assert.ok(deltaBytes < 2000, `The delta must omit the large baseline: ${deltaBytes} bytes`);
+  assert.deepEqual((await entryReads(entriesLog)).at(-1), { since: historyCursor.entryId });
+  t.diagnostic(`Full snapshot: ${baselineBytes} bytes; incremental snapshot: ${deltaBytes} bytes`);
+});
 
 test('an older concurrent snapshot cannot roll the cached baseline behind the retired tail', async () => {
   const supervisor = new Supervisor({ stateDir: '/tmp/unused-snapshot-test' });
@@ -176,6 +364,71 @@ test('an older concurrent snapshot cannot roll the cached baseline behind the re
   assert.equal(fallback.historyComplete, false);
   assert.deepEqual(fallback.entries, entries);
   assert.equal(transcriptMessages(fallback).length, 2, 'No entry can be lost by rolling back a retired baseline');
+});
+
+test('overlapping full and incremental readers cannot roll back a newer complete checkpoint', async t => {
+  for (const olderDelta of [false, true]) for (const newerDelta of [false, true]) await t.test(`older delta=${olderDelta}, newer delta=${newerDelta}`, async () => {
+    const supervisor = new Supervisor({ stateDir: '/tmp/unused-incremental-test' });
+    const live = emptyLive(), state = { sessionId: 'session' }, cursor = { sessionId: 'session', entryId: '0' };
+    const notices = [0, 1, 2].map(timestamp => ({ role: 'custom', customType: 'background', timestamp, content: `notice-${timestamp}` }));
+    const entries = notices.map((message, i) => ({ type: 'custom_message', id: String(i), parentId: i ? String(i - 1) : null,
+      timestamp: new Date(message.timestamp + 100).toISOString(), customType: message.customType, content: message.content }));
+    let reads = 0, checks = 0;
+    let validationStarted!: () => void, finishValidation!: (state: RecordValue) => void;
+    const waiting = new Promise<void>(resolve => { validationStarted = resolve; });
+    const blocked = new Promise<RecordValue>(resolve => { finishValidation = resolve; });
+    const commands: RecordValue[] = [];
+    const slot: RecordValue = { id: 'slot', cwd: '/tmp', status: 'running', seq: 0, state, live, ui: new Map(), changing: false, incarnation: 0,
+      history: { sessionId: 'session', entries: entries.slice(0, 1), leafId: '0', seq: 0 },
+      process: { child: { pid: 1 }, command: async (command: RecordValue, _timeout: number, atResponse: (data: RecordValue) => Snapshot) => {
+        commands.push(command);
+        slot.seq = ++reads;
+        applyLiveEvent(live, { type: 'message_end', message: notices[reads] });
+        return atResponse({ entries: entries.slice(command.since === undefined ? 0 : 1, reads + 1), leafId: String(reads) });
+      } } };
+    (supervisor as any).refreshState = async () => {
+      if (++checks === 2) { validationStarted(); return blocked; }
+      return state;
+    };
+    const older = (supervisor as any).snapshot(slot, 2, olderDelta ? cursor : undefined) as Promise<Snapshot>;
+    await waiting;
+    const newer = await (supervisor as any).snapshot(slot, 2, newerDelta ? cursor : undefined) as Snapshot;
+    assert.equal(newer.seq, 2);
+    assert.deepEqual(newer.historyDelta, newerDelta ? cursor : undefined);
+    assert.deepEqual(live.messages, []);
+    finishValidation(state);
+    const stale = await older;
+    assert.equal(stale.seq, 1);
+    assert.deepEqual(stale.historyDelta, olderDelta ? cursor : undefined);
+    assert.deepEqual(commands.map(command => command.since), [olderDelta ? '0' : undefined, newerDelta ? '0' : undefined]);
+    slot.changing = true;
+    const fallback = await (supervisor as any).snapshot(slot, 2, cursor) as Snapshot;
+    assert.equal(fallback.historyComplete, false);
+    assert.equal(fallback.historyDelta, undefined);
+    assert.equal(slot.history.seq, 2);
+    assert.deepEqual(fallback.entries, entries);
+    assert.equal(transcriptMessages(fallback).length, 3);
+  });
+});
+
+test('an incremental reader rejected during process replacement falls back to the full cached history', async () => {
+  const supervisor = new Supervisor({ stateDir: '/tmp/unused-incarnation-test' });
+  const state = { sessionId: 'session' }, cursor = { sessionId: 'session', entryId: 'entry' };
+  const entries = [{ id: 'entry', type: 'session_info', name: 'cached' }];
+  const slot: RecordValue = { id: 'slot', cwd: '/tmp', status: 'running', seq: 1, state, live: emptyLive(), ui: new Map(),
+    changing: false, incarnation: 1, history: { sessionId: 'session', entries, leafId: 'entry', seq: 1 },
+    process: { child: { pid: 1 }, command: async (command: RecordValue) => {
+      assert.equal(command.since, cursor.entryId);
+      slot.incarnation++;
+      slot.status = 'starting';
+      throw new Error('Pi is shutting down');
+    } } };
+  (supervisor as any).refreshState = async () => state;
+  const fallback = await (supervisor as any).snapshot(slot, 2, cursor) as Snapshot;
+  assert.equal(fallback.historyDelta, undefined);
+  assert.equal(fallback.historyComplete, false);
+  assert.deepEqual(fallback.entries, entries);
+  assert.equal(slot.history.seq, 1);
 });
 
 test('private Unix socket, strict hello, and reserved launch arguments', { timeout: 10_000 }, async t => {
@@ -427,7 +680,7 @@ test('child IDs are unique despite colliding caller IDs and errors do not poison
   assert.equal(results[0].output, 'one');
   assert.equal(results[1].output, 'two');
   assert.deepEqual(results[2], { messages: [] });
-  await assert.rejects(peer.request('rpc', { slotId: info.id, command: { type: 'get_entries', since: 'unknown' } }), /Unknown entry cursor/);
+  await assert.rejects(peer.request('rpc', { slotId: info.id, command: { type: 'get_entries', since: 'unknown' } }), /Entry not found: unknown/);
   await assert.rejects(peer.request('rpc', { slotId: info.id, command: { type: 'not_real' } }), /Unsupported Pi RPC command/);
   assert.equal((await peer.request('rpc', { slotId: info.id, command: { type: 'get_state' } })).isStreaming, false);
 });
@@ -1051,7 +1304,10 @@ test('restart_daemon reopens running slots in the next daemon with the same IDs,
   assert.equal(ready.state.sessionName, 'Kept');
   assert.deepEqual(ready.entries, before.entries);
   const launches = (await readFile(launchLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-  assert.deepEqual(launches.at(-2).args.slice(-2), ['--session', info.sessionFile]);
+  // Independent process startup can write the log in either order.
+  const reopened = launches.find(launch => launch.pid === ready.slot.pid);
+  assert.ok(reopened, 'The attached slot must have a recorded launch');
+  assert.deepEqual(reopened.args.slice(-2), ['--session', info.sessionFile]);
   assert.equal(next.stateDir, dir);
 });
 

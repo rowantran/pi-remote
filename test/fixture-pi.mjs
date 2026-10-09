@@ -38,6 +38,8 @@ let failStateAfterEntries = false;
 let failStateCount = 0;
 let failEntriesCount = Number(option('--fixture-fail-entries', '0'));
 let switchAfterStates = 0;
+let switchBeforeEntries = false;
+let switchAfterEntries = false;
 let dialogNumber = 0;
 const pendingDialogs = new Map();
 const blockedQueries = [];
@@ -162,6 +164,24 @@ function prompt(command) {
       response(command, { disposition: 'handled' }));
     return;
   }
+  if (command.message === '/large-history') {
+    appendEntry({ type: 'custom', customType: 'large-baseline', data: { text: 'LARGE_BASELINE_'.repeat(250_000) } });
+    send(response(command, { disposition: 'handled' }));
+    return;
+  }
+  if (command.message === '/reset-history') {
+    entries = [];
+    writeFileSync(sessionFile, JSON.stringify({ type: 'session', version: 3,
+      id: sessionId, timestamp: new Date().toISOString(), cwd: process.cwd() }) + '\n');
+    send(response(command, { disposition: 'handled' }));
+    return;
+  }
+  if (['/switch-before-entries', '/switch-after-entries'].includes(command.message)) {
+    switchBeforeEntries = command.message === '/switch-before-entries';
+    switchAfterEntries = command.message === '/switch-after-entries';
+    send(response(command, { disposition: 'handled' }));
+    return;
+  }
   if (command.message === '/seed-live') {
     streaming = true;
     compacting = true;
@@ -243,9 +263,11 @@ function handle(command) {
       send(response(command, state()));
       break;
     case 'get_entries': {
+      if (process.env.PI_FIXTURE_ENTRIES_LOG) appendFileSync(process.env.PI_FIXTURE_ENTRIES_LOG, JSON.stringify({ since: command.since }) + '\n');
+      if (switchBeforeEntries) { switchBeforeEntries = false; newSession(true); }
       if (failEntriesCount > 0) { failEntriesCount--; send(response(command, undefined, 'Fixture get_entries failure')); break; }
       const index = command.since === undefined ? -1 : entries.findIndex(entry => entry.id === command.since);
-      if (command.since !== undefined && index < 0) { send(response(command, undefined, 'Unknown entry cursor')); break; }
+      if (command.since !== undefined && index < 0) { send(response(command, undefined, `Entry not found: ${command.since}`)); break; }
       const result = response(command, { entries: entries.slice(index + 1), leafId: entries.at(-1)?.id ?? null });
       if (boundaryArmed) {
         boundaryArmed = false;
@@ -256,6 +278,7 @@ function handle(command) {
           delta('boundary complete'), { type: 'message_end', message },
           { type: 'agent_end', messages: [message], willRetry: false }, { type: 'agent_settled' });
       } else send(result);
+      if (switchAfterEntries) { switchAfterEntries = false; newSession(true); }
       if (failStateAfterEntries) { failStateAfterEntries = false; failStateCount++; }
       break;
     }

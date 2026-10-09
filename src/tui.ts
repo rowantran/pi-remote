@@ -2,6 +2,7 @@ import { readAttachment } from './files.js';
 import { emptyLive } from './live.js';
 import { Transcript } from './transcript.js';
 import { ForkSelector } from './fork-selector.js';
+import { sessionTree } from './session-tree.js';
 import { ScheduledTuiAltScreen } from './scheduled-tui.js';
 import { WorkingIndicator } from './working-indicator.js';
 import { createRemoteKeybindings } from './keybindings.js';
@@ -25,7 +26,7 @@ import {
   type RecordValue, type RemoteConnection, type RemoteEvent, type SlotInfo, type Snapshot,
 } from './protocol.js';
 import {
-  DIALOG_METHODS, RemoteView, restoredQueueText, safeText, transcriptMessages,
+  DIALOG_METHODS, HistoryMismatchError, RemoteView, restoredQueueText, safeText, transcriptMessages,
 } from './view.js';
 
 /** Pi's keyDisplayText (not exported publicly): capitalized keys, Option for Alt on macOS. */
@@ -556,6 +557,7 @@ export class RemoteTui {
   private onEvent(event: RemoteEvent): void {
     if (this.detached || event.slotId !== this.slotId) return;
     const gap = event.seq > this.view.snapshot.seq + 1;
+    if (gap) this.view.invalidateHistory();
     // Legacy daemons lack remote_bash_end. A completed shell record increases
     // messageCount; refresh its history rather than retaining stale live output.
     const legacyBashFinished = event.event.type === 'remote_state' && !this.refreshing
@@ -592,6 +594,7 @@ export class RemoteTui {
   /** Invalidate the old process without clearing local drafts, attachments, or cached history. */
   private resetRemoteProcess(): void {
     this.generation++;
+    this.view.invalidateHistory();
     this.view.snapshot.live = emptyLive(); this.view.snapshot.ui = []; delete this.view.snapshot.presentation;
     this.resetSnapshotFlight();
     this.metadataPending.clear(); this.completion?.invalidateCommands();
@@ -614,11 +617,22 @@ export class RemoteTui {
     this.journal = []; this.refreshing = true;
     this.refreshPromise = (async () => {
       try {
-        const snapshot = await this.connection.request<Snapshot>('snapshot', { slotId: this.slotId });
+        const historyCursor = this.view.historyCursor();
+        let snapshot = await this.connection.request<Snapshot>('snapshot', {
+          slotId: this.slotId, ...(historyCursor ? { historyCursor } : {}),
+        });
         if (this.detached || generation !== this.generation) return;
         const presentation = this.view.snapshot.presentation;
         const wasBusy = this.view.snapshot.live.busy;
-        this.view.replace(snapshot, this.journal);
+        try { this.view.replace(snapshot, this.journal); }
+        catch (error) {
+          if (!(error instanceof HistoryMismatchError)) throw error;
+          // A gap or session change can invalidate the prefix while this read is in flight.
+          // Recover with a full read, never retry a mutation.
+          snapshot = await this.connection.request<Snapshot>('snapshot', { slotId: this.slotId });
+          if (this.detached || generation !== this.generation) return;
+          this.view.replace(snapshot, this.journal);
+        }
         this.view.snapshot.presentation = { ...presentation, ...snapshot.presentation };
         this.reconcileWorkingLifecycle(wasBusy);
         this.presentation?.update(this.view.snapshot);
@@ -886,9 +900,24 @@ export class RemoteTui {
       this.localDialog = dialog; this.syncBottom();
       // Paint before starting the read, including when decoding/constructing a large tree is slow.
       this.tui.renderNow();
-      return await Promise.race([
-        this.rpc<{ tree: SessionTreeNode[]; leafId: string | null }>({ type: 'get_tree' }), cancelled,
-      ]);
+      const read = async () => {
+        if (this.detached || !this.connected) throw new Error('Disconnected. Nothing was sent. Reconnect before opening the fork picker.');
+        if (this.view.snapshot.historyComplete === undefined) {
+          // Older daemons do not certify a complete history checkpoint.
+          return this.rpc<{ tree: SessionTreeNode[]; leafId: string | null }>({ type: 'get_tree' });
+        }
+        // Reuse a refresh already running after a turn. Do not start a second history download.
+        while (this.refreshPromise) await this.refreshPromise;
+        // Messages may have finished after that refresh's cut. Fetch their saved IDs too.
+        // Read at most once more: unfinished streaming messages need not block the picker.
+        if (!this.view.hasCompleteHistory() || this.view.snapshot.live.messages.length) {
+          await this.refresh();
+          while (this.refreshPromise) await this.refreshPromise;
+        }
+        if (!this.view.hasCompleteHistory()) throw new Error('Session history is not ready. Wait for startup or the session change to finish.');
+        return { tree: sessionTree(this.view.snapshot.entries), leafId: this.view.snapshot.leafId };
+      };
+      return await Promise.race([read(), cancelled]);
     } finally {
       loader.stop();
       if (this.localDialog === dialog) this.localDialog = undefined;

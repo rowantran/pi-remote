@@ -28,10 +28,14 @@ export interface LiveState {
   followUp: string[];
   bash?: Record<string, RecordValue>;
 }
+/** Last entry in a verified, complete history checkpoint (not the active leaf). */
+export interface HistoryCursor { sessionId: string; entryId: string }
 export interface Snapshot {
   slot: SlotInfo;
   state: RecordValue;
   entries: RecordValue[];
+  /** When present, entries append to this checkpoint. Omission means a full replacement. */
+  historyDelta?: HistoryCursor;
   leafId: string | null;
   live: LiveState;
   ui: RecordValue[];
