@@ -68,7 +68,8 @@ Ctrl+V /paste: local clipboard files, image, or text. Ctrl+G /editor: local exte
 !command runs on the remote host; !!command excludes its output from model context.
 /thinking /export [remote path] /reload-ui /theme NAME are local client commands.
 Unknown slash commands go to remote Pi (extensions, skills, templates).
-Trusted local presentation extensions are opt-in with --ui-extension or --ui-config.
+Trusted local presentation extensions are opt-in with the XDG config's extensions allowlist,
+--ui-extension, or --ui-config.
 No commands are restarted or replayed after a disconnect.`;
 
 /** Keep the full document on detach; a zero transcript basis applies only to the viewport. */

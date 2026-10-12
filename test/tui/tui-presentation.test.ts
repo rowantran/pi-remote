@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -53,6 +53,48 @@ async function launch(t: any, initial = snapshot(), paths: string[] = [], connec
   const submit = async (text: string) => { ui.editor.setText(text); terminal.input('\r'); await flush(); };
   return { ui, terminal, connection, submit };
 }
+
+test('default XDG UI settings load and reload without changing the remote session', async t => {
+  const home = await mkdtemp(resolve(tmpdir(), 'remote-xdg-ui-'));
+  const previous = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
+  process.env.HOME = home;
+  process.env.XDG_CONFIG_HOME = resolve(home, 'config');
+  t.after(async () => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    await rm(home, { recursive: true, force: true });
+  });
+  const dir = resolve(home, 'config/pi-remote');
+  await mkdir(dir, { recursive: true });
+  await mkdir(resolve(home, '.pi'));
+  await writeFile(resolve(home, '.pi/remote-client.json'), 'invalid old configuration; must not be read');
+  const config = resolve(dir, 'config.json');
+  await writeFile(config, JSON.stringify({ host: 'devbox', cwd: '~/project', extensions: [display], theme: 'dark', bell: false, sideSplit: 'down' }));
+  const connection = new Connection();
+  const terminal = new FakeTerminal();
+  const ui = new RemoteTui(connection, 'slot', snapshot(), terminal);
+  const notify = t.mock.method(ui as any, 'notify');
+  const finished = ui.run();
+  t.after(async () => { ui.detach(); await finished; });
+  await ui.initialize(); await flush();
+  assert.ok(ui.presentation?.footer);
+  assert.equal((ui as any).localTheme.name, 'dark');
+  assert.equal((ui as any).bell, false);
+  assert.equal((ui as any).sideSplit, 'down');
+  ui.tui.renderNow();
+  assert.doesNotMatch(stripTerminalSequences(ui.tui.getScreenLines().join('\n')), /remote-client.json|Deprecated config path/);
+  const requests = connection.requests.length;
+  await writeFile(config, JSON.stringify({ host: 'other', cwd: '/elsewhere', extensions: [], theme: 'light', bell: true, sideSplit: 'right' }));
+  await (ui as any).reloadPresentation();
+  assert.equal(ui.presentation?.footer, undefined);
+  assert.equal((ui as any).localTheme.name, 'light');
+  assert.equal((ui as any).bell, true);
+  assert.equal((ui as any).sideSplit, 'right');
+  assert.equal(connection.requests.length, requests);
+  assert.equal(ui.view.snapshot.slot.cwd, '/remote/work');
+  assert.equal(notify.mock.calls.some(call => String(call.arguments[0]).includes('remote-client.json')), false);
+});
 
 test('presentation initialization does not wait for unavailable metadata or block startup dialogs', async t => {
   const initial = snapshot(); initial.ui = [{ id: 'startup', method: 'confirm', title: 'Startup confirmation' }];

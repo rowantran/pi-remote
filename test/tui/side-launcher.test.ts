@@ -209,12 +209,13 @@ test('Ghostty macOS bash wrapper preserves quoted argument data', { skip: proces
   assert.deepEqual(JSON.parse(result.stdout), values);
 });
 
-test('split forwards only SSH, UI adapter, and PATH settings as argv assignments', async () => {
+test('split forwards only SSH, UI adapter, XDG config, and PATH settings as argv assignments', async () => {
   const { dependencies, calls } = mockGhostty();
   dependencies.env = {
     TERM_PROGRAM: 'ghostty',
     SSH_AUTH_SOCK: '/socket/a \"quoted\" path',
     PI_CODING_AGENT_DIR: '/agent/a=b',
+    XDG_CONFIG_HOME: '/custom config',
     PI_REMOTE_RENDERER_REPO: '/renderer/$(false);\nend tell',
     PATH: '/bin:/a path/bin',
     OPENAI_API_KEY: 'do-not-forward', AWS_SECRET_ACCESS_KEY: 'also-not-forwarded',
@@ -225,6 +226,7 @@ test('split forwards only SSH, UI adapter, and PATH settings as argv assignments
     'SSH_AUTH_SOCK=/socket/a \"quoted\" path',
     'PI_CODING_AGENT_DIR=/agent/a=b',
     'PI_REMOTE_RENDERER_REPO=/renderer/$(false);\nend tell',
+    'XDG_CONFIG_HOME=/custom config',
     'PATH=/bin:/a path/bin',
   ]);
   const script = calls[0].args[1];

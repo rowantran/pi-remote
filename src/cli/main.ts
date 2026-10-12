@@ -51,19 +51,20 @@ Options:
   --wait               restart-daemon: wait until no slot is busy
   --force              restart-daemon: interrupt busy slots
   --ui-extension PATH  Load a local presentation adapter (repeatable)
-  --ui-config PATH     Local presentation configuration
+  --ui-config PATH     Alternate UI config (does not change host/cwd defaults)
   --theme NAME         Local UI theme, or a LIGHT/DARK pair
   --no-reconnect       Disable automatic client reconnection
   --no-bell            Disable the local terminal bell when remote work settles
 
 Configuration:
   $XDG_CONFIG_HOME/pi-remote/config.json (default ~/.config/pi-remote/config.json)
-  sets the default SSH host and remote directory:
-    {"host": "devbox", "cwd": "~/project"}
+  sets connection defaults and local UI settings:
+    {"host": "devbox", "cwd": "~/project", "extensions": [], "theme": "dark",
+     "bell": true, "sideSplit": "auto"}
   Host precedence: --host, then PI_REMOTE_HOST, then the config file.
   Directory precedence: --cwd, then PI_REMOTE_CWD, then the config file.
-  Local UI: ~/.pi/remote-client.json (or --ui-config) supports {"bell": false}.
-  The bell defaults to on; --no-bell overrides the local UI config.
+  --ui-config overrides only UI settings; --ui-extension adds trusted adapters.
+  The bell defaults to on; --no-bell overrides the config.
 
 SLOT is a stable number from ls, a full UUID, or a unique UUID prefix.
 attach without SLOT opens a local picker when several active slots exist.

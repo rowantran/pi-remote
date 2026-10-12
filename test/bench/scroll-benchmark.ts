@@ -26,8 +26,11 @@
  * the timer is not disabled. Without --scenario, all three run in one process.
  * The no-UI config path above must not exist. Resolve the unchanged Rowan adapter
  * inside EACH worktree: its import aliases must point to that worktree's classes,
- * not a primary-checkout adapter selected by ~/.pi/remote-client.json. Check equal
- * transcript hashes/line counts and presentation.assistantRenderPatched=true.
+ * not a primary-checkout adapter selected by the default XDG config. The explicit
+ * --ui-config overrides the default UI config, not connection defaults.
+ * Default UI config: $XDG_CONFIG_HOME/pi-remote/config.json, falling back to
+ * ~/.config/pi-remote/config.json when XDG_CONFIG_HOME is unset or not absolute.
+ * Check equal transcript hashes/line counts and presentation.assistantRenderPatched=true.
  * --theme can pin the theme instead of using the config/local Pi theme setting.
  * Trusted UI extensions have normal process privileges: use only offline adapters.
  * Active renderer timers or async hooks that cause extra frames fail the benchmark
@@ -43,7 +46,7 @@ import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { Session as InspectorSession } from 'node:inspector/promises';
 import { open, readFile, readdir, writeFile } from 'node:fs/promises';
-import { cpus, homedir } from 'node:os';
+import { cpus } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
@@ -51,6 +54,7 @@ import { parseArgs } from 'node:util';
 import { AssistantMessageComponent, ToolExecutionComponent } from '@earendil-works/pi-coding-agent';
 import type { Terminal } from '@earendil-works/pi-tui';
 import { readPresentationConfig } from '../../src/tui/presentation.js';
+import { configPath } from '../../src/protocol/config.js';
 import type { RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../../src/protocol/types.js';
 import { remoteSessionEnv } from '../../src/protocol/remote-session.js';
 import { RemoteTui } from '../../src/tui/tui.js';
@@ -62,8 +66,10 @@ const HELP = `Usage: node --import tsx test/bench/scroll-benchmark.ts [options]
   --capture FILE       Capture once, then replay locally; new file only, mode 0600
   --host HOST          Required with --capture (SSH alias)
   --slot NUMBER|ID     Required with --capture; never opens a picker or attaches
-  --ui-config FILE     Local presentation config (default ~/.pi/remote-client.json)
-  --ui-extension FILE  Trusted local presentation adapter (repeatable; cwd-relative)
+  --ui-config FILE     Override UI config only; bypass the default UI config
+                       Default: $XDG_CONFIG_HOME/pi-remote/config.json, or
+                       ~/.config/pi-remote/config.json if unset/not absolute
+  --ui-extension FILE  Add trusted local adapter (repeatable; deduped; cwd-relative)
   --theme NAME         Optional fixed theme (otherwise normal UI theme selection)
   --width NUMBER       Terminal columns (default 140; minimum 20)
   --rows NUMBER        Terminal rows (default 45; minimum 10)
@@ -227,7 +233,7 @@ function statistics(values: number[]) {
   };
 }
 
-async function replay(snapshot: Snapshot, options: { width: number; rows: number; iterations: number; config: string; extensions: string[]; scenarios: readonly Scenario[]; theme?: string; profile?: string; experiment: RenderExperiment; renderIntervalMs: number; scheduledDuration?: number; inputInterval: number }) {
+async function replay(snapshot: Snapshot, options: { width: number; rows: number; iterations: number; config?: string; extensions: string[]; scenarios: readonly Scenario[]; theme?: string; profile?: string; experiment: RenderExperiment; renderIntervalMs: number; scheduledDuration?: number; inputInterval: number }) {
   const terminal = new MemoryTerminal(options.width, options.rows);
   const connection = new FakeConnection(snapshot);
   // Match runTui's local presentation environment, with the same deterministic
@@ -438,7 +444,7 @@ async function main() {
     profile: values.profile, experiment: values.experiment as RenderExperiment,
     width: integer(values.width!, '--width', 20), rows: integer(values.rows!, '--rows', 10),
     iterations: integer(values.iterations!, '--iterations', 1),
-    config: resolve(values['ui-config'] ?? join(homedir(), '.pi/remote-client.json')),
+    config: values['ui-config'] === undefined ? undefined : resolve(values['ui-config']),
     extensions: values['ui-extension'] ?? [], theme: values.theme,
     scenarios: values.scenario === undefined ? SCENARIOS : [values.scenario as Scenario],
   };
@@ -460,7 +466,7 @@ async function main() {
     input: {
       snapshotSha256: hash(text), scriptSha256: await fileHash(script), sourceSha256: hash(JSON.stringify(sourceHashes)),
       packageLockSha256: await fileHash(join(root, 'package-lock.json')),
-      uiConfig: options.config, uiConfigSha256: await fileHash(options.config),
+      uiConfig: options.config ?? configPath(), uiConfigSha256: await fileHash(options.config ?? configPath()),
       uiExtensions: await Promise.all(config.extensions.map(async path => ({ path, sha256: await fileHash(path) }))),
       width: options.width, rows: options.rows, iterations: options.iterations, scenarios: options.scenarios,
       renderIntervalMs: options.renderIntervalMs,

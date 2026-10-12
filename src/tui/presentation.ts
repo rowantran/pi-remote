@@ -14,7 +14,7 @@ import { WidthCache } from './width-cache.js';
 import type { RecordValue, Snapshot } from '../protocol/types.js';
 import { ReadonlyHistory, readonlyCopy } from './presentation-history.js';
 import { safeText } from './view.js';
-import { isSplitDirection, type SplitDirection } from './side-launcher.js';
+import { configPath, parseConfig, type ClientConfig, type SplitDirection } from '../protocol/config.js';
 
 /**
  * Local presentation compatibility, NOT a JavaScript sandbox. Only explicitly trusted files may
@@ -27,26 +27,34 @@ import { isSplitDirection, type SplitDirection } from './side-launcher.js';
  * access, provider registration and session-control APIs are intentionally unsupported.
  */
 export interface PresentationConfig { extensions: string[]; theme?: string; bell?: boolean; sideSplit?: SplitDirection }
+export interface PresentationConfigOptions {
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+}
 export async function readPresentationConfig(
-  path = resolve(homedir(), '.pi/remote-client.json'), cliExtensions: string[] = [],
+  path?: string, cliExtensions: string[] = [], options: PresentationConfigOptions = {},
 ): Promise<PresentationConfig> {
-  let config: RecordValue = {};
-  try { config = JSON.parse(await readFile(path, 'utf8')); }
+  const home = options.home ?? homedir();
+  // Explicit --ui-config replaces the UI defaults, never the connection defaults.
+  const file = path ?? configPath(options.env, home);
+  let text: string | undefined;
+  try { text = await readFile(file, 'utf8'); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-  if (!config || typeof config !== 'object' || Array.isArray(config)
-    || (config.extensions !== undefined && (!Array.isArray(config.extensions) || config.extensions.some((p: unknown) => typeof p !== 'string' || !p)))
-    || (config.theme !== undefined && typeof config.theme !== 'string')
-    || (config.bell !== undefined && typeof config.bell !== 'boolean')
-    || (config.sideSplit !== undefined && !isSplitDirection(config.sideSplit))) throw new Error(`Invalid presentation config: ${path}`);
+  let config: ClientConfig = {};
+  if (text !== undefined) {
+    try { config = parseConfig(text, file); }
+    catch (error) { throw new Error(`Invalid presentation config: ${(error as Error).message}`); }
+  }
   return {
     extensions: [...new Set([
-      ...(config.extensions ?? []).map((p: string) => modulePath(p, dirname(resolve(path)))),
-      ...cliExtensions.map(p => modulePath(p)),
-    ])], theme: config.theme, bell: config.bell, ...(config.sideSplit !== undefined ? { sideSplit: config.sideSplit } : {}),
+      ...(config.extensions ?? []).map(p => modulePath(p, dirname(resolve(file)), home)),
+      ...cliExtensions.map(p => modulePath(p, undefined, home)),
+    ])],
+    theme: config.theme, bell: config.bell, ...(config.sideSplit !== undefined ? { sideSplit: config.sideSplit } : {}),
   };
 }
-function modulePath(path: string, base = process.cwd()): string {
-  return resolve(base, path.startsWith('~/') ? resolve(homedir(), path.slice(2)) : path);
+function modulePath(path: string, base = process.cwd(), home = homedir()): string {
+  return resolve(base, path.startsWith('~/') ? resolve(home, path.slice(2)) : path);
 }
 
 type DisposableComponent = Component & { dispose?(): void };

@@ -16,6 +16,7 @@ npm link                     # puts pi-remote on PATH, linked to this checkout
 npm run deploy -- devbox      # installs on the remote host; see "Deployment"
 
 # Set the default SSH host once (see "Configuration" below).
+# If XDG_CONFIG_HOME is an absolute path, use it instead of ~/.config.
 mkdir -p ~/.config/pi-remote
 echo '{"host": "devbox"}' > ~/.config/pi-remote/config.json
 
@@ -73,17 +74,34 @@ Choose a cheap naming model in the remote `~/.pi/agent/extensions/auto-session-n
 
 ### Configuration
 
-The local client reads `$XDG_CONFIG_HOME/pi-remote/config.json`. If `XDG_CONFIG_HOME` is unset or not an absolute path, it reads `~/.config/pi-remote/config.json`. The file is optional and supports two keys, both optional:
+The local client reads `$XDG_CONFIG_HOME/pi-remote/config.json`. If `XDG_CONFIG_HOME` is unset or not an absolute path, it reads `~/.config/pi-remote/config.json`. This optional file holds connection defaults and local UI settings. All six keys are optional:
 
 ```json
-{ "host": "devbox", "cwd": "~/workplace/project" }
+{
+  "host": "devbox",
+  "cwd": "~/workplace/project",
+  "extensions": ["/absolute/path/to/pi-remote/example-configs/rowan-ui.ts"],
+  "theme": "dark",
+  "bell": true,
+  "sideSplit": "auto"
+}
 ```
+
+Replace the extension path with your checkout's absolute path, and load only adapters you trust. [`example-configs/rowan-ui.ts`](example-configs/rowan-ui.ts) is a user-specific adapter, not a portable default; see [local presentation](#opt-in-explicitly) before enabling it. Omit `extensions` to use the built-in display, unless you select adapters with `--ui-extension`.
 
 The host comes from the first of these that is set: `--host`, the `PI_REMOTE_HOST` environment variable, then the config file. `--local` ignores all three.
 
 `cwd` is the default remote working directory for `pi-remote new`. It comes from the first of these that is set: `--cwd`, the `PI_REMOTE_CWD` environment variable, then the config file. With a default, `pi-remote new` needs no `--cwd`. The value is a path on the remote host: `~` means the remote home, and the remote daemon checks that the directory exists. The default applies to every host, including one selected with `--host`. `--local` ignores it, so `new --local` still needs `--cwd`. `--session` completion also uses this default as its base when `--cwd` is not given.
 
-Invalid JSON or unknown keys cause an error, so a typo does not go unnoticed. This file is separate from the presentation config `~/.pi/remote-client.json` described below.
+`extensions` is an allowlist of trusted local adapter files. `theme` selects the local theme, `bell` enables or disables the terminal bell, and `sideSplit` selects `auto`, `right`, `down`, `left`, or `up`. Relative extension paths resolve beside the config file that supplies them; `~/` means local home. Invalid JSON, unknown keys, or invalid values cause an error, so a typo does not go unnoticed.
+
+`--ui-config PATH` overrides **only UI settings** (`extensions`, `theme`, `bell`, and `sideSplit`). It replaces the default config for those settings. It does not change where `host` and `cwd` defaults come from, even if the selected file contains those keys. Repeatable `--ui-extension PATH` flags add to the selected allowlist and deduplicate resolved paths; their relative paths use the local working directory. `--theme NAME` and `--no-bell` override config values. `/reload-ui` reads the configuration again and reloads local adapters, theme, bell, and split settings; it does not reconnect, change connection defaults, or restart remote Pi.
+
+#### Removed UI configuration path
+
+The old default path `~/.pi/remote-client.json` is no longer read. There is no fallback, detection, or warning. UI settings must be in the XDG config or a file explicitly selected with `--ui-config`.
+
+To migrate, merge your old UI keys into the XDG config, keeping any existing connection defaults, then remove the old file. Preserve absolute extension paths, or adjust relative paths for the new config directory. Each relative path is resolved beside its originating file, so copying it unchanged from `~/.pi/remote-client.json` to `~/.config/pi-remote/config.json` can select a different file. If your allowlist still points into the checkout's old `examples/` directory, update it to `example-configs/`; the directory was renamed to distinguish adapter examples from JSON client configuration.
 
 ### Shell completion (fish, zsh, bash)
 
@@ -154,7 +172,7 @@ For zsh or bash, put `pi-remote` on `PATH` with `npm link`, then install the mat
 | Ctrl+G / `/editor` | Edit the draft with local `$VISUAL`, `$EDITOR`, or `nano` |
 | `!command` / `!!command` | Run a remote shell command; `!!` excludes its output from model context |
 | `/reload` | Restart remote Pi in the same slot and session; asks before interrupting work or discarding queued prompts |
-| `/reload-ui` | Reload local presentation adapters and theme, not remote Pi |
+| `/reload-ui` | Reread local UI config and reload adapters, theme, bell, and split settings, not remote Pi |
 | `/theme [NAME]` | Show or change the local theme for this client |
 | `/help` | Show local controls |
 
@@ -194,9 +212,9 @@ Each side gets a normal slot number. The slot list groups it under its parent, a
 
 **Cleanup:** when a side slot has no attached clients for 90 seconds, the daemon stops it once it is idle. This also applies to a side slot whose split never opened. Reattaching during the grace period keeps it alive. Active agent turns, queues, shell commands, startup, and open dialogs prevent idle cleanup. The daemon uses Pi's reported activity; it does not independently track extension-internal background jobs. Stopping or losing the parent Pi process stops its side slots and their descendants, even if they are busy; `/reload` and deliberate daemon restarts preserve them. Stopped side slots leave the catalogue, but their session files remain available. Ordinary slots retain their existing detach behavior.
 
-**Ghostty:** automatic splits require macOS, Ghostty 1.3 or newer, `macos-applescript = true` in Ghostty's configuration, and macOS Automation permission. The client captures the original pane before requesting the side slot, then opens a split running this installation's `pi-remote attach` with the same host, daemon and local UI options. No terminal keystrokes are simulated. Because the attach command bypasses shell startup files, the split receives only four explicit environment overrides from the current client: `PATH`, `SSH_AUTH_SOCK`, `PI_CODING_AGENT_DIR`, and `PI_REMOTE_RENDERER_REPO`, when set. It otherwise uses Ghostty's normal environment; credentials and other shell exports are not copied. If Ghostty is unavailable or splitting fails, the side slot remains available and the client prints the full attach command. Attach before idle cleanup stops it.
+**Ghostty:** automatic splits require macOS, Ghostty 1.3 or newer, `macos-applescript = true` in Ghostty's configuration, and macOS Automation permission. The client captures the original pane before requesting the side slot, then opens a split running this installation's `pi-remote attach` with the same host, daemon and local UI options. No terminal keystrokes are simulated. Because the attach command bypasses shell startup files, the split receives only five explicit environment overrides from the current client: `PATH`, `SSH_AUTH_SOCK`, `PI_CODING_AGENT_DIR`, `PI_REMOTE_RENDERER_REPO`, and `XDG_CONFIG_HOME`, when set. It otherwise uses Ghostty's normal environment; credentials and other shell exports are not copied. If Ghostty is unavailable or splitting fails, the side slot remains available and the client prints the full attach command. Attach before idle cleanup stops it.
 
-By default, the split follows the current pane's longer pixel dimension: wide panes split right; tall or square panes split down. Cell dimensions reported by the terminal are used when available, with a 9×18-pixel estimate otherwise. Set `sideSplit` in local `~/.pi/remote-client.json` (or `--ui-config`) to override it:
+By default, the split follows the current pane's longer pixel dimension: wide panes split right; tall or square panes split down. Cell dimensions reported by the terminal are used when available, with a 9×18-pixel estimate otherwise. Set `sideSplit` in your [local config](#configuration) (or the file selected by `--ui-config`) to override it:
 
 ```json
 { "sideSplit": "auto" }
@@ -208,7 +226,7 @@ Allowed values are `auto`, `right`, `down`, `left`, and `up`. `/reload-ui` rerea
 
 Use `/reload` to stop and launch remote Pi again in the **same slot and stored session file**, so it reads remote extensions and configuration again. The original launch arguments are reapplied. The client stays attached and the daemon is not restarted. Persisted conversation history remains; running work, steering/follow-up queues, open dialogs, in-memory model or thinking-level changes, and other unpersisted process state are discarded. Before the first prompt is persisted, the session path can stay the same while the new process creates a different session ID. Busy reloads require confirmation, with **Cancel** selected by default. The server can also require confirmation when work starts before the client sees it.
 
-While Pi starts, the client blocks remote submissions and retains your draft and pending local attachments. The client can send startup dialog answers, but Pi 1.0.4 cannot read them while an initial `session_start` hook awaits a dialog; the [upstream RPC limitation](#upstream-rpc-limitations) still applies. When Pi is ready, a fresh snapshot restores authoritative history, widgets, and command suggestions. `/reload-ui` remains separate: it reloads only local presentation adapters and the local theme.
+While Pi starts, the client blocks remote submissions and retains your draft and pending local attachments. The client can send startup dialog answers, but Pi 1.0.4 cannot read them while an initial `session_start` hook awaits a dialog; the [upstream RPC limitation](#upstream-rpc-limitations) still applies. When Pi is ready, a fresh snapshot restores authoritative history, widgets, and command suggestions. `/reload-ui` remains separate: it rereads local UI configuration and reloads adapters, theme, bell, and split settings without restarting remote Pi.
 
 Reload requests are never replayed after a disconnect. Check the slot before trying again. Only an explicit force confirmation after the server's busy refusal sends a second request; that refusal did not accept a restart.
 
@@ -240,9 +258,9 @@ The local TUI rings the terminal bell (BEL) once when an observed remote run goe
 
 Ghostty's default `bell-features = attention,title` behavior adds a 🔔 title marker and requests attention. SketchyBar can mark a workspace urgent when a Ghostty window title starts with `🔔 `. Ghostty clears the marker on focus or keyboard input. Window titles do not aggregate all Ghostty split panes.
 
-Use `--no-bell` with `new` or `attach` to disable the built-in bell for that client. To disable it by default, set `"bell": false` in local `~/.pi/remote-client.json` (or the file selected by `--ui-config`). `/reload-ui` rereads the setting; `--no-bell` always wins. The bell still rings when work settles in a focused window; focus-aware suppression is not implemented.
+Use `--no-bell` with `new` or `attach` to disable the built-in bell for that client. To disable it by default, set `"bell": false` in your [local config](#configuration) (or the file selected by `--ui-config`). `/reload-ui` rereads the setting; `--no-bell` always wins. The bell still rings when work settles in a focused window; focus-aware suppression is not implemented.
 
-An invalid local UI config produces a warning and rejects the whole file, even if its `bell` value is valid. At startup, the bell then uses its default (on), unless `--no-bell` was supplied. A failed `/reload-ui` retains the previous bell setting.
+Invalid unified configuration stops commands that read connection defaults. An invalid alternate UI config produces a warning and rejects the whole file, even if its `bell` value is valid. At startup, the bell then uses its default (on), unless `--no-bell` was supplied. A failed `/reload-ui` retains the previous bell setting.
 
 Do not also load a terminal-bell presentation adapter unless you want a second bell. Remote Pi's TUI-only `emit-terminal-bel.ts` remains inactive in RPC mode; native Pi can still use it.
 
@@ -258,18 +276,9 @@ The local client can separately load trusted presentation adapters for tool call
 
 ### Opt in explicitly
 
-Use repeatable `--ui-extension PATH` flags, or create **local** `~/.pi/remote-client.json` with an explicit allowlist of trusted files:
+Use repeatable `--ui-extension PATH` flags, or add an explicit `extensions` allowlist to your **local** `$XDG_CONFIG_HOME/pi-remote/config.json` (default `~/.config/pi-remote/config.json`). See the [unified config example](#configuration) and [migration instructions](#removed-ui-configuration-path).
 
-```json
-{
-  "extensions": ["/absolute/path/to/trusted-ui.ts"],
-  "theme": "dark",
-  "bell": true,
-  "sideSplit": "auto"
-}
-```
-
-`--ui-config PATH` selects another config file. Config-relative extension paths resolve beside that file; command-line paths resolve from the local working directory. `~/` means local home here. CLI extension paths are added to the config allowlist and deduplicated. Only exact files are selected: the client does **not** automatically load local Pi extension directories, project resources, or packages. Explicit adapters can still import other modules.
+`--ui-config PATH` selects another file for UI settings only and replaces the default UI config, without overriding connection defaults. Config-relative extension paths resolve beside their originating file; command-line paths resolve from the local working directory. `~/` means local home here. CLI extension paths are added to the config allowlist and deduplicated. Only exact files are selected: the client does **not** automatically load local Pi extension directories, project resources, or packages. Explicit adapters can still import other modules.
 
 ```sh
 pi-remote attach 1 --ui-extension ./my-ui.ts --theme dark
@@ -512,6 +521,7 @@ owns local-connection startup and the legacy filesystem fallback.
 - `src/protocol/jsonl.ts`, `live.ts`: bounded JSON-line framing and shared live-state reconstruction.
 - `src/protocol/files.ts`, `attachments.ts`: filesystem result types, limits, and safe attachment reading on either host.
 - `src/protocol/remote-session.ts`, `paths.ts`: session environment contract and socket locations.
+- `src/protocol/config.ts`: shared local config schema and XDG path resolution, imported by both the CLI and TUI.
 - `src/daemon/supervisor.ts`, `pi-process.ts`, `side-sessions.ts`: slots, snapshots, dialogs, Pi RPC child ownership, persistence, and side-session storage.
 - `src/daemon/launch.ts`, `bridge.ts`, `files.ts`: private daemon startup, socket/stdin bridging, and remote filesystem requests.
 - `src/client/connection.ts`, `reconnect.ts`, `compat-client.ts`: SSH transport, correlation, snapshot-based reconnect without mutation replay, and legacy read-only fallback.
@@ -520,7 +530,8 @@ owns local-connection startup and the legacy filesystem fallback.
 - `src/tui/presentation.ts`, `presentation-history.ts`, `local-theme.ts`: explicit adapter loading, read-only history, and local themes.
 - `src/tui/local-input.ts`, `editor-completion.ts`, `side-launcher.ts`: local attachments, editor completion, and terminal splits.
 - `src/tui/session-labels.ts`: display labels and detach/stop messages.
-- `src/cli/main.ts`, `connections.ts`, `completion.ts`, `config.ts`: commands, connection wiring, shell completion, and XDG configuration.
+- `src/cli/main.ts`, `connections.ts`, `completion.ts`: commands, connection wiring, and shell completion.
+- `src/cli/config.ts`: connection-default wrappers for `host` and `cwd`, using the shared config schema and path.
 - `bin/pi-remote`, `src/protocol/node-entry.ts`: source/compiled launch selection and child-process module arguments.
 - `example-configs/rowan-ui.ts`: selective, user-specific presentation adapter.
 
