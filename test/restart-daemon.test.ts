@@ -46,6 +46,23 @@ test('--wait retries until the daemon accepts, then connects until a new daemon 
   assert.match(lines.at(-1)!, /Daemon 1 \(old\) is stopping; reopening slot 2/);
 });
 
+test('--wait retries daemon-level creation blockers before any live slot exists', async () => {
+  const reason = 'Slot creation is in progress; wait for its allocated ID';
+  const lines: string[] = [];
+  const { connect, calls } = daemons(
+    old([
+      { accepted: false, blocked: [], reopen: [], reason },
+      { accepted: false, blocked: [], reopen: [], reason },
+      { accepted: true, blocked: [], reopen: [slot('created', 1)] },
+    ]),
+    method => method === 'hello' ? { pid: 2 } : [slot('created', 1)],
+  );
+  const result = await restartDaemon(connect, { wait: true, pollMs: 1, log: line => lines.push(line) });
+  assert.equal(calls.filter(call => call === 'restart_daemon').length, 3);
+  assert.deepEqual(result.reopened.map(slot => slot.id), ['created']);
+  assert.deepEqual(lines.filter(line => line.startsWith('Waiting')), [`Waiting: ${reason}`]);
+});
+
 test('explains the one-time manual step for daemons without restart_daemon', async () => {
   const { connect } = daemons(method => {
     if (method === 'hello') return { pid: 7 };
