@@ -13,6 +13,19 @@ test('slot list says how many stopped slots are hidden', () => {
   assert.equal(formatSlotList([slot(3, 'exited')]), '  3  id-3  exited   0 client(s)  (unnamed)  /work');
 });
 
+test('side slots are grouped under their parent with normal slot numbers', () => {
+  const child = { ...slot(3, 'running', 'question'), parentSlotId: 'id-1', parentSlotNumber: 1 };
+  const nested = { ...slot(4, 'running'), parentSlotId: 'id-3', parentSlotNumber: 3 };
+  const output = formatSlotList([slot(1, 'running', 'main'), slot(2, 'running'), nested, child]).split('\n');
+  assert.match(output[0], /  1  id-1/);
+  assert.match(output[1], /^    3  id-3.*question \(side of #1\)/);
+  assert.match(output[2], /^      4  id-4.*side of #3/);
+  assert.match(output[3], /  2  id-2/);
+  assert.match(formatSlotList([child]), /side of #1/);
+  const cycle = { ...slot(1, 'running'), parentSlotId: 'id-3' };
+  assert.equal(formatSlotList([cycle, child]).split('\n').length, 2);
+});
+
 test('CLI parses --all', () => {
   assert.ok(parseOptions(['--all']).flags.has('--all'));
 });

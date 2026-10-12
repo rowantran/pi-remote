@@ -14,6 +14,7 @@ import { WidthCache } from './width-cache.js';
 import type { RecordValue, Snapshot } from './protocol.js';
 import { ReadonlyHistory, readonlyCopy } from './presentation-history.js';
 import { safeText } from './view.js';
+import { isSplitDirection, type SplitDirection } from './side-launcher.js';
 
 /**
  * Local presentation compatibility, NOT a JavaScript sandbox. Only explicitly trusted files may
@@ -25,7 +26,7 @@ import { safeText } from './view.js';
  * This is not the complete ExtensionAPI: local dialogs/custom overlays (ui.custom), credential
  * access, provider registration and session-control APIs are intentionally unsupported.
  */
-export interface PresentationConfig { extensions: string[]; theme?: string; bell?: boolean }
+export interface PresentationConfig { extensions: string[]; theme?: string; bell?: boolean; sideSplit?: SplitDirection }
 export async function readPresentationConfig(
   path = resolve(homedir(), '.pi/remote-client.json'), cliExtensions: string[] = [],
 ): Promise<PresentationConfig> {
@@ -35,12 +36,13 @@ export async function readPresentationConfig(
   if (!config || typeof config !== 'object' || Array.isArray(config)
     || (config.extensions !== undefined && (!Array.isArray(config.extensions) || config.extensions.some((p: unknown) => typeof p !== 'string' || !p)))
     || (config.theme !== undefined && typeof config.theme !== 'string')
-    || (config.bell !== undefined && typeof config.bell !== 'boolean')) throw new Error(`Invalid presentation config: ${path}`);
+    || (config.bell !== undefined && typeof config.bell !== 'boolean')
+    || (config.sideSplit !== undefined && !isSplitDirection(config.sideSplit))) throw new Error(`Invalid presentation config: ${path}`);
   return {
     extensions: [...new Set([
       ...(config.extensions ?? []).map((p: string) => modulePath(p, dirname(resolve(path)))),
       ...cliExtensions.map(p => modulePath(p)),
-    ])], theme: config.theme, bell: config.bell,
+    ])], theme: config.theme, bell: config.bell, ...(config.sideSplit !== undefined ? { sideSplit: config.sideSplit } : {}),
   };
 }
 function modulePath(path: string, base = process.cwd()): string {

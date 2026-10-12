@@ -140,7 +140,9 @@ For zsh or bash, put `pi-remote` on `PATH` with `npm link`, then install the mat
 | `/thinking [LEVEL]` / Shift+Tab | Choose/set the remote thinking level, or cycle it with Shift+Tab |
 | `/new` | Stock Pi `new_session` in the same slot |
 | `/fork` / `/tree` | Browse user and assistant messages in a tree-style picker. Choose a user prompt to fork **before** it into a new session file; its original text returns to the editor |
+| `/side [prompt]` | Fork the saved conversation into a side slot and open a local Ghostty split; send the optional prompt once in the side conversation |
 | `/resume` | Pick a stored remote session in the slot's workspace; Pi switches to it |
+| `/resume --side` | Pick a stored side conversation in the workspace; Pi switches to it |
 | `/session` | Show authoritative remote usage and session statistics |
 | `/copy` | Copy the last assistant text to the **local** clipboard |
 | `/name NAME` | Set the current session name |
@@ -179,6 +181,28 @@ Clipboard access occurs only on an explicit paste action. On Linux, image paste 
 A **slot** is a running Pi process, like a tmux pane. A **Pi session** is its current conversation file. `/new`, `/fork`, and `/resume` change the file inside that process; `pi-remote new` creates another process. Every attached client sees a slot's session changes. Two clients can attach at once; the first valid dialog answer wins.
 
 The daemon rejects attempts through its create/resume commands to open a file already owned by another of its slots. This is not a system-wide lock: Pi instances outside this daemon and extension-internal session switches cannot be fenced through stock RPC. Do not open the same file in a separate normal Pi process.
+
+### Side conversations
+
+`/side` copies the current saved conversation into a **new Pi process and session file**, without switching or interrupting the main conversation. `/side Explain this design` also sends that text as the side conversation's first prompt. The daemon sends the prompt once; opening the split, attaching again, or reloading never resends it. Local pending attachments stay with the main editor.
+
+The new process uses the same remote working directory and launch options. This isolates the conversation, not the filesystem: both agents can read and change the same files. It uses stock Pi's `--fork`, which copies the persisted session tree with a new session ID and a `parentSession` link to the source file. If the main agent is running, the side starts from the messages already saved to disk, not partial streamed output or pending prompts. Pi handles incomplete tool-call history when it prepares the next model request. If the main session file has not been written yet, `/side` reports that there is nothing saved to fork.
+
+Side files stay under `~/.pi/agent/side-sessions/`, grouped by workspace like normal Pi sessions. `PI_CODING_AGENT_DIR` relocates this directory with the rest of Pi's agent data. They do **not** appear in the main conversation's normal `/resume`. Use `/resume --side` to open an old side conversation in the current slot, or `pi-remote new --session /remote/path/to/side.jsonl` to open it in a new slot. Inside a side slot, `/new`, `/fork`, and ordinary `/resume` use the side directory too.
+
+Each side gets a normal slot number. The slot list groups it under its parent, and the footer shows `side of #N`, including when a custom footer is installed. `parentSlotId` in the daemon catalogue refers to the **parent slot**, not a Pi session ID. Changing the parent's session with `/new`, `/fork`, or `/resume` does not change this relationship.
+
+**Cleanup:** when a side slot has no attached clients for 90 seconds, the daemon stops it once it is idle. This also applies to a side slot whose split never opened. Reattaching during the grace period keeps it alive. Active agent turns, queues, shell commands, startup, and open dialogs prevent idle cleanup. The daemon uses Pi's reported activity; it does not independently track extension-internal background jobs. Stopping or losing the parent Pi process stops its side slots and their descendants, even if they are busy; `/reload` and deliberate daemon restarts preserve them. Stopped side slots leave the catalogue, but their session files remain available. Ordinary slots retain their existing detach behavior.
+
+**Ghostty:** automatic splits require macOS, Ghostty 1.3 or newer, `macos-applescript = true` in Ghostty's configuration, and macOS Automation permission. The client captures the original pane before requesting the side slot, then opens a split running this installation's `pi-remote attach` with the same host, daemon and local UI options. No terminal keystrokes are simulated. Because the attach command bypasses shell startup files, the split receives only four explicit environment overrides from the current client: `PATH`, `SSH_AUTH_SOCK`, `PI_CODING_AGENT_DIR`, and `PI_REMOTE_RENDERER_REPO`, when set. It otherwise uses Ghostty's normal environment; credentials and other shell exports are not copied. If Ghostty is unavailable or splitting fails, the side slot remains available and the client prints the full attach command. Attach before idle cleanup stops it.
+
+By default, the split follows the current pane's longer pixel dimension: wide panes split right; tall or square panes split down. Cell dimensions reported by the terminal are used when available, with a 9×18-pixel estimate otherwise. Set `sideSplit` in local `~/.pi/remote-client.json` (or `--ui-config`) to override it:
+
+```json
+{ "sideSplit": "auto" }
+```
+
+Allowed values are `auto`, `right`, `down`, `left`, and `up`. `/reload-ui` rereads the setting. Both the client and daemon must be updated to use `/side` and `/resume --side`; an older daemon is rejected before any side slot is created.
 
 ### Reload remote Pi
 
@@ -240,7 +264,8 @@ Use repeatable `--ui-extension PATH` flags, or create **local** `~/.pi/remote-cl
 {
   "extensions": ["/absolute/path/to/trusted-ui.ts"],
   "theme": "dark",
-  "bell": true
+  "bell": true,
+  "sideSplit": "auto"
 }
 ```
 
@@ -333,7 +358,7 @@ local pi-tui client -> SSH stdio -> bridge -> private Unix socket
 - The daemon validates protocol/Pi versions on connection and rechecks the remote Pi executable before starting each slot.
 - Explicit slot kill (`pi-remote kill` or `/quit`), `/reload`, or daemon shutdown closes Pi's stdin. A display parser/reducer failure does not kill a healthy Pi process.
 - Output queues/JSONL frames are bounded at 64 MiB. A slow client is disconnected rather than stalling Pi. Extremely large history records can fail attachment; pagination is not implemented.
-- `slots.json` contains process metadata and session paths, not credentials or a second transcript. `daemon.log` contains stderr, which may include sensitive extension diagnostics. It is private but not rotated automatically yet.
+- `slots.json` contains process metadata and session paths, not credentials or a second transcript. `slots-counter.json` keeps the next slot number so deleting stopped side slots never reuses a number after a restart. `daemon.log` contains stderr, which may include sensitive extension diagnostics. It is private but not rotated automatically yet.
 
 Pi's exported `RpcClient` is not used for transport ownership: in 1.0.4 it has no public dialog-response method and imposes a fixed request timeout. `src/pi-process.ts` implements the documented stdio framing directly, with unique request IDs and no deadlines on agent commands that may await a dialog. This changes no Pi code.
 

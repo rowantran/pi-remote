@@ -57,6 +57,14 @@ test('presentation configuration is opt-in and exact paths are resolved predicta
       await writeFile(path, JSON.stringify({ bell }));
       assert.equal((await readPresentationConfig(path)).bell, bell);
     }
+    for (const sideSplit of ['auto', 'right', 'down', 'left', 'up']) {
+      await writeFile(path, JSON.stringify({ sideSplit }));
+      assert.equal((await readPresentationConfig(path)).sideSplit, sideSplit);
+    }
+    for (const sideSplit of ['', 'horizontal', false, null, [], {}]) {
+      await writeFile(path, JSON.stringify({ sideSplit }));
+      await assert.rejects(readPresentationConfig(path), /Invalid presentation config/);
+    }
     for (const bell of ['false', 0, null, [], {}]) {
       await writeFile(path, JSON.stringify({ bell }));
       await assert.rejects(readPresentationConfig(path), /Invalid presentation config/);

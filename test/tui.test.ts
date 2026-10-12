@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import type { Terminal } from '@earendil-works/pi-tui';
-import { Loader, stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
+import { getCellDimensions, Loader, setCellDimensions, stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
+import type { GhosttySplitOptions } from '../src/side-launcher.js';
 import type { RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../src/protocol.js';
 import { RemoteTui, type TuiOptions } from '../src/tui.js';
 import { detachMessage, stoppedMessage } from '../src/remote-session.js';
@@ -1354,4 +1358,179 @@ test('scrolling up shows a jump-to-latest pill; Ctrl+End or clicking it follows 
   terminal.input(`\x1b[<0;${column + 1};${row + 1}M`); terminal.input(`\x1b[<0;${column + 1};${row + 1}m`);
   assert.equal(ui.tui.isFollowingOutput, true);
   assert.doesNotMatch(screen(ui), /Jump to latest message/);
+});
+
+function sideOptions(opened: GhosttySplitOptions[]): TuiOptions {
+  return { attachContext: { host: 'devbox', stateDir: '/remote/state', theme: 'dark', bell: false },
+    sideLauncher: { captureTarget: async () => 'original-pane', open: async options => { opened.push(options); } } };
+}
+function serveSide(connection: FakeConnection) {
+  connection.handler = method => method === 'hello' ? { capabilities: ['side_slots'] }
+    : method === 'create' ? { id: 'child', number: 7, status: 'running' } : {};
+}
+
+test('/side creates one linked slot, sends its first prompt through the daemon, and opens attach', async t => {
+  const opened: GhosttySplitOptions[] = [];
+  const { ui, connection, submit } = launch(t, snapshot({ state: { sessionId: 'parent-session' } }), new FakeConnection(), sideOptions(opened));
+  serveSide(connection);
+  submit('/side explain this design\non a second line'); await flush();
+  assert.deepEqual(connection.requests.map(r => r.method), ['hello', 'create']);
+  assert.deepEqual(connection.requests[1].params, { parentSlotId: 'slot', expectedParentSessionId: 'parent-session', prompt: 'explain this design\non a second line' });
+  assert.equal(opened.length, 1); assert.equal(opened[0].targetId, 'original-pane');
+  assert.ok(opened[0].invocation.args.includes('child'));
+  assert.ok(opened[0].invocation.args.includes('devbox'));
+  assert.ok(opened[0].invocation.args.includes('--no-bell'));
+  assert.equal(ui.editor.getExpandedText(), '');
+  assert.match(screen(ui), /Side conversation started in slot 7/);
+});
+
+test('/side can run while the main prompt RPC is still pending', async t => {
+  const opened: GhosttySplitOptions[] = [];
+  const { ui, connection, submit } = launch(t, snapshot(), new FakeConnection(), sideOptions(opened));
+  const pending = deferred<{}>();
+  connection.handler = (method, params) => method === 'rpc' && params?.command?.type === 'prompt' ? pending.promise
+    : method === 'hello' ? { capabilities: ['side_slots'] } : { id: 'child', number: 7, status: 'running' };
+  submit('main work'); await flush();
+  submit('/side'); await flush();
+  assert.deepEqual(connection.requests.filter(r => r.method === 'create').map(r => r.params), [{ parentSlotId: 'slot' }]);
+  assert.equal(opened.length, 1);
+  pending.resolve({}); await flush();
+  assert.equal(ui.editor.getExpandedText(), '');
+});
+
+test('/side waits for an in-flight session switch rather than copying the old conversation', async t => {
+  const pending = deferred<{}>(), opened: GhosttySplitOptions[] = [];
+  const { ui, connection, terminal, submit } = launch(t, snapshot(), new FakeConnection(), sideOptions(opened));
+  connection.handler = (method, params) => method === 'sessions' ? [{ path: '/another.jsonl', id: 'another', messageCount: 1 }]
+    : method === 'rpc' && params?.command?.type === 'switch_session' ? pending.promise : snapshot();
+  submit('/resume'); await flush();
+  terminal.input('\r'); await flush();
+  assert.equal(connection.requests.filter(r => r.params?.command?.type === 'switch_session').length, 1);
+  submit('/side question'); await flush();
+  assert.equal(connection.requests.filter(r => r.method === 'create').length, 0);
+  assert.equal(ui.editor.getExpandedText(), '/side question');
+  pending.resolve({ cancelled: true }); await flush();
+});
+
+test('uncertain side creation is never restored to the editor or replayed', async t => {
+  const { ui, connection, submit } = launch(t, snapshot(), new FakeConnection(), sideOptions([]));
+  connection.handler = method => {
+    if (method === 'hello') return { capabilities: ['side_slots'] };
+    throw new Error('connection lost after acceptance');
+  };
+  submit('/side question'); await flush();
+  assert.equal(connection.requests.filter(r => r.method === 'create').length, 1);
+  assert.equal(ui.editor.getExpandedText(), '');
+  assert.match(screen(ui), /Could not confirm side creation/);
+  assert.match(screen(ui), /may already exist/);
+  submit(''); await flush();
+  assert.equal(connection.requests.filter(r => r.method === 'create').length, 1);
+});
+
+test('/side smart split measures current pane pixels, not rows versus columns', async t => {
+  const previous = getCellDimensions(); t.after(() => setCellDimensions(previous));
+  setCellDimensions({ widthPx: 8, heightPx: 20 });
+  const opened: GhosttySplitOptions[] = [];
+  const { connection, terminal, submit } = launch(t, snapshot(), new FakeConnection(), sideOptions(opened));
+  serveSide(connection);
+  terminal.columns = 60; terminal.rows = 40;
+  submit('/side'); await flush();
+  assert.equal(opened[0].direction, 'down');
+  terminal.columns = 200;
+  submit('/side'); await flush();
+  assert.equal(opened[1].direction, 'right');
+});
+
+test('a failed Ghostty split leaves a copyable attach command, without restoring /side or sending twice', async t => {
+  const opened: GhosttySplitOptions[] = [], options = sideOptions(opened);
+  options.sideLauncher!.open = async () => { throw new Error('permission denied'); };
+  const { ui, connection, submit } = launch(t, snapshot(), new FakeConnection(), options);
+  serveSide(connection);
+  submit('/side a question'); await flush();
+  const output = screen(ui);
+  assert.match(output, /Side conversation created in slot 7/);
+  assert.match(output, /permission\s+denied/); assert.match(output, /--host/);
+  assert.match(output, /devbox/); assert.match(output, /child/);
+  assert.equal(ui.editor.getExpandedText(), '');
+  assert.equal(connection.requests.filter(r => r.method === 'create').length, 1);
+});
+
+test('unsupported terminal still creates a resumable side slot and prints attach', async t => {
+  const options = sideOptions([]);
+  options.sideLauncher!.captureTarget = async () => { throw new Error('not Ghostty'); };
+  const { ui, connection, submit } = launch(t, snapshot(), new FakeConnection(), options);
+  serveSide(connection);
+  submit('/side'); await flush();
+  assert.equal(connection.requests.filter(r => r.method === 'create').length, 1);
+  assert.match(screen(ui), /not Ghostty/); assert.match(screen(ui), /child/);
+});
+
+test('/reload-ui rereads the configured side split direction', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-side-ui-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'client.json'), opened: GhosttySplitOptions[] = [];
+  const { ui, connection, submit } = launch(t, snapshot(), new FakeConnection(), { ...sideOptions(opened), presentationConfig: path, theme: 'dark' });
+  serveSide(connection);
+  await writeFile(path, JSON.stringify({ sideSplit: 'left' }));
+  await (ui as any).builtin('/reload-ui', '');
+  submit('/side'); await flush();
+  assert.equal(opened[0].direction, 'left');
+  await writeFile(path, JSON.stringify({ sideSplit: 'up' }));
+  await (ui as any).builtin('/reload-ui', '');
+  submit('/side'); await flush();
+  assert.equal(opened[1].direction, 'up');
+});
+
+test('a session switch during Ghostty preflight cannot fork the wrong conversation', async t => {
+  const pending = deferred<string>(), options = sideOptions([]);
+  options.sideLauncher!.captureTarget = () => pending.promise;
+  const { ui, connection, submit } = launch(t, snapshot({ state: { sessionId: 'original' } }), new FakeConnection(), options);
+  serveSide(connection);
+  submit('/side question'); await flush();
+  ui.view.snapshot.state.sessionId = 'replacement';
+  pending.resolve('pane'); await flush();
+  assert.equal(connection.requests.filter(r => r.method === 'create').length, 0);
+  assert.equal(ui.editor.getExpandedText(), '/side question');
+});
+
+test('detach during accepted creation does not open a pane or replay the request', async t => {
+  const pending = deferred<any>(), opened: GhosttySplitOptions[] = [];
+  const { ui, connection, submit } = launch(t, snapshot(), new FakeConnection(), sideOptions(opened));
+  connection.handler = method => method === 'hello' ? { capabilities: ['side_slots'] } : pending.promise;
+  submit('/side question'); await flush();
+  ui.detach(); pending.resolve({ id: 'child', number: 7, status: 'running' }); await flush();
+  assert.equal(opened.length, 0);
+  assert.equal(connection.requests.filter(r => r.method === 'create').length, 1);
+});
+
+test('old daemons cannot accidentally treat /side as an ordinary create', async t => {
+  const { ui, connection, submit } = launch(t, snapshot(), new FakeConnection(), sideOptions([]));
+  submit('/side question'); await flush();
+  assert.deepEqual(connection.requests.map(r => r.method), ['hello']);
+  assert.match(screen(ui), /does not support side conversations/);
+  assert.equal(ui.editor.getExpandedText(), '/side question');
+});
+
+test('a second /side is not created while the first create is unresolved', async t => {
+  const pending = deferred<any>();
+  const { connection, submit } = launch(t, snapshot(), new FakeConnection(), sideOptions([]));
+  connection.handler = method => method === 'hello' ? { capabilities: ['side_slots'] } : pending.promise;
+  submit('/side first'); await flush(); submit('/side second'); await flush();
+  assert.equal(connection.requests.filter(r => r.method === 'create').length, 1);
+  pending.resolve({ id: 'child', number: 7, status: 'running' }); await flush();
+});
+
+test('/resume --side explicitly selects the side-session catalogue, while /resume stays unchanged', async t => {
+  const { connection, submit } = launch(t);
+  connection.handler = method => method === 'hello' ? { capabilities: ['side_slots'] } : [];
+  submit('/resume --side'); await flush();
+  assert.deepEqual(connection.requests[1], { method: 'sessions', params: { slotId: 'slot', side: true } });
+  submit('/resume'); await flush();
+  assert.deepEqual(connection.requests.at(-1), { method: 'sessions', params: { slotId: 'slot' } });
+});
+
+test('side footers show their parent slot rather than a session entry parentId', t => {
+  const initial = snapshot(); initial.slot.parentSlotId = 'parent-uuid'; initial.slot.parentSlotNumber = 3;
+  const { ui } = launch(t, initial);
+  assert.match(screen(ui), /side of #3/);
 });
