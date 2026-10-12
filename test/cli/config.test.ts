@@ -12,9 +12,9 @@ test('config path follows XDG_CONFIG_HOME and ignores relative values', () => {
 });
 
 test('config parsing validates the host and cwd and rejects unknown keys', () => {
-  assert.deepEqual(parseConfig('{"host":"devbox"}', 'c'), { host: 'devbox', cwd: undefined });
+  assert.deepEqual(parseConfig('{"host":"devbox"}', 'c'), { host: 'devbox' });
   assert.deepEqual(parseConfig('{"host":"devbox","cwd":"~/project"}', 'c'), { host: 'devbox', cwd: '~/project' });
-  assert.deepEqual(parseConfig('{}', 'c'), { host: undefined, cwd: undefined });
+  assert.deepEqual(parseConfig('{}', 'c'), {});
   for (const text of ['nope', '[]', 'null', '{"host":""}', '{"host":1}', '{"hots":"x"}', '{"cwd":""}', '{"cwd":[]}']) assert.throws(() => parseConfig(text, 'c'), /c/);
 });
 

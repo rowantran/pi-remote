@@ -3,11 +3,10 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-export type SplitDirection = 'auto' | 'right' | 'down' | 'left' | 'up';
+import { isSplitDirection, type SplitDirection } from '../protocol/config.js';
+
+export { isSplitDirection, type SplitDirection } from '../protocol/config.js';
 export type ExplicitSplitDirection = Exclude<SplitDirection, 'auto'>;
-export function isSplitDirection(value: unknown): value is SplitDirection {
-  return typeof value === 'string' && ['auto', 'right', 'down', 'left', 'up'].includes(value);
-}
 export interface SplitDimensions { columns: number; rows: number; cellWidth?: number; cellHeight?: number }
 
 /** Compare pixels, not character counts: terminal cells are usually twice as tall as wide. */
@@ -98,7 +97,7 @@ export interface GhosttyLauncher {
 const execute = promisify(execFile);
 // The command bypasses shell startup. Carry only settings needed for SSH and
 // trusted local UI adapters; never copy credentials or the whole client environment.
-const INHERITED_ENVIRONMENT = ['SSH_AUTH_SOCK', 'PI_CODING_AGENT_DIR', 'PI_REMOTE_RENDERER_REPO', 'PATH'] as const;
+const INHERITED_ENVIRONMENT = ['SSH_AUTH_SOCK', 'PI_CODING_AGENT_DIR', 'PI_REMOTE_RENDERER_REPO', 'XDG_CONFIG_HOME', 'PATH'] as const;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const REQUIREMENTS = 'Ghostty splits require macOS and Ghostty 1.3 or newer, with macos-applescript = true and macOS Automation permission for Ghostty.';
 
