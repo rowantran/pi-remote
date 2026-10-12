@@ -20,31 +20,31 @@ With `--rowan`, the reference also includes the selected local extension files, 
 Requires Node 22.19+, the project's installed dependencies, `tmux`, `diff`, Bash, and stock `pi` 1.0.4 on `PATH`.
 
 ```sh
-node --import tsx test/golden-transcript.ts
+node --import tsx test/bench/golden-transcript.ts
 
 # Shorter iteration
-node --import tsx test/golden-transcript.ts --widths 80 --themes dark
+node --import tsx test/bench/golden-transcript.ts --widths 80 --themes dark
 
 # Compare an unchanged checkout, without modifying it
-node --import tsx test/golden-transcript.ts \
+node --import tsx test/bench/golden-transcript.ts \
   --remote-bin /path/to/original/pi-remote/bin/pi-remote
 
 # Explicit, unmodified local presentation factories on both terminals
-node --import tsx test/golden-transcript.ts --rowan
+node --import tsx test/bench/golden-transcript.ts --rowan
 
 # Override the local extension repository or stock CLI
-node --import tsx test/golden-transcript.ts --rowan \
+node --import tsx test/bench/golden-transcript.ts --rowan \
   --rowan-root /path/to/pi-extensions --pi-bin /path/to/pi
 
 # Narrow wrapping (extra rows keep the expanded transcript visible)
-node --import tsx test/golden-transcript.ts --widths 40 --rows 200
-node --import tsx test/golden-transcript.ts --rowan --widths 40 --rows 200
+node --import tsx test/bench/golden-transcript.ts --widths 40 --rows 200
+node --import tsx test/bench/golden-transcript.ts --rowan --widths 40 --rows 200
 
 # Choose a new or empty artifact directory
-node --import tsx test/golden-transcript.ts --output /tmp/my-golden-run
+node --import tsx test/bench/golden-transcript.ts --output /tmp/my-golden-run
 
 # Test ANSI comparison/cropping independently
-node --import tsx --test test/golden-terminal.test.ts
+node --import tsx --test test/bench/golden-terminal.test.ts
 ```
 
 The same commands are available through `npm run test:golden -- [options]`.

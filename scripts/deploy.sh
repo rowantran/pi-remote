@@ -15,7 +15,7 @@ for arg in "$@"; do
 done
 cd "$(dirname "$0")/.."
 # Same default host as the CLI: PI_REMOTE_HOST, then the config file.
-[[ -n "$host" ]] || host=$(node --import tsx -e 'import("./src/config.ts").then(m => console.log(m.defaultHost() ?? ""))')
+[[ -n "$host" ]] || host=$(node --import tsx -e 'import("./src/cli/config.ts").then(m => console.log(m.defaultHost() ?? ""))')
 if [[ -z "$host" || "$host" == -* || "$host" =~ [[:space:]] ]]; then
   printf 'Give an SSH host alias, or set a default host (see README "Configuration").\n' >&2
   exit 1

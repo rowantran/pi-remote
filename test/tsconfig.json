@@ -1,0 +1,27 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "noEmit": true
+  },
+  "include": [
+    "**/*.typecheck.ts"
+  ],
+  "references": [
+    {
+      "path": "../src/protocol"
+    },
+    {
+      "path": "../src/daemon"
+    },
+    {
+      "path": "../src/client"
+    },
+    {
+      "path": "../src/tui"
+    },
+    {
+      "path": "../src/cli"
+    }
+  ]
+}

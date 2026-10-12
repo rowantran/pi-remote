@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createJiti } from 'jiti';
 import type { ExtensionAPI, MessageRenderer, Theme } from '@earendil-works/pi-coding-agent';
-import type { PresentationUIContext } from '../src/presentation.js';
+import type { PresentationUIContext } from '../src/tui/presentation.js';
 
 // Only this original factory may attempt its expected timing append locally. Remote Pi owns
 // persisted history, so suppress that append rather than forwarding it or changing host guards.

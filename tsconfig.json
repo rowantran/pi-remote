@@ -1,17 +1,20 @@
 {
-  "compilerOptions": {
-    "target": "ES2023",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "outDir": "dist",
-    "rootDir": "src",
-    "sourceMap": true,
-    "declaration": true
-  },
-  "include": [
-    "src/**/*.ts"
+  "files": [],
+  "references": [
+    {
+      "path": "./src/protocol"
+    },
+    {
+      "path": "./src/daemon"
+    },
+    {
+      "path": "./src/client"
+    },
+    {
+      "path": "./src/tui"
+    },
+    {
+      "path": "./src/cli"
+    }
   ]
 }
