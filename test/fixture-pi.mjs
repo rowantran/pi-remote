@@ -64,6 +64,13 @@ function openSession() {
   entries = records.slice(1);
   sessionName = entries.filter(entry => entry.type === 'session_info').at(-1)?.name ?? sessionName;
 }
+const forkPath = option('--fork');
+if (forkPath) {
+  const records = readFileSync(forkPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  mkdirSync(dirname(sessionFile), { recursive: true });
+  writeFileSync(sessionFile, [JSON.stringify({ ...records[0], id: sessionId, timestamp: new Date().toISOString(),
+    cwd: process.cwd(), parentSession: forkPath }), ...records.slice(1).map(record => JSON.stringify(record))].join('\n') + '\n');
+}
 openSession();
 function newSession(sameFile = false) {
   sessionId = randomUUID();
@@ -99,6 +106,10 @@ function finish(message) {
     { type: 'agent_end', messages: [message], willRetry: false }, { type: 'agent_settled' });
 }
 function prompt(command) {
+  if (command.message === '/reject-prompt') {
+    send(response(command, undefined, 'Fixture prompt rejected'));
+    return;
+  }
   if (command.message === '/exit') {
     process.stderr.write('fixture requested exit\n');
     later(20, () => process.exit(23));
@@ -228,19 +239,32 @@ function prompt(command) {
   const timestamp = Date.now();
   const user = { role: 'user', content: command.message, timestamp };
   append(user);
-  send(response(command, { disposition: 'started' }), { type: 'agent_start' }, { type: 'turn_start' },
+  send(...(args.includes('--fixture-prompt-after-turn') ? [] : [response(command, { disposition: 'started' })]), { type: 'agent_start' }, { type: 'turn_start' },
     { type: 'message_start', message: user }, { type: 'message_end', message: user },
     { type: 'message_start', message: assistant('', timestamp + 1) }, delta('partial: '));
   later(400, () => { if (streaming) send(delta(command.message)); });
-  later(700, () => { if (streaming) finish(assistant(`partial: ${command.message} complete`, timestamp + 1, 'stop')); });
+  const complete = () => {
+    if (streaming) finish(assistant(`partial: ${command.message} complete`, timestamp + 1, 'stop'));
+    if (args.includes('--fixture-prompt-after-turn')) send(response(command, { disposition: 'started' }));
+  };
+  const gate = option('--fixture-prompt-gate');
+  if (gate) {
+    const wait = () => { if (existsSync(gate)) complete(); else later(10, wait); };
+    later(10, wait);
+  } else later(700, complete);
 }
 function handle(command) {
+  if (process.env.PI_FIXTURE_COMMANDS_LOG) appendFileSync(process.env.PI_FIXTURE_COMMANDS_LOG, JSON.stringify({ pid: process.pid, command }) + '\n');
   if (command.type === 'extension_ui_response') {
     const pending = pendingDialogs.get(command.id);
     if (!pending) return;
     pendingDialogs.delete(command.id);
     clearTimeout(pending.timer);
     timers.delete(pending.timer);
+    if (pending.startup) {
+      for (const query of blockedQueries.splice(0)) handle(query);
+      return;
+    }
     if (pending.newSession && command.cancelled !== true && command.confirmed === true) newSession();
     const data = pending.newSession ? { cancelled: command.cancelled === true || command.confirmed !== true } : { disposition: 'handled' };
     send(response(pending.command, data), { type: 'extension_ui_request',
@@ -250,7 +274,7 @@ function handle(command) {
     return;
   }
   // A runtime replacement can hold inspection until its extension hook finishes.
-  if (['get_state', 'get_entries'].includes(command.type) && [...pendingDialogs.values()].some(pending => pending.newSession)) {
+  if (['get_state', 'get_entries'].includes(command.type) && [...pendingDialogs.values()].some(pending => pending.newSession || pending.startup)) {
     blockedQueries.push(command);
     return;
   }
@@ -314,6 +338,10 @@ const consume = chunk => {
     catch (error) { send({ type: 'response', command: 'parse', success: false, error: String(error) }); }
   }
 };
+if (args.includes('--fixture-startup-dialog') && forkPath) {
+  pendingDialogs.set('fixture-startup-dialog', { startup: true });
+  send({ type: 'extension_ui_request', id: 'fixture-startup-dialog', method: 'confirm', title: 'Side startup', message: 'Ready?' });
+}
 const startDelay = Number(process.env.PI_FIXTURE_START_DELAY_FILE && existsSync(process.env.PI_FIXTURE_START_DELAY_FILE)
   ? readFileSync(process.env.PI_FIXTURE_START_DELAY_FILE, 'utf8') : option('--fixture-start-delay', '0'));
 if (startDelay > 0) {

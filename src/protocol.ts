@@ -11,6 +11,10 @@ export interface SlotInfo {
   /** Stable positive integer within one daemon's persisted slot catalogue. */
   number?: number;
   cwd: string;
+  /** Parent daemon slot, not the Pi session ID or parentSession file. */
+  parentSlotId?: string;
+  /** Derived from the live catalogue, never persisted. */
+  parentSlotNumber?: number;
   createdAt: string;
   pid?: number;
   status: "starting" | "running" | "exited";
@@ -46,7 +50,7 @@ export interface Snapshot {
   historyComplete?: boolean;
   presentation?: { models?: RecordValue[]; stats?: RecordValue; gitBranch?: string; homeDir?: string; [key: string]: any };
 }
-export interface CreateOptions { cwd: string; args?: string[]; sessionPath?: string }
+export interface CreateOptions { cwd?: string; args?: string[]; sessionPath?: string; parentSlotId?: string; prompt?: string; expectedParentSessionId?: string }
 export interface RemoteConnection {
   request<T = any>(method: string, params?: RecordValue): Promise<T>;
   onEvent(listener: (event: RemoteEvent) => void): () => void;

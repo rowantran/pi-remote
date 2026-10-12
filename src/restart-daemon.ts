@@ -3,7 +3,7 @@ import { PI_VERSION, PROTOCOL_VERSION, type RemoteConnection, type SlotInfo } fr
 
 interface Hello { pid: number; release?: string }
 interface Blocked { slot: SlotInfo; reason: string }
-interface Outcome { accepted: boolean; pid: number; release: string; blocked: Blocked[]; reopen: SlotInfo[] }
+interface Outcome { accepted: boolean; pid: number; release: string; blocked: Blocked[]; reopen: SlotInfo[]; reason?: string }
 export interface RestartResult { before: Hello; after: Hello; reopened: SlotInfo[]; slots: SlotInfo[] }
 export interface RestartOptions {
   force?: boolean;
@@ -35,7 +35,7 @@ export async function restartDaemon(connect: () => Promise<RemoteConnection>, op
         throw new Error(`Daemon ${before.pid} predates restart-daemon. Once its slots are idle, stop it by hand (kill ${before.pid} on the remote host) and reopen sessions with new --session.`);
       }
       if (outcome.accepted) break;
-      const reasons = outcome.blocked.map(({ slot, reason }) => `${label(slot)}: ${reason}`).join('; ');
+      const reasons = outcome.blocked.map(({ slot, reason }) => `${label(slot)}: ${reason}`).join('; ') || outcome.reason || 'Daemon is not ready';
       if (!options.wait) throw new Error(`Daemon not restarted. ${reasons}. Use --wait to restart when idle, or --force to interrupt busy slots.`);
       if (reasons !== waiting) log(`Waiting: ${reasons}`);
       waiting = reasons;
