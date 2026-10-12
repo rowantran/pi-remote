@@ -19,7 +19,7 @@
  * It never calls run()/prompt(), changes the real session, or contacts a provider.
  * All resource discovery is replaced by an explicit ResourceLoader; global Pi
  * config, auth, providers, MCP, background workers and executable extension suites
- * are not loaded. Rowan uses the unchanged examples/rowan-ui.ts visual adapter:
+ * are not loaded. Rowan uses the unchanged example-configs/rowan-ui.ts visual adapter:
  * four original factories, codemode render-only functions, generic compact-tool
  * resolution, and persisted worked-for rendering (NOT the worked-for factory).
  * Normal default tools and compact-tools overrides stay registered and active so
@@ -76,7 +76,7 @@ const HELP = `Usage: node --import tsx test/bench/native-scroll-benchmark.ts [op
   --help                Show this help
 Warmup: 8 frames. Thinking shown. JSON output contains hashes/counts, not transcript.
 CPU/render time is not delivered FPS. Stock scroll scheduling has a 16ms throttle.
-Rowan requires the trusted local pi-extensions checkout used by examples/rowan-ui.ts.
+Rowan requires the trusted local pi-extensions checkout used by example-configs/rowan-ui.ts.
 CPU profiles contain source file paths/function names; treat them as private.
 See this file's header for safety, stock-history and presentation caveats.
 `;
@@ -238,7 +238,7 @@ async function main() {
     const { loadExtensions } = await import(internalLoaderUrl.href) as {
       loadExtensions(paths: string[], cwd: string): Promise<LoadExtensionsResult>;
     };
-    const adapter = fileURLToPath(new URL('../../examples/rowan-ui.ts', import.meta.url));
+    const adapter = fileURLToPath(new URL('../../example-configs/rowan-ui.ts', import.meta.url));
     const extensions = await loadExtensions(args.presentation === 'rowan' ? [adapter] : [], cwd);
     if (extensions.errors.length) throw new Error('Explicit visual extension failed to load (contents withheld)');
     const resourceLoader: ResourceLoader = {

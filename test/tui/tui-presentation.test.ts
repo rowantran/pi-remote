@@ -493,7 +493,7 @@ test('actual Rowan adapter renders virtual footer, caret, compact tools, codemod
     { type: 'text', text: 'Script completed\nWall time 0.5 seconds\nOutput:\n' }, { type: 'text', text: 'all verified' },
   ], details: { calls: [{ id: 'nested1', name: 'read', args: '{"path":"/remote/nested.ts"}', status: 'ok' }] } }];
   initial.entries = [{ type: 'custom', id: 'worked', parentId: null, customType: 'worked-for', data: { elapsedSeconds: 75 } }]; initial.leafId = 'worked';
-  const adapter = fileURLToPath(new URL('../../examples/rowan-ui.ts', import.meta.url));
+  const adapter = fileURLToPath(new URL('../../example-configs/rowan-ui.ts', import.meta.url));
   const assistantRender = AssistantMessageComponent.prototype.render;
   const toolRender = ToolExecutionComponent.prototype.render;
   const { ui, terminal, connection, submit } = await launch(t, initial, [adapter]);

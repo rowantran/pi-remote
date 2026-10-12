@@ -6,8 +6,10 @@
   "type": "module",
   "bin": { "pi-remote": "bin/pi-remote" },
   "scripts": {
-    "build": "tsc -b",
-    "check": "tsc -b && tsc -p test/tsconfig.json --noEmit",
+    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -b",
+    "deploy": "node --import tsx scripts/deploy.ts",
+    "check": "tsc -b && tsc -p test/tsconfig.json --noEmit && tsc -p scripts/tsconfig.json --noEmit",
     "test": "node --import tsx --test 'test/**/*.test.ts'",
     "test:golden": "node --import tsx test/bench/golden-transcript.ts",
     "test:scroll": "node --import tsx test/bench/scroll-benchmark.ts",
