@@ -1,0 +1,15 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "noEmit": true
+  },
+  "include": [
+    "*.ts"
+  ],
+  "references": [
+    {
+      "path": "../src/cli"
+    }
+  ]
+}

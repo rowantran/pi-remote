@@ -13,7 +13,7 @@ From this checkout on your local machine:
 ```sh
 npm ci --ignore-scripts
 npm link                     # puts pi-remote on PATH, linked to this checkout
-./scripts/deploy.sh devbox   # installs on the remote host; see "Deployment"
+npm run deploy -- devbox      # installs on the remote host; see "Deployment"
 
 # Set the default SSH host once (see "Configuration" below).
 mkdir -p ~/.config/pi-remote
@@ -278,11 +278,11 @@ pi-remote attach 1 --ui-config ./remote-ui.json --no-reconnect
 
 `--theme NAME` overrides the config theme. Without either, the client uses the `theme` setting from local `~/.pi/agent/settings.json`, then `system`. Available themes include `system`, `dark`, `light`, and JSON themes from local `~/.pi/agent/themes/` (or `$PI_CODING_AGENT_DIR/themes/`). A `LIGHT/DARK` pair, such as `light/dark` or `gruvbox-light/gruvbox-dark`, selects the member for the local terminal, like Pi. The client asks the terminal for its background color (OSC 11) at startup, then falls back to the terminal's light/dark report and `COLORFGBG`, then dark. Pairs also follow live light/dark switches from terminals that send mode 2031 reports. A single theme name, such as `gruvbox-dark`, is always used as given, even in a light terminal. Use `/theme NAME` to change the current client and `/reload-ui` to reread its selected adapters/config. Neither command changes remote settings or restarts Pi; theme files are not watched automatically.
 
-[`examples/rowan-ui.ts`](examples/rowan-ui.ts) is a **user-specific selective adapter**, not a portable default. It expects Rowan's extension repository locally at `~/.pi/agent/git/github.com/rowantran/pi-extensions`, or at `$PI_REMOTE_RENDERER_REPO`. It loads the original footer, caret, assistant-background, and compact-tool factories unchanged, selects the existing codemode renderers and the display-only `background/render.ts` message and `background/widget.ts` active-task renderers, and runs the full original `worked-for.ts` factory.
+[`example-configs/rowan-ui.ts`](example-configs/rowan-ui.ts) is a trusted TypeScript presentation adapter, not a JSON client configuration file. It is a **user-specific selective adapter**, not a portable default. It expects Rowan's extension repository locally at `~/.pi/agent/git/github.com/rowantran/pi-extensions`, or at `$PI_REMOTE_RENDERER_REPO`. It loads the original footer, caret, assistant-background, and compact-tool factories unchanged, selects the existing codemode renderers and the display-only `background/render.ts` message and `background/widget.ts` active-task renderers, and runs the full original `worked-for.ts` factory.
 
 Worked-for uses a narrow local facade: its expected `worked-for` append is suppressed (other entry types throw), its model-context hook is not registered, and its normal display hooks, entry renderer, and Markdown transformer use the presentation host unchanged. Remote Pi alone persists timing entries; local settle events never write or forward them. Other extensions still cannot call `appendEntry` locally. The original timer updates the local working message and stops on settle, detach, and UI reload. The factory also patches native Pi's private `CustomEntryComponent` spacing, but this client's Transcript renders custom entries directly, so that patch does not establish native custom-entry spacing parity. Missing or incompatible original modules produce a load warning, not a handwritten fallback.
 
-The adapter avoids the provider, background-worker, MCP, Slack, and codemode execution factories. Background completion/check-in messages use the same compact header, five output lines, and hidden-line count as normal Pi. Active background tasks use the same bordered box as native Pi, coloured with the **local** theme and fitted to the local terminal width. Full result content remains available to the remote agent and the background output tool. Update the local pi-extensions checkout to a version that includes `worked-for.ts`, `background/render.ts`, and `background/widget.ts` before using this adapter. Review its imports and adapt paths before selecting it with `--ui-extension ./examples/rowan-ui.ts` or your config allowlist.
+The adapter avoids the provider, background-worker, MCP, Slack, and codemode execution factories. Background completion/check-in messages use the same compact header, five output lines, and hidden-line count as normal Pi. Active background tasks use the same bordered box as native Pi, coloured with the **local** theme and fitted to the local terminal width. Full result content remains available to the remote agent and the background output tool. Update the local pi-extensions checkout to a version that includes `worked-for.ts`, `background/render.ts`, and `background/widget.ts` before using this adapter. Review its imports and adapt paths before selecting it with `--ui-extension ./example-configs/rowan-ui.ts` or your config allowlist.
 
 The remote pi-extensions checkout also needs RPC widget support: its `background.ts` sends plain task lines once per second while work runs, and clears the widget when no tasks remain. Without a local adapter those lines are still readable. After updating remote extensions, start a new slot; existing Pi processes do not reload them. After updating the local adapter, use `/reload-ui` or reattach.
 
@@ -307,7 +307,7 @@ pi.on('session_start', (_event, ctx) => {
 });
 ```
 
-Use the local theme for colour and the supplied width for layout. Choose the same placement as the remote widget. `examples/rowan-ui.ts` uses this API to render active background tasks without loading the background worker factory.
+Use the local theme for colour and the supplied width for layout. Choose the same placement as the remote widget. `example-configs/rowan-ui.ts` uses this API to render active background tasks without loading the background worker factory.
 
 ### Trust boundary
 
@@ -387,13 +387,13 @@ The remote host runs a copy of this checkout's compiled code. There is no packag
 
 The client runs `ssh HOST ~/.local/share/pi-remote/bin/pi-remote bridge`, so that symlink alone decides which release new connections use. If the daemon is not running, the bridge starts it from the same release. Use `--remote-bin` to point the client at another launcher.
 
-`scripts/deploy.sh [HOST]` (default host: `PI_REMOTE_HOST`, then the config file) does this:
+`npm run deploy -- [HOST]` (default host: `PI_REMOTE_HOST`, then the config file) does this:
 
-1. Builds `dist/` locally and copies it with `package.json`, the lockfile, `bin/`, `completions/` and `examples/` to a new release directory, named after the UTC time and git commit (`-dirty` with uncommitted changes).
-2. Runs `npm ci --omit=dev` there and checks that the release starts.
+1. Builds `dist/` locally and copies it with `package.json`, the lockfile, `bin/`, `completions/` and `example-configs/` to a new release directory, named after the UTC time and git commit (`-dirty` with uncommitted changes).
+2. Runs `npm ci --omit=dev --ignore-scripts` there and checks that the release starts.
 3. Switches `bin/pi-remote` to the new release in one atomic rename.
 4. Deletes old releases. It keeps the new release, the previous one, and any release a running process uses. A release never changes after install, because a running daemon loads modules from its own release.
-5. Runs `pi-remote restart-daemon`. If a slot is busy, the new release stays installed and the old daemon keeps running; run `pi-remote restart-daemon --wait` later. `deploy.sh --wait` waits instead; `deploy.sh --no-restart` skips this step.
+5. Runs `pi-remote restart-daemon`. If a slot is busy, the new release stays installed and the old daemon keeps running; run `pi-remote restart-daemon --wait` later. `npm run deploy -- --wait` waits instead; `npm run deploy -- --no-restart` skips this step.
 
 ### Restart the daemon without losing slots
 
@@ -416,7 +416,7 @@ A 0.2 client also works with a running 0.1 daemon: it uses the installed release
 
 ## Development and verification
 
-Locally, `pi-remote` runs from `src/` through the `tsx` devDependency, so source edits take effect on the next run without `npm run build`. `npm link` creates a symlink to this checkout in npm's global bin directory; `npm unlink -g pi-remote` removes it. Deployed releases contain no `src/` and run the compiled `dist/`; `deploy.sh` builds it. To try daemon changes on the remote host, run `scripts/deploy.sh --wait`: attached clients reconnect to the same slots on the new code.
+Locally, `pi-remote` runs from `src/` through the `tsx` devDependency, so source edits take effect on the next run without `npm run build`. `npm link` creates a symlink to this checkout in npm's global bin directory; `npm unlink -g pi-remote` removes it. Deployed releases contain no `src/` and run the compiled `dist/`; `npm run deploy` builds it. To try daemon changes on the remote host, run `npm run deploy -- --wait`: attached clients reconnect to the same slots on the new code.
 
 ```sh
 npm run verify
@@ -515,20 +515,21 @@ owns local-connection startup and the legacy filesystem fallback.
 - `src/daemon/supervisor.ts`, `pi-process.ts`, `side-sessions.ts`: slots, snapshots, dialogs, Pi RPC child ownership, persistence, and side-session storage.
 - `src/daemon/launch.ts`, `bridge.ts`, `files.ts`: private daemon startup, socket/stdin bridging, and remote filesystem requests.
 - `src/client/connection.ts`, `reconnect.ts`, `compat-client.ts`: SSH transport, correlation, snapshot-based reconnect without mutation replay, and legacy read-only fallback.
-- `src/client/restart-daemon.ts`, `scripts/deploy.sh`: daemon replacement and release installation; see [Deployment](#deployment).
+- `src/client/restart-daemon.ts`, `scripts/deploy.ts`: daemon replacement and release installation; see [Deployment](#deployment).
 - `src/tui/tui.ts`, `view.ts`, `transcript.ts`: terminal interaction and transcript projection.
 - `src/tui/presentation.ts`, `presentation-history.ts`, `local-theme.ts`: explicit adapter loading, read-only history, and local themes.
 - `src/tui/local-input.ts`, `editor-completion.ts`, `side-launcher.ts`: local attachments, editor completion, and terminal splits.
 - `src/tui/session-labels.ts`: display labels and detach/stop messages.
 - `src/cli/main.ts`, `connections.ts`, `completion.ts`, `config.ts`: commands, connection wiring, shell completion, and XDG configuration.
 - `bin/pi-remote`, `src/protocol/node-entry.ts`: source/compiled launch selection and child-process module arguments.
-- `examples/rowan-ui.ts`: selective, user-specific presentation adapter.
+- `example-configs/rowan-ui.ts`: selective, user-specific presentation adapter.
 
 Project references enforce these dependencies: a layer cannot import another
 layer's source unless it declares that project as a reference. `npm run build`
-uses `tsc -b` to build dependencies in order into matching `dist/` directories.
+clears old output and uses `tsc -b` to build dependencies in order into matching
+`dist/` directories. This also prevents deployment from copying stale modules.
 `npm run check` builds the projects and checks the protocol's compile-time
-contract tests. It writes ignored build output because dependent projects need
+contract tests and the deployment tool. It writes ignored build output because dependent projects need
 declarations. Network input is still validated at runtime; static request types
 do not replace validation.
 

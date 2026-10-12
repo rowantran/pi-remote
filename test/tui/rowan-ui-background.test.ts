@@ -6,13 +6,13 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { initTheme, type ExtensionAPI, type MessageRenderer } from '@earendil-works/pi-coding-agent';
 import { stripTerminalSequences, visibleWidth, type TUI } from '@earendil-works/pi-tui';
-import rowanUI from '../../examples/rowan-ui.js';
+import rowanUI from '../../example-configs/rowan-ui.js';
 import { PresentationHost } from '../../src/tui/presentation.js';
 import type { RecordValue, Snapshot } from '../../src/protocol/types.js';
 import { Transcript } from '../../src/tui/transcript.js';
 import { RemoteView } from '../../src/tui/view.js';
 
-const adapter = fileURLToPath(new URL('../../examples/rowan-ui.ts', import.meta.url));
+const adapter = fileURLToPath(new URL('../../example-configs/rowan-ui.ts', import.meta.url));
 const integrationRepo = process.env.PI_REMOTE_RENDERER_REPO;
 
 async function withRendererRepo(root: string, run: () => Promise<void>) {

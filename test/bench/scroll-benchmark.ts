@@ -5,17 +5,17 @@
  * Capture once (read-only hello/list/snapshot; refuses to overwrite the private file):
  *   node --import tsx test/bench/scroll-benchmark.ts --capture /tmp/pi-scroll-snapshot.json \
  *     --host rowan-v2-dev --slot 2 --ui-config /tmp/pi-scroll-no-ui.json \
- *     --ui-extension ./examples/rowan-ui.ts
+ *     --ui-extension ./example-configs/rowan-ui.ts
  * Replay the SAME file, options, dependencies and local UI files in both worktrees:
  *   cp test/bench/scroll-benchmark.ts /tmp/pi-remote-scroll-diagnosis/test/bench/scroll-benchmark.ts
  *   cd /tmp/pi-remote-scroll-diagnosis
  *   node --import tsx test/bench/scroll-benchmark.ts --snapshot /tmp/pi-scroll-snapshot.json \
- *     --ui-config /tmp/pi-scroll-no-ui.json --ui-extension ./examples/rowan-ui.ts \
+ *     --ui-config /tmp/pi-scroll-no-ui.json --ui-extension ./example-configs/rowan-ui.ts \
  *     --theme gruvbox-dark --scenario idle-scroll --iterations 10 \
  *     > /tmp/pi-scroll-baseline-idle.json
  *   cd /Users/rowan/workplace/pi-remote-worktrees/scroll-performance
  *   node --import tsx test/bench/scroll-benchmark.ts --snapshot /tmp/pi-scroll-snapshot.json \
- *     --ui-config /tmp/pi-scroll-no-ui.json --ui-extension ./examples/rowan-ui.ts \
+ *     --ui-config /tmp/pi-scroll-no-ui.json --ui-extension ./example-configs/rowan-ui.ts \
  *     --theme gruvbox-dark --scenario idle-scroll --iterations 10 \
  *     > /tmp/pi-scroll-fixed-idle.json
  *

@@ -21,7 +21,7 @@ async function until(matches:(screen:string)=>boolean){for(let i=0;i<120;i++){co
 try {
   const slot=await client.request('create',{cwd:root,args:['--session-dir',`${root}/history`]});slotId=slot.id;
   const cli=fileURLToPath(new URL('../../dist/cli/main.js',import.meta.url));
-  const adapter=fileURLToPath(new URL('../../examples/rowan-ui.ts',import.meta.url));
+  const adapter=fileURLToPath(new URL('../../example-configs/rowan-ui.ts',import.meta.url));
   const command=['node',cli,'attach','--host',host,'1','--state-dir',stateDir,'--ui-extension',adapter,'--ui-config','/tmp/pi-remote-no-ui-config.json','--theme','gruvbox-dark'].map(shellQuote).join(' ');
   await tmux('new-session','-d','-s',tmuxName,'-x','140','-y','45',`exec ${command}`);created=true;
   const initial=await until(s=>s.includes('›')&&s.includes('Enter steer'));
