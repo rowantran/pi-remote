@@ -79,6 +79,8 @@ export interface GhosttySplitOptions {
   targetId: string;
   direction: ExplicitSplitDirection;
   cwd?: string;
+  /** Only the SSH/UI/PATH allowlist is forwarded. Defaults to the current client environment. */
+  environment?: Readonly<NodeJS.ProcessEnv>;
 }
 export type GhosttyExecFile = (command: string, args: string[], options: {
   encoding: 'utf8'; timeout: number; maxBuffer: number;
@@ -94,6 +96,9 @@ export interface GhosttyLauncher {
 }
 
 const execute = promisify(execFile);
+// The command bypasses shell startup. Carry only settings needed for SSH and
+// trusted local UI adapters; never copy credentials or the whole client environment.
+const INHERITED_ENVIRONMENT = ['SSH_AUTH_SOCK', 'PI_CODING_AGENT_DIR', 'PI_REMOTE_RENDERER_REPO', 'PATH'] as const;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const REQUIREMENTS = 'Ghostty splits require macOS and Ghostty 1.3 or newer, with macos-applescript = true and macOS Automation permission for Ghostty.';
 
@@ -147,12 +152,15 @@ const OPEN_SPLIT = `on run argv
   set splitDirection to item 2 of argv
   set launchCommand to item 3 of argv
   set launchDirectory to item 4 of argv
+  set launchEnvironment to {}
+  if (count of argv) > 4 then set launchEnvironment to items 5 thru -1 of argv
   tell application "Ghostty"
     if not (exists terminal id sourceId) then error "The original Ghostty terminal is no longer available."
     set sourceTerminal to terminal id sourceId
     set cfg to new surface configuration
     set command of cfg to launchCommand
     set initial working directory of cfg to launchDirectory
+    set environment variables of cfg to launchEnvironment
     if splitDirection is "right" then
       set newTerminal to split sourceTerminal direction right with configuration cfg
     else if splitDirection is "down" then
@@ -173,12 +181,20 @@ export async function openGhosttySplit(options: GhosttySplitOptions, dependencie
   if (!['right', 'down', 'left', 'up'].includes(options.direction)) throw new Error('Resolve the split direction before opening Ghostty.');
   const cwd = resolve(options.cwd ?? process.cwd());
   if (cwd.includes('\0')) throw new Error('The local working directory contains a NUL character.');
-  // Ghostty 1.3's embedded API always treats surface command overrides as /bin/sh -c:
-  // https://github.com/ghostty-org/ghostty/blob/v1.3.1/src/apprt/embedded.zig#L441-L449
-  // Unlike the config-file option it does NOT parse a
-  // shell:/direct: prefix. Quote each token once, then replace the shell with node.
-  const command = `exec ${formatInvocation(options.invocation)}`;
-  await runScript(OPEN_SPLIT, [options.targetId, options.direction, command, cwd], dependencies);
+  // The embedded API treats command overrides as shell commands (not config
+  // shell:/direct: prefixes). On macOS Ghostty already wraps this as
+  // /bin/bash --noprofile --norc -c "exec -l <command>"; another exec would fail.
+  // https://github.com/ghostty-org/ghostty/blob/v1.3.1/src/termio/Exec.zig#L1511-L1530
+  const command = formatInvocation(options.invocation);
+  const environment = options.environment ?? dependencies.env ?? process.env;
+  const assignments: string[] = [];
+  for (const key of INHERITED_ENVIRONMENT) {
+    const value = environment[key];
+    if (value === undefined) continue;
+    if (value.includes('\0')) throw new Error(`The ${key} environment variable contains a NUL character.`);
+    assignments.push(`${key}=${value}`);
+  }
+  await runScript(OPEN_SPLIT, [options.targetId, options.direction, command, cwd, ...assignments], dependencies);
 }
 
 export const ghosttyLauncher: GhosttyLauncher = {

@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import test from 'node:test';
 import {
   attachInvocation, captureGhosttyTarget, formatInvocation, ghosttyLauncher,
@@ -130,14 +132,16 @@ test('split uses the captured ID, literal direction branches, argv data, and cli
   await openGhosttySplit({ invocation: hostile, targetId, direction: 'left', cwd }, dependencies);
   const call = calls[1];
   assert.equal(call.command, '/usr/bin/osascript');
-  assert.deepEqual(call.args.slice(2), ['--', TARGET, 'left', `exec ${formatInvocation(hostile)}`, cwd]);
+  assert.deepEqual(call.args.slice(2), ['--', TARGET, 'left', formatInvocation(hostile), cwd]);
   const script = call.args[1];
   assert.match(script, /exists terminal id sourceId/);
   assert.match(script, /set sourceTerminal to terminal id sourceId/);
   assert.match(script, /set command of cfg to launchCommand/);
   assert.match(script, /set initial working directory of cfg to launchDirectory/);
   for (const direction of ['right', 'down', 'left', 'up']) assert.ok(script.includes(`split sourceTerminal direction ${direction} with configuration cfg`));
-  assert.doesNotMatch(script, /front window|focused terminal|input text|send key|do shell script|environment variables/);
+  assert.match(script, /set environment variables of cfg to launchEnvironment/);
+  assert.match(script, /items 5 thru -1 of argv/);
+  assert.doesNotMatch(script, /front window|focused terminal|input text|send key|do shell script/);
   assert.equal(script.includes(hostile.command), false);
   assert.equal(script.includes(hostile.args[2]), false);
   assert.equal(script.includes(cwd), false);
@@ -148,7 +152,7 @@ test('each direction is passed as data and omitted cwd preserves the current loc
   const { dependencies, calls } = mockGhostty();
   for (const direction of ['right', 'down', 'left', 'up'] as const) {
     await openGhosttySplit({ invocation, targetId: TARGET, direction }, dependencies);
-    assert.deepEqual(calls.at(-1)!.args.slice(-4), [TARGET, direction, `exec ${formatInvocation(invocation)}`, process.cwd()]);
+    assert.deepEqual(calls.at(-1)!.args.slice(-4), [TARGET, direction, formatInvocation(invocation), process.cwd()]);
   }
   assert.equal(new Set(calls.map(call => call.args[1])).size, 1);
 });
@@ -181,6 +185,77 @@ test('automation, disabled scripting, timeout, and stale-target errors preserve 
       });
     }
   }
+});
+
+test('formatted launch runs through Ghostty macOS bash wrapper without an extra exec', { skip: process.platform === 'win32' }, async () => {
+  const { dependencies, calls } = mockGhostty();
+  await openGhosttySplit({ invocation: { command: process.execPath, args: ['--version'] }, targetId: TARGET, direction: 'right' }, dependencies);
+  const command = calls[0].args[5];
+  assert.equal(command, formatInvocation({ command: process.execPath, args: ['--version'] }));
+  // The macOS branch of Ghostty 1.3.1 src/termio/Exec.zig, without login(1)
+  // or an actual terminal. The old command would become `exec -l exec ...`.
+  const result = await promisify(execFile)('/bin/bash', ['--noprofile', '--norc', '-c', `exec -l ${command}`], {
+    encoding: 'utf8', timeout: 5000, env: { PATH: '/usr/bin:/bin' },
+  });
+  assert.equal(result.stdout.trim(), process.version);
+});
+
+test('Ghostty macOS bash wrapper preserves quoted argument data', { skip: process.platform === 'win32' }, async () => {
+  const values = ["a'b", '', 'space and \"quotes\"', '$(exit 99); `exit 98`\nnext', 'back\\slash', 'KEY=a=b'];
+  const command = formatInvocation({ command: process.execPath, args: ['-e', 'console.log(JSON.stringify(process.argv.slice(1)))', '--', ...values] });
+  const result = await promisify(execFile)('/bin/bash', ['--noprofile', '--norc', '-c', `exec -l ${command}`], {
+    encoding: 'utf8', timeout: 5000, env: { PATH: '/usr/bin:/bin' },
+  });
+  assert.deepEqual(JSON.parse(result.stdout), values);
+});
+
+test('split forwards only SSH, UI adapter, and PATH settings as argv assignments', async () => {
+  const { dependencies, calls } = mockGhostty();
+  dependencies.env = {
+    TERM_PROGRAM: 'ghostty',
+    SSH_AUTH_SOCK: '/socket/a \"quoted\" path',
+    PI_CODING_AGENT_DIR: '/agent/a=b',
+    PI_REMOTE_RENDERER_REPO: '/renderer/$(false);\nend tell',
+    PATH: '/bin:/a path/bin',
+    OPENAI_API_KEY: 'do-not-forward', AWS_SECRET_ACCESS_KEY: 'also-not-forwarded',
+    NODE_OPTIONS: '--inspect', BASH_ENV: '/do/not/source', HOME: '/not-forwarded',
+  };
+  await openGhosttySplit({ invocation, targetId: TARGET, direction: 'right' }, dependencies);
+  assert.deepEqual(calls[0].args.slice(7), [
+    'SSH_AUTH_SOCK=/socket/a \"quoted\" path',
+    'PI_CODING_AGENT_DIR=/agent/a=b',
+    'PI_REMOTE_RENDERER_REPO=/renderer/$(false);\nend tell',
+    'PATH=/bin:/a path/bin',
+  ]);
+  const script = calls[0].args[1];
+  assert.equal(script.includes(dependencies.env.PI_REMOTE_RENDERER_REPO!), false);
+  assert.equal(calls[0].args.includes('do-not-forward'), false);
+  assert.equal(formatInvocation(invocation).includes('SSH_AUTH_SOCK'), false);
+  assert.equal(Object.hasOwn(calls[0].options, 'env'), false);
+});
+
+test('explicit environment overrides inheritance but cannot expand the allowlist', async () => {
+  const { dependencies, calls } = mockGhostty();
+  dependencies.env = { TERM_PROGRAM: 'ghostty', SSH_AUTH_SOCK: '/old/socket', PATH: '/old/bin' };
+  await openGhosttySplit({ invocation, targetId: TARGET, direction: 'down', environment: {
+    PI_CODING_AGENT_DIR: '', PATH: '/custom/bin', UNTRUSTED_SECRET: 'not-forwarded',
+  } }, dependencies);
+  assert.deepEqual(calls[0].args.slice(7), ['PI_CODING_AGENT_DIR=', 'PATH=/custom/bin']);
+  await openGhosttySplit({ invocation, targetId: TARGET, direction: 'down', environment: {} }, dependencies);
+  assert.deepEqual(calls[1].args.slice(7), []);
+});
+
+test('invalid allowlisted environment values fail before osascript without exposing their value', async () => {
+  const { dependencies, calls } = mockGhostty();
+  await assert.rejects(openGhosttySplit({ invocation, targetId: TARGET, direction: 'right', environment: {
+    SSH_AUTH_SOCK: 'private\0value',
+  } }, dependencies), error => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /SSH_AUTH_SOCK.*NUL/);
+    assert.equal(error.message.includes('private'), false);
+    return true;
+  });
+  assert.equal(calls.length, 0);
 });
 
 test('default launcher exposes the parent integration methods without opening panes', () => {

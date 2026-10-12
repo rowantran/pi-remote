@@ -1398,6 +1398,35 @@ test('/side can run while the main prompt RPC is still pending', async t => {
   assert.equal(ui.editor.getExpandedText(), '');
 });
 
+test('/side waits for an in-flight session switch rather than copying the old conversation', async t => {
+  const pending = deferred<{}>(), opened: GhosttySplitOptions[] = [];
+  const { ui, connection, terminal, submit } = launch(t, snapshot(), new FakeConnection(), sideOptions(opened));
+  connection.handler = (method, params) => method === 'sessions' ? [{ path: '/another.jsonl', id: 'another', messageCount: 1 }]
+    : method === 'rpc' && params?.command?.type === 'switch_session' ? pending.promise : snapshot();
+  submit('/resume'); await flush();
+  terminal.input('\r'); await flush();
+  assert.equal(connection.requests.filter(r => r.params?.command?.type === 'switch_session').length, 1);
+  submit('/side question'); await flush();
+  assert.equal(connection.requests.filter(r => r.method === 'create').length, 0);
+  assert.equal(ui.editor.getExpandedText(), '/side question');
+  pending.resolve({ cancelled: true }); await flush();
+});
+
+test('uncertain side creation is never restored to the editor or replayed', async t => {
+  const { ui, connection, submit } = launch(t, snapshot(), new FakeConnection(), sideOptions([]));
+  connection.handler = method => {
+    if (method === 'hello') return { capabilities: ['side_slots'] };
+    throw new Error('connection lost after acceptance');
+  };
+  submit('/side question'); await flush();
+  assert.equal(connection.requests.filter(r => r.method === 'create').length, 1);
+  assert.equal(ui.editor.getExpandedText(), '');
+  assert.match(screen(ui), /Could not confirm side creation/);
+  assert.match(screen(ui), /may already exist/);
+  submit(''); await flush();
+  assert.equal(connection.requests.filter(r => r.method === 'create').length, 1);
+});
+
 test('/side smart split measures current pane pixels, not rows versus columns', async t => {
   const previous = getCellDimensions(); t.after(() => setCellDimensions(previous));
   setCellDimensions({ widthPx: 8, heightPx: 20 });

@@ -174,6 +174,7 @@ export class RemoteTui {
   private pendingBell = false;
   private sideSplit: SplitDirection = 'auto';
   private sidePending = false;
+  private sessionFlowPending = 0;
 
   constructor(private connection: RemoteConnection, private slotId: string, snapshot: Snapshot,
     terminal: Terminal = new ProcessTerminal(), private options: TuiOptions = {}) {
@@ -979,7 +980,7 @@ export class RemoteTui {
     const args = text.trim().slice(command.length).trim();
     if (command === '/detach') { this.detach(); return; }
     if (command === '/help') { this.editor.setText(''); this.notify(HELP); return; }
-    if (this.commandPending && (command !== '/reload' || this.reloadPending) && (command !== '/side' || this.sidePending)) { this.restoreSubmission(text); this.notify('A local command is still pending. Your text remains in the editor.'); return; }
+    if (this.commandPending && (command !== '/reload' || this.reloadPending) && (command !== '/side' || this.sidePending || this.sessionFlowPending > 0)) { this.restoreSubmission(text); this.notify('A local command is still pending. Your text remains in the editor.'); return; }
     this.editor.setText(''); this.editor.addToHistory(text);
     this.editorHistory.push(text); if (this.editorHistory.length > 100) this.editorHistory.shift();
     this.commandPending++;
@@ -1013,6 +1014,13 @@ export class RemoteTui {
   }
 
   private async builtin(command: string, args: string): Promise<boolean> {
+    const changesSession = ['/new', '/fork', '/tree', '/resume'].includes(command);
+    if (changesSession) this.sessionFlowPending++;
+    try { return await this.runBuiltin(command, args); }
+    finally { if (changesSession) this.sessionFlowPending--; }
+  }
+
+  private async runBuiltin(command: string, args: string): Promise<boolean> {
     const generation = this.generation;
     const valid = () => !this.detached && this.connected && generation === this.generation;
     switch (command) {
@@ -1126,6 +1134,7 @@ export class RemoteTui {
 
   private async createSide(prompt: string): Promise<void> {
     if (!this.connected || this.detached) throw new Error('Reconnect before starting a side conversation');
+    if (this.sessionFlowPending) throw new Error('Wait for the current session change or picker to finish before /side');
     if (this.view.snapshot.slot.status !== 'running' || this.reloadRequestPending) throw new Error('Wait for remote Pi to finish starting or reloading');
     const context = this.options.attachContext;
     if (!context) throw new Error('Local attach settings are unavailable; start this client with pi-remote attach');
@@ -1143,15 +1152,23 @@ export class RemoteTui {
     try { targetId = await launcher.captureTarget(); } catch (error) { splitError = error; }
     await this.requireSideSlots();
     if (this.detached || !this.connected || generation !== this.generation || parentSessionId !== this.view.snapshot.state.sessionId) throw new Error('Remote Pi changed before creating the side conversation. Nothing was sent');
-    const slot = await this.connection.request<SlotInfo>('create', { parentSlotId: this.slotId,
-      ...(typeof parentSessionId === 'string' ? { expectedParentSessionId: parentSessionId } : {}), ...(prompt ? { prompt } : {}) });
+    let slot: SlotInfo;
+    try {
+      slot = await this.connection.request<SlotInfo>('create', { parentSlotId: this.slotId,
+        ...(typeof parentSessionId === 'string' ? { expectedParentSessionId: parentSessionId } : {}), ...(prompt ? { prompt } : {}) });
+    } catch (error) {
+      // The transport cannot prove whether the daemon accepted create. Never restore the
+      // command to the editor after sending it: Enter could otherwise create a duplicate.
+      this.notify(`Could not confirm side creation: ${errorText(error)}. Check pi-remote ls and /resume --side before trying again. The side and its prompt may already exist; this request was not replayed.`);
+      return;
+    }
     const invocation = attachInvocation(slot.id, { ...context, theme: this.options.theme ?? context.theme });
     const label = slot.number ?? slot.id;
     // After acceptance, do not report a split error as a failed creation or restore /side
     // to the editor. Retrying it would create another process and send the prompt twice.
     if (this.detached) return;
     if (slot.status === 'exited') {
-      this.notify(`Side slot ${label} exited: ${slot.error ?? 'startup failed'}. Its stored session is available through /resume --side.`);
+      this.notify(`Side slot ${label} exited: ${slot.error ?? 'startup failed'}. If Pi wrote a session file, find it through /resume --side.`);
       return;
     }
     if (targetId) {
