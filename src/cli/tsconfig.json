@@ -1,0 +1,25 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "../../dist/cli",
+    "tsBuildInfoFile": "../../dist/.tsbuildinfo/cli.tsbuildinfo"
+  },
+  "include": [
+    "**/*.ts"
+  ],
+  "references": [
+    {
+      "path": "../protocol"
+    },
+    {
+      "path": "../daemon"
+    },
+    {
+      "path": "../client"
+    },
+    {
+      "path": "../tui"
+    }
+  ]
+}

@@ -168,7 +168,7 @@ The editor completes local built-in commands and remote extension/skill/template
 
 ### Files, clipboard, and shell commands
 
-Use `Review @src/cli.ts` to include a file from the slot's remote workspace, or `Describe @"images/screen shot.png"` for a path with spaces. Absolute paths and `~/` are supported. Email addresses and references inside code spans/blocks are not attachments; a missing simple `@mention` stays literal, while a missing explicit path fails the submission.
+Use `Review @src/cli/main.ts` to include a file from the slot's remote workspace, or `Describe @"images/screen shot.png"` for a path with spaces. Absolute paths and `~/` are supported. Email addresses and references inside code spans/blocks are not attachments; a missing simple `@mention` stays literal, while a missing explicit path fails the submission.
 
 `/attach /local/path.txt` and clipboard files are read on the local machine; relative local paths use the directory where you launched the client. Text is appended to the prompt. Supported images are sent as **model input**, not just filenames; the selected model must support images. Tool-result images use labels, **not inline image previews**. User messages render their text content, as in Pi. File reads are limited to regular UTF-8 text files up to 1 MiB or supported images up to 8 MiB. There can be eight pending local attachments, 32 distinct remote references, and at most 24 MiB in the combined prompt. Oversized or unsupported files fail rather than being silently truncated.
 
@@ -290,7 +290,7 @@ The remote pi-extensions checkout also needs RPC widget support: its `background
 
 `ctx.ui.getRemoteWidget(key)` is a **pi-remote-only** read API, not a stock Pi method. It returns an immutable object with `key`, `lines`, and `placement`, or `undefined` for an absent, cleared, empty, or malformed widget. The lines have terminal escape codes removed. Embedded newlines become separate rows, and tabs become spaces, so each string is safe to return as one component row. Reading sends no requests, runs no tools, and cannot change remote state.
 
-Call the getter from `render()` to read the current state after each remote update or reconnect. A local widget with the same key replaces the plain remote display, but the getter still reads the remote lines. Return `[]` when the remote widget is absent. If the local component fails, the client removes it and shows the plain remote copy; `/reload-ui` can restore the local renderer. For typed adapters, `PresentationUIContext` is exported from `src/presentation.ts`:
+Call the getter from `render()` to read the current state after each remote update or reconnect. A local widget with the same key replaces the plain remote display, but the getter still reads the remote lines. Return `[]` when the remote widget is absent. If the local component fails, the client removes it and shows the plain remote copy; `/reload-ui` can restore the local renderer. For typed adapters, `PresentationUIContext` is exported from `src/tui/presentation.ts`:
 
 ```ts
 pi.on('session_start', (_event, ctx) => {
@@ -360,7 +360,7 @@ local pi-tui client -> SSH stdio -> bridge -> private Unix socket
 - Output queues/JSONL frames are bounded at 64 MiB. A slow client is disconnected rather than stalling Pi. Extremely large history records can fail attachment; pagination is not implemented.
 - `slots.json` contains process metadata and session paths, not credentials or a second transcript. `slots-counter.json` keeps the next slot number so deleting stopped side slots never reuses a number after a restart. `daemon.log` contains stderr, which may include sensitive extension diagnostics. It is private but not rotated automatically yet.
 
-Pi's exported `RpcClient` is not used for transport ownership: in 1.0.4 it has no public dialog-response method and imposes a fixed request timeout. `src/pi-process.ts` implements the documented stdio framing directly, with unique request IDs and no deadlines on agent commands that may await a dialog. This changes no Pi code.
+Pi's exported `RpcClient` is not used for transport ownership: in 1.0.4 it has no public dialog-response method and imposes a fixed request timeout. `src/daemon/pi-process.ts` implements the documented stdio framing directly, with unique request IDs and no deadlines on agent commands that may await a dialog. This changes no Pi code.
 
 ### Incremental history refreshes
 
@@ -430,21 +430,21 @@ npm run test:golden -- --rowan
 
 # Exercise concurrent on-demand startup and crash/stale-lock recovery with the built CLI.
 # Uses an isolated local daemon with no Pi slots or model calls.
-node --import tsx test/startup-smoke.ts
+node --import tsx test/smoke/startup-smoke.ts
 
 # Offline tests use a deterministic child that speaks Pi-shaped RPC.
 # This optional test runs real Pi and existing extensions on an isolated remote workspace.
-PI_REMOTE_TEST_HOST=devbox node --import tsx test/remote-smoke.ts
+PI_REMOTE_TEST_HOST=devbox node --import tsx test/smoke/remote-smoke.ts
 
 # Also make one real model request using the host's existing credentials/configuration.
-PI_REMOTE_TEST_HOST=devbox PI_REMOTE_TEST_MODEL=1 node --import tsx test/remote-smoke.ts
+PI_REMOTE_TEST_HOST=devbox PI_REMOTE_TEST_MODEL=1 node --import tsx test/smoke/remote-smoke.ts
 
 # Test completion, attachments, numeric slots and exactly-once shell execution across reconnect.
-PI_REMOTE_TEST_HOST=devbox node --import tsx test/remote-features-smoke.ts
+PI_REMOTE_TEST_HOST=devbox node --import tsx test/smoke/remote-features-smoke.ts
 
 # Test actual local terminal input/reconnect in an isolated tmux server.
 # Requires tmux and the user-specific Rowan presentation adapter dependencies.
-PI_REMOTE_TEST_HOST=devbox node --import tsx test/terminal-smoke.ts
+PI_REMOTE_TEST_HOST=devbox node --import tsx test/smoke/terminal-smoke.ts
 ```
 
 The remote smoke tests use separate `/tmp/pi-remote-{smoke,features,terminal}.*` state directories, start only their own slots, and stop those slots and their daemons afterward. The terminal test uses the separate `pi-remote-test` tmux server. It leaves test files/logs for inspection. It does not change global Pi settings or credentials.
@@ -468,7 +468,7 @@ npm run test:scroll -- --snapshot /tmp/pi-scroll.json \
 
 Capture uses only read-only slot/history queries. The new snapshot file is private (`0600`); it contains conversation and tool output, so do not commit or share it. Replay uses a memory terminal and reports frame/render timings and output hashes, not transcript text. Streaming and metadata events are simulated locally; they never change the real slot.
 
-For before/after comparisons, use the same snapshot, dimensions, theme and adapter code in both worktrees. Select a worktree-local adapter with `--ui-extension` and an absent `--ui-config` path, rather than a config that points at the other checkout. Compare the reported transcript hashes and renderer-patch flags. Run each scenario separately (`idle-scroll`, `metadata-update-scroll`, `assistant-delta-scroll`) and alternate baseline/fixed runs. Startup is excluded; normal renderer timers remain active. See [`test/scroll-benchmark.ts`](test/scroll-benchmark.ts) for complete commands and limitations.
+For before/after comparisons, use the same snapshot, dimensions, theme and adapter code in both worktrees. Select a worktree-local adapter with `--ui-extension` and an absent `--ui-config` path, rather than a config that points at the other checkout. Compare the reported transcript hashes and renderer-patch flags. Run each scenario separately (`idle-scroll`, `metadata-update-scroll`, `assistant-delta-scroll`) and alternate baseline/fixed runs. Startup is excluded; normal renderer timers remain active. See [`test/bench/scroll-benchmark.ts`](test/bench/scroll-benchmark.ts) for complete commands and limitations.
 
 Compare the actual stock Pi terminal UI using a real, isolated SDK session:
 
@@ -477,7 +477,7 @@ npm run test:native-scroll -- --snapshot /tmp/pi-scroll.json --presentation vani
 npm run test:native-scroll -- --snapshot /tmp/pi-scroll.json --presentation rowan
 ```
 
-Native startup selects compaction-aware history. Use `--history full` for a diagnostic full-history comparison, or [`test/context-scroll-snapshot.ts`](test/context-scroll-snapshot.ts) to select the same compacted entries for remote replay while retaining all entries for footer totals. Pin the same theme in both runners (`--theme-file` for native, `--theme` for remote). Optional `--profile FILE` captures only measured frames; profiling runs should be separate from timing comparisons. The explicit idle-only `--experiment` modes test potential cache savings and are **not production behavior**. CPU frame cost is not delivered FPS. pi-remote uses a local 8 ms minimum interval between normal frame starts; focused keyboard input stays immediate. Stock native Pi still uses its 16 ms throttle. Add `--render-interval 16 --scheduled-duration 2000` to an idle replay for a scheduler control, or use `--render-interval 8` for the current default. The scheduled measurement counts moving frames written to a memory terminal, not frames displayed by a terminal emulator. See [the original investigation](test/scroll-performance.md) and [production fixes](test/render-budget.md) for measurements and limitations.
+Native startup selects compaction-aware history. Use `--history full` for a diagnostic full-history comparison, or [`test/bench/context-scroll-snapshot.ts`](test/bench/context-scroll-snapshot.ts) to select the same compacted entries for remote replay while retaining all entries for footer totals. Pin the same theme in both runners (`--theme-file` for native, `--theme` for remote). Optional `--profile FILE` captures only measured frames; profiling runs should be separate from timing comparisons. The explicit idle-only `--experiment` modes test potential cache savings and are **not production behavior**. CPU frame cost is not delivered FPS. pi-remote uses a local 8 ms minimum interval between normal frame starts; focused keyboard input stays immediate. Stock native Pi still uses its 16 ms throttle. Add `--render-interval 16 --scheduled-duration 2000` to an idle replay for a scheduler control, or use `--render-interval 8` for the current default. The scheduled measurement counts moving frames written to a memory terminal, not frames displayed by a terminal emulator. See [the original investigation](test/bench/scroll-performance.md) and [production fixes](test/bench/render-budget.md) for measurements and limitations.
 
 ### Power-user / debugging commands
 
@@ -495,21 +495,46 @@ pi-remote watch 1
 
 ### Source map
 
-- `src/daemon.ts`: slots, attachment snapshots, dialogs, private socket, persistence.
-- `src/pi-process.ts`: stock Pi RPC child ownership, correlation, output draining.
-- `src/client.ts`, `src/reconnect.ts`: SSH/local transport, startup, snapshot-based reconnect without mutation replay.
-- `src/restart-daemon.ts`, `scripts/deploy.sh`: release install and daemon replacement; see [Deployment](#deployment).
-- `src/compat-client.ts`: read-only filesystem fallback for running legacy daemons.
-- `src/live.ts`: display-only streaming reconstruction on the daemon.
-- `src/tui.ts`, `src/view.ts`: local terminal UI and transcript projection.
-- `src/transcript.ts`, `src/keybindings.ts`: public Pi transcript components and application shortcut hints.
-- `src/width-cache.ts`: cached line-width checks, without suppressing dynamic component rendering.
-- `src/presentation.ts`, `src/local-theme.ts`: explicit adapter loading and local themes.
-- `src/files.ts`, `src/local-input.ts`, `src/editor-completion.ts`: attachments, clipboard/editor integration, and remote editor completion.
-- `src/remote-session.ts`: environment variables that identify a pi-remote session, and the detach message.
-- `src/cli.ts`, `src/completion.ts`, `completions/`: launch options, command prefixes, slot selection, and shell completion.
-- `src/config.ts`: XDG config file, default host, and default remote directory.
-- `bin/pi-remote`, `src/node-entry.ts`: launcher that runs `src/` via tsx in a checkout or `dist/` in a release, and Node arguments for child processes started from either.
+Each directory is a separate TypeScript project:
+
+```text
+cli ──→ daemon ──→ protocol
+    ├─→ client ──→ protocol
+    └─→ tui    ──→ protocol
+```
+
+The daemon owns remote Pi processes. The client owns connections and reconnection,
+without terminal rendering. The TUI accepts the protocol's connection interface;
+it does not import the client implementation. The CLI connects these pieces and
+owns local-connection startup and the legacy filesystem fallback.
+
+- `src/protocol/types.ts`, `methods.ts`: wire records and the method-to-parameters/result map. Request results are inferred from the method name. Pi's inner RPC payloads still pass through unchanged.
+- `src/protocol/jsonl.ts`, `live.ts`: bounded JSON-line framing and shared live-state reconstruction.
+- `src/protocol/files.ts`, `attachments.ts`: filesystem result types, limits, and safe attachment reading on either host.
+- `src/protocol/remote-session.ts`, `paths.ts`: session environment contract and socket locations.
+- `src/daemon/supervisor.ts`, `pi-process.ts`, `side-sessions.ts`: slots, snapshots, dialogs, Pi RPC child ownership, persistence, and side-session storage.
+- `src/daemon/launch.ts`, `bridge.ts`, `files.ts`: private daemon startup, socket/stdin bridging, and remote filesystem requests.
+- `src/client/connection.ts`, `reconnect.ts`, `compat-client.ts`: SSH transport, correlation, snapshot-based reconnect without mutation replay, and legacy read-only fallback.
+- `src/client/restart-daemon.ts`, `scripts/deploy.sh`: daemon replacement and release installation; see [Deployment](#deployment).
+- `src/tui/tui.ts`, `view.ts`, `transcript.ts`: terminal interaction and transcript projection.
+- `src/tui/presentation.ts`, `presentation-history.ts`, `local-theme.ts`: explicit adapter loading, read-only history, and local themes.
+- `src/tui/local-input.ts`, `editor-completion.ts`, `side-launcher.ts`: local attachments, editor completion, and terminal splits.
+- `src/tui/session-labels.ts`: display labels and detach/stop messages.
+- `src/cli/main.ts`, `connections.ts`, `completion.ts`, `config.ts`: commands, connection wiring, shell completion, and XDG configuration.
+- `bin/pi-remote`, `src/protocol/node-entry.ts`: source/compiled launch selection and child-process module arguments.
 - `examples/rowan-ui.ts`: selective, user-specific presentation adapter.
+
+Project references enforce these dependencies: a layer cannot import another
+layer's source unless it declares that project as a reference. `npm run build`
+uses `tsc -b` to build dependencies in order into matching `dist/` directories.
+`npm run check` builds the projects and checks the protocol's compile-time
+contract tests. It writes ignored build output because dependent projects need
+declarations. Network input is still validated at runtime; static request types
+do not replace validation.
+
+Tests mirror the layers under `test/`. Cross-layer behavior is in
+`test/integration/`, optional host tests in `test/smoke/`, and performance and
+golden drivers in `test/bench/`. Deterministic unit/integration tests do not need
+SSH credentials or model calls.
 
 Pi references: [RPC](https://pi.dev/docs/latest/rpc), [extension UI](https://pi.dev/docs/latest/rpc-extension-ui), [JSON events](https://pi.dev/docs/latest/json).
