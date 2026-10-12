@@ -10,19 +10,20 @@ import { readLocalClipboard, editLocally } from './local-input.js';
 import { PresentationHost, readPresentationConfig, createPresentationTheme, type PresentationChange } from './presentation.js';
 import { loadLocalTheme, readPiDoubleEscapeAction, readPiHideThinkingBlock, readPiThemeSetting, resolveThemeSelection, terminalAppearance, type DoubleEscapeAction } from './local-theme.js';
 import { hostname } from 'node:os';
-import { REMOTE_ICON, detachMessage, remoteSessionEnv, stoppedMessage } from './remote-session.js';
+import { REMOTE_ICON, detachMessage, remoteSessionEnv, sideParentLabel, stoppedMessage } from './remote-session.js';
+import { attachInvocation, formatInvocation, ghosttyLauncher, resolveSplitDirection, type AttachContext, type GhosttyLauncher, type SplitDirection } from './side-launcher.js';
 import { RemoteAutocompleteProvider, transformPromptWithAttachments } from './editor-completion.js';
 import {
   copyToClipboard, CustomEditor, getSelectListTheme, initTheme,
   type SessionInfo, type SessionTreeNode, type Theme,
 } from '@earendil-works/pi-coding-agent';
 import {
-  type Component, Container, Editor, type Focusable, fuzzyFilter, getKeybindings, Input, isKeyRelease, Key,
+  type Component, Container, Editor, type Focusable, fuzzyFilter, getCellDimensions, getKeybindings, Input, isKeyRelease, Key,
   Loader, matchesKey, ProcessTerminal, ScrollView, SelectList, type SelectItem, setKeybindings, Spacer,
   Text, type Terminal, type TerminalColors, type TerminalColorScheme, TruncatedText, TuiAltScreen, truncateToWidth, VStack,
 } from '@earendil-works/pi-tui';
 import {
-  errorText,
+  errorText, PI_VERSION, PROTOCOL_VERSION,
   type RecordValue, type RemoteConnection, type RemoteEvent, type SlotInfo, type Snapshot,
 } from './protocol.js';
 import {
@@ -52,6 +53,8 @@ Shift+Enter / Ctrl+J: newline. Ctrl+C: clear the prompt. Ctrl+D: detach, even in
 Esc: cancel the dialog, or clear the prompt queue then abort; queue text returns to the editor.
 Esc Esc (empty editor, idle): tree-style fork picker, unless local doubleEscapeAction is none.
 /fork /tree: browse user and assistant messages; choose a user prompt to fork into a new session.
+/side [prompt]: fork the saved conversation into a side slot and open a local Ghostty split.
+/resume --side: browse stored side conversations, which are hidden from normal /resume.
 Ctrl+O: expand/collapse tool output. Ctrl+T: show/hide thinking.
 PageUp/PageDown: transcript scroll. Ctrl+End or the Jump to latest pill: follow output. Ctrl+Shift+F: transcript search.
 /detach /help /model /new /fork /resume /session /copy /name <name> /compact [instructions]
@@ -107,6 +110,10 @@ export interface TuiOptions {
   bell?: boolean;
   /** Local Pi preference; tree falls back to fork because RPC cannot navigate in place. */
   doubleEscapeAction?: DoubleEscapeAction;
+  /** Explicit connection settings to reuse in a newly launched local client. */
+  attachContext?: AttachContext;
+  /** Terminal integration; replace in tests without creating real panes. */
+  sideLauncher?: GhosttyLauncher;
 }
 
 /** Exported for terminal-adapter tests; uses only the public pi-tui API. */
@@ -165,6 +172,8 @@ export class RemoteTui {
   /** Undefined until local config is read; buffered startup events must respect its opt-out. */
   private bell?: boolean;
   private pendingBell = false;
+  private sideSplit: SplitDirection = 'auto';
+  private sidePending = false;
 
   constructor(private connection: RemoteConnection, private slotId: string, snapshot: Snapshot,
     terminal: Terminal = new ProcessTerminal(), private options: TuiOptions = {}) {
@@ -208,7 +217,7 @@ export class RemoteTui {
         return result;
       },
       completePath: prefix => this.connection.request('complete_path', { slotId: this.slotId, prefix }),
-      localCommands: ['attach', 'clear-attachments', 'detach', 'help', 'model', 'new', 'fork', 'tree', 'resume', 'session', 'copy', 'name', 'compact', 'thinking', 'export', 'reload', 'reload-ui', 'theme', 'tool-call', 'paste', 'editor', 'quit'].map(name => ({ name })),
+      localCommands: ['attach', 'clear-attachments', 'detach', 'help', 'model', 'new', 'fork', 'tree', 'side', 'resume', 'session', 'copy', 'name', 'compact', 'thinking', 'export', 'reload', 'reload-ui', 'theme', 'tool-call', 'paste', 'editor', 'quit'].map(name => ({ name })),
     });
     this.editor.setAutocompleteProvider(this.completion);
     // Like Pi, learn whether the terminal is light or dark before building themed content.
@@ -286,6 +295,7 @@ export class RemoteTui {
     const config = await readPresentationConfig(this.options.presentationConfig, this.options.presentationPaths);
     if (this.detached) return;
     this.configureBell(config.bell);
+    this.sideSplit = config.sideSplit ?? 'auto';
     const selection = this.options.theme ?? config.theme ?? await readPiThemeSetting() ?? 'system';
     const theme = await loadLocalTheme(selection, undefined, this.appearance);
     if (this.detached) return;
@@ -813,6 +823,7 @@ export class RemoteTui {
     widget('belowEditor');
     if (this.presentation?.footer) {
       if (!this.connected || this.view.snapshot.slot.status !== 'running') this.bottom.addChild(new Text(this.footer(), 0, 0));
+      else if (sideParentLabel(this.view.snapshot.slot)) this.bottom.addChild(new Text(muted(sideParentLabel(this.view.snapshot.slot)!), 0, 0));
       this.bottom.addChild(this.presentation.footer);
     } else this.bottom.addChild(new DynamicLines(() => [this.footer()]));
     this.tui.setFocus(control); this.tui.requestRender();
@@ -841,7 +852,7 @@ export class RemoteTui {
     const window = s.state.model?.contextWindow;
     const cost = messages.reduce((total, message) => total + (message.usage?.cost?.total ?? 0), 0);
     const statuses = s.ui.filter(record => record.method === 'setStatus' && record.statusText).map(record => safeText(record.statusText));
-    return muted([status, s.state.sessionName ?? s.slot.sessionName ?? this.slotId,
+    return muted([status, s.state.sessionName ?? s.slot.sessionName ?? this.slotId, sideParentLabel(s.slot),
       this.options.host ? `${REMOTE_ICON} ${this.options.host}` : undefined, s.slot.cwd,
       s.state.model?.id ?? assistant?.model, s.state.thinkingLevel,
       context !== undefined ? `${context.toLocaleString()} tokens${window ? ` / ${Math.round(context / window * 100)}%` : ''}` : undefined,
@@ -968,7 +979,7 @@ export class RemoteTui {
     const args = text.trim().slice(command.length).trim();
     if (command === '/detach') { this.detach(); return; }
     if (command === '/help') { this.editor.setText(''); this.notify(HELP); return; }
-    if (this.commandPending && (command !== '/reload' || this.reloadPending)) { this.restoreSubmission(text); this.notify('A local command is still pending. Your text remains in the editor.'); return; }
+    if (this.commandPending && (command !== '/reload' || this.reloadPending) && (command !== '/side' || this.sidePending)) { this.restoreSubmission(text); this.notify('A local command is still pending. Your text remains in the editor.'); return; }
     this.editor.setText(''); this.editor.addToHistory(text);
     this.editorHistory.push(text); if (this.editorHistory.length > 100) this.editorHistory.shift();
     this.commandPending++;
@@ -1009,6 +1020,7 @@ export class RemoteTui {
       case '/editor': await this.externalEditor(); return true;
       case '/reload-ui': await this.reloadPresentation(); this.notify('Local presentation reloaded. Remote Pi was not changed.'); return true;
       case '/reload': await this.reloadSlot(); return true;
+      case '/side': await this.startSide(args); return true;
       case '/theme': {
         if (!args) this.notify(`Local theme: ${this.localTheme.name ?? 'system'}. Usage: /theme NAME`);
         else { await loadLocalTheme(args, undefined, this.appearance); this.options.theme = args; await this.reloadPresentation(); }
@@ -1069,9 +1081,13 @@ export class RemoteTui {
       }
       case '/resume': {
         if (!this.connected || this.detached) throw new Error('Reconnect before listing sessions');
-        const sessions = await this.connection.request<SessionInfo[]>('sessions', { slotId: this.slotId });
+        if (args && args !== '--side') throw new Error('Usage: /resume [--side]');
+        const side = args === '--side';
+        if (side) await this.requireSideSlots();
         if (!valid()) return true;
-        const sessionPath = await this.choose('Resume a remote session', sessions.map(session => ({ value: session.path, label: session.name ?? session.firstMessage ?? session.id, description: `${session.messageCount} messages · ${session.path}` })));
+        const sessions = await this.connection.request<SessionInfo[]>('sessions', { slotId: this.slotId, ...(side ? { side: true } : {}) });
+        if (!valid()) return true;
+        const sessionPath = await this.choose(side ? 'Resume a side conversation' : 'Resume a remote session', sessions.map(session => ({ value: session.path, label: session.name ?? session.firstMessage ?? session.id, description: `${session.messageCount} messages · ${session.path}` })));
         if (sessionPath !== undefined && valid()) {
           const data = await this.rpc({ type: 'switch_session', sessionPath });
           if (data?.cancelled) this.notify('Session switch cancelled.'); else await this.refresh();
@@ -1093,6 +1109,59 @@ export class RemoteTui {
         await this.rpc({ type: 'compact', ...(args ? { customInstructions: args } : {}) }); await this.refresh(); return true;
       default: return false;
     }
+  }
+
+  private async requireSideSlots(): Promise<void> {
+    const hello = await this.connection.request<{ capabilities?: string[] }>('hello', { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION });
+    if (!hello.capabilities?.includes('side_slots')) throw new Error('This daemon does not support side conversations. Deploy the updated daemon first');
+  }
+
+  /** Creation and its optional first prompt are never replayed. Split failures keep the created slot. */
+  private async startSide(prompt: string): Promise<void> {
+    if (this.sidePending) return;
+    this.sidePending = true;
+    try { await this.createSide(prompt); }
+    finally { this.sidePending = false; }
+  }
+
+  private async createSide(prompt: string): Promise<void> {
+    if (!this.connected || this.detached) throw new Error('Reconnect before starting a side conversation');
+    if (this.view.snapshot.slot.status !== 'running' || this.reloadRequestPending) throw new Error('Wait for remote Pi to finish starting or reloading');
+    const context = this.options.attachContext;
+    if (!context) throw new Error('Local attach settings are unavailable; start this client with pi-remote attach');
+    // Validate launch settings before creating a process, and capture the original pane before
+    // the remote request. User focus changes during SSH round trips must not redirect the split.
+    attachInvocation(this.slotId, context);
+    const generation = this.generation;
+    const parentSessionId = this.view.snapshot.state.sessionId;
+    const launcher = this.options.sideLauncher ?? ghosttyLauncher;
+    const cell = getCellDimensions();
+    const direction = resolveSplitDirection(this.sideSplit, { columns: this.tui.terminal.columns,
+      rows: this.tui.terminal.rows, cellWidth: cell.widthPx, cellHeight: cell.heightPx });
+    let targetId: string | undefined;
+    let splitError: unknown;
+    try { targetId = await launcher.captureTarget(); } catch (error) { splitError = error; }
+    await this.requireSideSlots();
+    if (this.detached || !this.connected || generation !== this.generation || parentSessionId !== this.view.snapshot.state.sessionId) throw new Error('Remote Pi changed before creating the side conversation. Nothing was sent');
+    const slot = await this.connection.request<SlotInfo>('create', { parentSlotId: this.slotId,
+      ...(typeof parentSessionId === 'string' ? { expectedParentSessionId: parentSessionId } : {}), ...(prompt ? { prompt } : {}) });
+    const invocation = attachInvocation(slot.id, { ...context, theme: this.options.theme ?? context.theme });
+    const label = slot.number ?? slot.id;
+    // After acceptance, do not report a split error as a failed creation or restore /side
+    // to the editor. Retrying it would create another process and send the prompt twice.
+    if (this.detached) return;
+    if (slot.status === 'exited') {
+      this.notify(`Side slot ${label} exited: ${slot.error ?? 'startup failed'}. Its stored session is available through /resume --side.`);
+      return;
+    }
+    if (targetId) {
+      try {
+        await launcher.open({ invocation, targetId, direction, cwd: process.cwd() });
+        this.notify(`Side conversation started in slot ${label}. Closing its split stops it after 90 seconds without clients, once idle.`);
+        return;
+      } catch (error) { splitError = error; }
+    }
+    this.notify(`Side conversation created in slot ${label}, but the split did not open: ${errorText(splitError)}\nAttach before the 90-second idle cleanup: ${formatInvocation(invocation)}`);
   }
 
   /** Restart is sent once. Only an authoritative, non-mutating busy refusal permits force confirmation. */

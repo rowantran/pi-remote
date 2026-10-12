@@ -10,6 +10,8 @@ import { connectCompatibleLocal, connectCompatibleSsh } from './compat-client.js
 import { ReconnectingConnection } from './reconnect.js';
 import { releaseName, restartDaemon } from './restart-daemon.js';
 import { PI_VERSION, PROTOCOL_VERSION, type SlotInfo, type Snapshot, type RemoteConnection } from './protocol.js';
+import { sideParentLabel } from './remote-session.js';
+import type { AttachContext } from './side-launcher.js';
 
 const HELP = `pi-remote — local terminal UI, persistent remote Pi RPC processes
 
@@ -82,7 +84,7 @@ Ctrl+D or /detach exits the local UI WITHOUT stopping remote work. Ctrl+C clears
 Explicit 'kill', or /quit in the UI, stops remote Pi. SSH authentication uses your existing config.
 Requires matching Pi ${PI_VERSION} on both machines.
 `;
-export interface UiOptions { presentationPaths?: string[]; presentationConfig?: string; theme?: string; host?: string; bell?: boolean }
+export interface UiOptions { presentationPaths?: string[]; presentationConfig?: string; theme?: string; host?: string; bell?: boolean; attachContext?: AttachContext }
 export interface Options { positionals: string[]; piArgs: string[]; values: Map<string,string>; flags: Set<string>; ui: UiOptions }
 export function parseOptions(args: string[]): Options {
   const options: Options = { positionals: [], piArgs: [], values: new Map(), flags: new Set(), ui: {} };
@@ -157,7 +159,17 @@ export async function resolveSlot(connection: Pick<RemoteConnection, 'request'>,
 }
 /** Stopped slots are hidden unless --all is given; say how many so they are not lost. */
 export function formatSlotList(slots: NumberedSlot[], hidden = 0): string {
-  const lines = slots.map(slot => `${String(slotNumber(slot) ?? '-').padStart(3)}  ${slot.id}  ${slot.status.padEnd(7)}  ${slot.clients} client(s)  ${slot.sessionName ?? '(unnamed)'}  ${slot.cwd}${slot.error ? `\n  ${slot.error}` : ''}`);
+  const ordered: { slot: NumberedSlot; depth: number }[] = [];
+  const seen = new Set<string>();
+  const visit = (slot: NumberedSlot, depth: number) => {
+    if (seen.has(slot.id)) return;
+    seen.add(slot.id); ordered.push({ slot, depth });
+    for (const child of slots) if (child.parentSlotId === slot.id) visit(child, depth + 1);
+  };
+  const ids = new Set(slots.map(slot => slot.id));
+  for (const slot of slots) if (!slot.parentSlotId || !ids.has(slot.parentSlotId)) visit(slot, 0);
+  for (const slot of slots) visit(slot, 0); // Malformed cycles must not hide entries.
+  const lines = ordered.map(({ slot, depth }) => `${'  '.repeat(depth)}${String(slotNumber(slot) ?? '-').padStart(3)}  ${slot.id}  ${slot.status.padEnd(7)}  ${slot.clients} client(s)  ${slot.sessionName ?? '(unnamed)'}${sideParentLabel(slot) ? ` (${sideParentLabel(slot)})` : ''}  ${slot.cwd}${slot.error ? `\n  ${slot.error}` : ''}`);
   if (!slots.length) lines.push(hidden ? 'No active slots. Create one with new --cwd DIRECTORY.' : 'No slots. Create one with new --cwd DIRECTORY.');
   if (hidden) lines.push(`${hidden} stopped slot${hidden === 1 ? '' : 's'} hidden. Use ls --all to show ${hidden === 1 ? 'it' : 'them'}.`);
   return lines.join('\n');
@@ -251,7 +263,10 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('attach needs a local terminal. Use watch or rpc for headless access.');
     const { runTui } = await import('./tui.js');
     const startTui: (connection: RemoteConnection, slotId: string, snapshot: Snapshot, options?: UiOptions) => Promise<void> = runTui;
-    await startTui(connection, slotId, snapshot, { ...options.ui, ...(host ? { host } : {}) });
+    await startTui(connection, slotId, snapshot, { ...options.ui, ...(host ? { host } : {}),
+      attachContext: { ...options.ui, host, local, stateDir: local ? resolve(stateDir ?? defaultStateDir()) : stateDir,
+        remoteBin: options.values.get('--remote-bin'), reconnect: !options.flags.has('--no-reconnect') },
+    });
   } finally { removeSignal?.(); connection.close(); }
 }
 

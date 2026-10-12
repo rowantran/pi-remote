@@ -6,6 +6,7 @@ import { connectCompatibleLocal, connectCompatibleSsh } from './compat-client.js
 import { defaultCwd as configuredDefaultCwd, defaultHost as configuredDefaultHost } from './config.js';
 import { nodeModuleArgs } from './node-entry.js';
 import type { RemoteConnection, SlotInfo } from './protocol.js';
+import { sideParentLabel } from './remote-session.js';
 
 export const VALUE_OPTIONS = ['--host', '--remote-bin', '--state-dir', '--cwd', '--session', '--ui-extension', '--ui-config', '--theme'] as const;
 export const BOOLEAN_OPTIONS = ['--local', '--json', '--no-attach', '--no-reconnect', '--no-bell', '--all', '--force', '--wait', '--help'] as const;
@@ -47,7 +48,7 @@ export function slotNumber(slot: NumberedSlot): number | undefined {
   return Number.isSafeInteger(slot.number) && slot.number! > 0 ? slot.number : undefined;
 }
 export function slotLabel(slot: SlotInfo): string {
-  return `${slot.status} · ${slot.sessionName || '(unnamed)'} · ${slot.cwd}`;
+  return `${slot.status} · ${slot.sessionName || '(unnamed)'}${sideParentLabel(slot) ? ` · ${sideParentLabel(slot)}` : ''} · ${slot.cwd}`;
 }
 
 /** The host is never positional: --host wins, then the default (PI_REMOTE_HOST
