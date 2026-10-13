@@ -33,6 +33,11 @@ export class ScheduledTuiAltScreen extends TuiAltScreen {
   private running = false;
   private lastFrameStart?: number;
   private queuedFrame?: { cancel: () => void };
+  private contentRequested = false;
+  private renderingStatusOnly = false;
+
+  /** True only inside a frame requested exclusively by known editor/status animation. */
+  get statusOnlyFrame(): boolean { return this.renderingStatusOnly; }
 
   constructor(terminal: Terminal, showHardwareCursor?: boolean, logDirectory?: string,
     options: ScheduledTuiOptions = {}, private readonly clock: RenderClock = systemClock) {
@@ -45,12 +50,14 @@ export class ScheduledTuiAltScreen extends TuiAltScreen {
   override start(): void {
     this.cancelQueuedFrame();
     this.lastFrameStart = undefined;
+    this.contentRequested = false;
     this.running = true;
     super.start();
   }
 
   override stop(options?: TuiStopOptions): void {
     this.running = false;
+    this.contentRequested = false;
     this.cancelQueuedFrame();
     super.stop(options);
     // Public renderNow clears Pi's queued immediate request. The renderer is
@@ -59,8 +66,14 @@ export class ScheduledTuiAltScreen extends TuiAltScreen {
     super.renderNow();
   }
 
-  override requestRender(force = false): void {
+  override requestRender(force = false): void { this.queueRender(force, false); }
+
+  /** An ordinary render request in the same batch always overrides this narrower scope. */
+  requestStatusRender(force = false): void { this.queueRender(force, true); }
+
+  private queueRender(force: boolean, statusOnly: boolean): void {
     if (!this.running) return;
+    if (!statusOnly || force) this.contentRequested = true;
     if (force) {
       this.cancelQueuedFrame();
       super.requestRender(true);
@@ -80,19 +93,25 @@ export class ScheduledTuiAltScreen extends TuiAltScreen {
         frame.cancel = this.clock.schedule(render, Math.ceil(delay));
         return;
       }
-      this.renderNow();
+      this.renderFrame(false, !this.contentRequested);
     };
     frame.cancel = this.clock.schedule(render, Math.ceil(remaining()));
   }
 
-  override renderNow(force = false): void {
+  override renderNow(force = false): void { this.renderFrame(force, false); }
+
+  private renderFrame(force: boolean, statusOnly: boolean): void {
     this.cancelQueuedFrame();
-    super.renderNow(force);
+    const previous = this.renderingStatusOnly;
+    this.renderingStatusOnly = statusOnly && !force && !this.contentRequested;
+    try { super.renderNow(force); }
+    finally { this.renderingStatusOnly = previous; }
   }
 
   protected override doRender(): void {
     if (!this.running) return;
     this.cancelQueuedFrame();
+    this.contentRequested = false;
     this.lastFrameStart = this.clock.now();
     super.doRender();
   }

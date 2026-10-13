@@ -22,7 +22,7 @@ import {
 import {
   type Component, Container, Editor, type Focusable, fuzzyFilter, getCellDimensions, getKeybindings, Input, isKeyRelease, Key,
   Loader, matchesKey, ProcessTerminal, ScrollView, SelectList, type SelectItem, setKeybindings, Spacer,
-  Text, type Terminal, type TerminalColors, type TerminalColorScheme, TruncatedText, TuiAltScreen, truncateToWidth, VStack,
+  Text, type Terminal, type TerminalColors, type TerminalColorScheme, TruncatedText, truncateToWidth, VStack,
 } from '@earendil-works/pi-tui';
 import {
   errorText, PI_VERSION, PROTOCOL_VERSION,
@@ -123,7 +123,7 @@ export interface TuiOptions {
 export class RemoteTui {
   readonly view: RemoteView;
   editor: Editor;
-  readonly tui: TuiAltScreen;
+  readonly tui: ScheduledTuiAltScreen;
   private transcript: Transcript;
   private bottom = new VStack();
   private root: VStack;
@@ -204,7 +204,7 @@ export class RemoteTui {
     } });
     this.editor = this.makeEditor();
     this.editor.onSubmit = text => { void this.submit(text, 'steer'); };
-    this.transcript = new Transcript(this.view, this.tui, () => this.presentation);
+    this.transcript = new Transcript(this.view, this.tui, () => this.presentation, () => this.tui.statusOnlyFrame);
     this.transcript.thinking = !options.hideThinkingBlock;
     this.root = new DocumentLayout([
       { component: new ScrollView(this.transcript, { primary: true, follow: 'end', scrollbar: 'auto' }), basis: 0, grow: 1, minSize: 1 },
@@ -230,12 +230,18 @@ export class RemoteTui {
     this.editor.setAutocompleteProvider(this.completion);
     // Like Pi, learn whether the terminal is light or dark before building themed content.
     this.unsubscribe.push(this.tui.onTerminalColorSchemeChange(scheme => this.terminalColorSchemeChanged(scheme)));
-    await this.queryTerminalColors();
-    if (this.detached) return;
-    try { await this.reloadPresentation(); }
-    catch (error) {
-      this.notify(`Local presentation initialization failed: ${errorText(error)}`);
-      if (this.bell === undefined) this.configureBell();
+    this.transcript.setLoading(true);
+    try {
+      await this.queryTerminalColors();
+      if (this.detached) return;
+      try { await this.reloadPresentation(); }
+      catch (error) {
+        this.notify(`Local presentation initialization failed: ${errorText(error)}`);
+        if (this.bell === undefined) this.configureBell();
+      }
+    } finally {
+      this.transcript.setLoading(false);
+      if (!this.detached) this.tui.requestRender();
     }
     if (this.detached) return;
     this.refreshPresentationData();
@@ -293,7 +299,14 @@ export class RemoteTui {
 
   /** Serialize reloads: appearance changes can arrive while a command reloads the presentation. */
   private reloadPresentation(): Promise<void> {
-    const next = this.reloadQueue.then(() => this.loadPresentation());
+    const next = this.reloadQueue.then(async () => {
+      this.transcript.setLoading(true);
+      try { await this.loadPresentation(); }
+      finally {
+        this.transcript.setLoading(false);
+        if (!this.detached) this.tui.requestRender();
+      }
+    });
     this.reloadQueue = next.catch(() => {});
     return next;
   }
@@ -803,7 +816,11 @@ export class RemoteTui {
     const color = (role: 'accent' | 'muted', text: string) => this.workingEditor
       ? this.workingEditor.borderColor(text) : this.localTheme.fg(role, text);
     if (!this.working) {
-      this.working = new WorkingIndicator(this.tui, text => color('accent', text), text => color('muted', text), message, options);
+      // Loader only uses requestRender. Scope its editor-only animation without changing
+      // the render path used by tools, extensions, remote events or keyboard input.
+      const statusUi = new Proxy(this.tui, { get: (target, key, receiver) => key === 'requestRender'
+        ? target.requestStatusRender.bind(target) : Reflect.get(target, key, receiver) });
+      this.working = new WorkingIndicator(statusUi, text => color('accent', text), text => color('muted', text), message, options);
     } else {
       if (optionsRevision !== this.workingOptionsRevision) this.working.setIndicator(options);
       if (message !== this.workingMessage) this.working.setMessage(message);
