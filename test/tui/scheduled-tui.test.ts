@@ -278,6 +278,58 @@ test('configured intervals are honored and invalid intervals are rejected', t =>
   }
 });
 
+test('only exclusively status-scoped frames permit transcript reuse', async t => {
+  const { tui, clock, terminal, setOnRender } = launch(t);
+  const scopes: boolean[] = [];
+  setOnRender(() => { scopes.push(tui.statusOnlyFrame); });
+  clock.advance(0);
+  tui.requestStatusRender(); clock.advance(8);
+  assert.deepEqual(scopes, [false, true]);
+  assert.equal(tui.statusOnlyFrame, false, 'scope must not escape the frame');
+  for (const requests of [
+    () => { tui.requestStatusRender(); tui.requestRender(); },
+    () => { tui.requestRender(); tui.requestStatusRender(); },
+  ]) {
+    requests(); clock.advance(8);
+    assert.equal(scopes.at(-1), false, 'ordinary requests upgrade either ordering');
+  }
+  tui.requestStatusRender(); tui.renderNow();
+  assert.equal(scopes.at(-1), false, 'explicit renderNow reevaluates dynamic components');
+  tui.requestStatusRender(true); await flush();
+  assert.equal(scopes.at(-1), false, 'forced redraws cannot reuse transcript content');
+  tui.requestStatusRender(); terminal.input('x'); await flush();
+  assert.equal(scopes.at(-1), false, 'focused input remains a normal immediate frame');
+});
+
+test('ordinary requests made inside a status frame survive and upgrade the next frame', t => {
+  const { tui, clock, setOnRender } = launch(t);
+  const scopes: boolean[] = [];
+  setOnRender(() => {
+    scopes.push(tui.statusOnlyFrame);
+    if (tui.statusOnlyFrame) tui.requestRender();
+  });
+  clock.advance(0);
+  tui.requestStatusRender(); clock.advance(8);
+  assert.deepEqual(scopes, [false, true]);
+  assert.equal(clock.pending, 1);
+  clock.advance(8);
+  assert.deepEqual(scopes, [false, true, false]);
+});
+
+test('stopped status requests cannot repaint or leak their scope into restart', t => {
+  const { tui, clock, terminal, setOnRender } = launch(t);
+  const scopes: boolean[] = [];
+  setOnRender(() => { scopes.push(tui.statusOnlyFrame); });
+  clock.advance(0);
+  tui.requestStatusRender();
+  tui.stop({ preserveScreen: true });
+  const output = terminal.output;
+  tui.requestStatusRender(); clock.advance(100);
+  assert.equal(terminal.output, output);
+  tui.start(); clock.advance(0);
+  assert.deepEqual(scopes, [false, false]);
+});
+
 function snapshot(): Snapshot {
   return {
     slot: { id: 'slot', cwd: '/remote', createdAt: '', status: 'running', clients: 1 },

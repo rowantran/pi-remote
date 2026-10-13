@@ -80,9 +80,12 @@ export class Transcript extends Container {
   private renderedExpanded = this.expanded;
   private renderedThinking = this.thinking;
   private readonly widthCache = new WidthCache();
+  private cachedLines?: { width: number; lines: string[] };
+  private loading = false;
 
   constructor(private view: RemoteView, private ui: TUI,
-    private presentation: () => PresentationHost | undefined = () => undefined) {
+    private presentation: () => PresentationHost | undefined = () => undefined,
+    private reuseFrame: () => boolean = () => false) {
     super(); this.noticeScope = this.currentNoticeScope();
   }
 
@@ -107,8 +110,14 @@ export class Transcript extends Container {
         sessionFile: scope.sessionFile ?? previous.sessionFile };
     }
   }
-  changed(): void { this.dirty = true; }
+  changed(): void { this.dirty = true; this.cachedLines = undefined; }
   override invalidate(): void { super.invalidate(); this.changed(); }
+
+  /** Keep terminal input/dialogs live without laying out partially loaded presentation. */
+  setLoading(loading: boolean): void {
+    if (this.loading === loading) return;
+    this.loading = loading; this.changed();
+  }
   notify(message: string, kind: Notice['kind'] = 'general'): void {
     this.syncNoticeScope();
     const messages = transcriptMessages(this.view.snapshot, this.derivedMessages);
@@ -314,6 +323,7 @@ export class Transcript extends Container {
   }
 
   override render(width: number): string[] {
+    if (this.loading) return this.widthCache.clamp(['Loading session history…'], width);
     this.syncNoticeScope();
     const host = this.presentation();
     const cwd = this.view.snapshot.slot.cwd;
@@ -328,7 +338,13 @@ export class Transcript extends Container {
       this.messages.clear(); this.changed();
     }
     if (this.dirty) this.rebuild();
+    // Only explicitly scoped status frames reuse the document. Ordinary requests (including
+    // tool/extension timers), input and renderNow still evaluate dynamic renderers normally.
+    if (this.reuseFrame() && this.cachedLines?.width === width) return this.cachedLines.lines;
     // Pi components own normal layout; enforce the client width contract even at 1 column.
-    return this.widthCache.clamp(super.render(width), width);
+    const lines = this.widthCache.clamp(super.render(width), width);
+    // A renderer may emit a notice/change while rendering. Do not cache that stale frame.
+    if (!this.dirty) this.cachedLines = { width, lines };
+    return lines;
   }
 }

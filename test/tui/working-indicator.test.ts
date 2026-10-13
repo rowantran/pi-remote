@@ -96,6 +96,28 @@ test('default editor embeds the animated native status and preserves its frame o
   assert.equal(connection.requests.length, 0, 'animation and cleanup must not send remote commands');
 });
 
+test('spinner ticks reuse history but ordinary renderer requests and remote updates still repaint it', t => {
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
+  t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] });
+  const initial = snapshot();
+  initial.live.messages = [{ role: 'user', timestamp: 1, content: 'HISTORY' }];
+  const { ui, connection } = launch(t, initial);
+  ui.tui.renderNow();
+  const transcript = (ui as any).transcript;
+  const render = t.mock.method(transcript.children[0], 'render');
+  const before = plain(ui.tui.getScreenLines()).join('\n');
+  now += 80; t.mock.timers.tick(80);
+  const after = plain(ui.tui.getScreenLines()).join('\n');
+  assert.notEqual(before, after, 'the working indicator must keep animating');
+  assert.equal(render.mock.callCount(), 0, 'editor-only animation must reuse transcript layout');
+  ui.tui.requestRender(); now += 8; t.mock.timers.tick(8);
+  assert.ok(render.mock.callCount() > 0, 'tool and extension render requests remain ordinary frames');
+  connection.emit(1, { type: 'message_start', message: { role: 'user', timestamp: 2, content: 'NEW OUTPUT' } });
+  now += 8; t.mock.timers.tick(8);
+  assert.match(plain(ui.tui.getScreenLines()).join('\n'), /NEW OUTPUT/);
+});
+
 test('separate status uses native blank rows and side padding before widgets and the editor', t => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   const { ui, rows, controls } = launch(t);

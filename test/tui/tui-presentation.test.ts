@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { AssistantMessageComponent, ToolExecutionComponent } from '@earendil-works/pi-coding-agent';
 import { stripTerminalSequences, visibleWidth, type Terminal } from '@earendil-works/pi-tui';
 import { RemoteTui } from '../../src/tui/tui.js';
-import { createPresentationTheme } from '../../src/tui/presentation.js';
+import { createPresentationTheme, PresentationHost } from '../../src/tui/presentation.js';
 import { loadLocalTheme, resolveThemeSelection, terminalAppearance } from '../../src/tui/local-theme.js';
 import type { RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../../src/protocol/types.js';
 
@@ -104,6 +104,59 @@ test('presentation initialization does not wait for unavailable metadata or bloc
   assert.equal(connection.requests.length, 3);
   ui.tui.renderNow(); assert.match(stripTerminalSequences(ui.tui.getScreenLines().join('\n')), /Startup confirmation/);
   terminal.input('\r'); await flush(); assert.equal(connection.requests.at(-1)?.method, 'answer');
+});
+
+test('startup keeps input and events live but builds history only after presentation loading finishes', async t => {
+  const initial = snapshot();
+  initial.ui = [{ id: 'startup', method: 'confirm', title: 'Startup confirmation' }];
+  initial.live.messages = [{ role: 'user', timestamp: 1, content: 'SAVED HISTORY' }];
+  const terminal = new FakeTerminal(), connection = new Connection();
+  const ui = new RemoteTui(connection, 'slot', initial, terminal, { presentationConfig: absentConfig });
+  const finished = ui.run();
+  let release!: () => void;
+  const loading = new Promise<void>(resolve => { release = resolve; });
+  t.after(async () => { release(); ui.detach(); await finished; });
+  t.mock.method(ui.tui, 'queryTerminalColors', async () => ({}));
+  t.mock.method(PresentationHost.prototype, 'load', async () => { await loading; });
+  const rebuild = t.mock.method((ui as any).transcript, 'rebuild');
+  const initializing = ui.initialize();
+  await flush(); ui.tui.renderNow();
+  let screen = stripTerminalSequences(ui.tui.getScreenLines().join('\n'));
+  assert.match(screen, /Loading session history/);
+  assert.match(screen, /Startup confirmation/);
+  assert.doesNotMatch(screen, /SAVED HISTORY/);
+  connection.listener?.({ type: 'event', slotId: 'slot', seq: 1,
+    event: { type: 'message_start', message: { role: 'user', timestamp: 2, content: 'ARRIVED DURING LOAD' } } });
+  ui.tui.renderNow();
+  assert.equal(ui.view.snapshot.seq, 1);
+  assert.equal(rebuild.mock.callCount(), 0);
+  release(); await initializing; await flush(); ui.tui.renderNow();
+  screen = stripTerminalSequences(ui.tui.getScreenLines().join('\n'));
+  assert.doesNotMatch(screen, /Loading session history/);
+  assert.match(screen, /SAVED HISTORY/); assert.match(screen, /ARRIVED DURING LOAD/);
+  assert.equal(rebuild.mock.callCount(), 1);
+});
+
+test('failed presentation startup restores history and detach remains available while colors are pending', async t => {
+  const initial = snapshot(); initial.live.messages = [{ role: 'user', timestamp: 1, content: 'SAVED HISTORY' }];
+  const terminal = new FakeTerminal(), connection = new Connection();
+  const ui = new RemoteTui(connection, 'slot', initial, terminal, { presentationConfig: absentConfig });
+  const finished = ui.run(); t.after(() => ui.detach());
+  t.mock.method(ui.tui, 'queryTerminalColors', async () => ({}));
+  t.mock.method(ui as any, 'reloadPresentation', async () => { throw new Error('fixture load failure'); });
+  await ui.initialize(); ui.tui.renderNow();
+  assert.match(stripTerminalSequences(ui.tui.getScreenLines().join('\n')), /SAVED HISTORY/);
+  terminal.input('\x04'); await finished;
+
+  const pendingTerminal = new FakeTerminal();
+  const pending = new RemoteTui(new Connection(), 'slot', initial, pendingTerminal, { presentationConfig: absentConfig });
+  const pendingFinished = pending.run(); t.after(() => pending.detach());
+  let release!: () => void;
+  t.mock.method(pending.tui, 'queryTerminalColors', () => new Promise(resolve => { release = () => resolve({}); }));
+  const initializing = pending.initialize();
+  pending.tui.renderNow(); pendingTerminal.input('\x04'); await pendingFinished;
+  release(); await initializing;
+  assert.equal(pending.presentation, undefined);
 });
 
 test('local widgets, commands, shortcuts, metadata and /reload-ui leave the remote harness unchanged', async t => {
@@ -400,8 +453,9 @@ test('partial shell timers are retired on UI reload, reconnect and detach withou
         (globalThis as any)[gateKey] = { entered, wait };
         const reloading = (ui as any).reloadPresentation();
         await enteredPromise;
-        ui.tui.renderNow(); // Simulate incoming remote output while shutdown awaits.
-        assert.equal(active.size, 1);
+        ui.tui.renderNow(); // Incoming output must not recreate old native components while shutdown awaits.
+        assert.equal(active.size, 0);
+        assert.match(stripTerminalSequences(ui.tui.getScreenLines().join('\n')), /Loading session history/);
         releaseShutdown(); await reloading; ui.tui.renderNow();
       }
       if (action === 'reconnect') { launched.connection.reconnected?.(structuredClone(initial)); await flush(); ui.tui.renderNow(); }
