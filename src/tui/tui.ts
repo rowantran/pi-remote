@@ -5,6 +5,7 @@ import { ForkSelector } from './fork-selector.js';
 import { sessionTree } from './session-tree.js';
 import { ScheduledTuiAltScreen } from './scheduled-tui.js';
 import { WorkingIndicator } from './working-indicator.js';
+import { ProgramActivity, ProgramStatusTerminal, WAITING_STATUS_KEY } from './program-status.js';
 import { createRemoteKeybindings } from './keybindings.js';
 import { readLocalClipboard, editLocally } from './local-input.js';
 import { PresentationHost, readPresentationConfig, createPresentationTheme, type PresentationChange } from './presentation.js';
@@ -108,7 +109,7 @@ export interface TuiOptions {
   renderIntervalMs?: number;
   /** Start with thinking blocks hidden, like Pi's `hideThinkingBlock` setting. */
   hideThinkingBlock?: boolean;
-  /** Ring the local terminal when remote work settles; overrides config, defaults to true. */
+  /** Ring on remote completion or a new blocking question/permission dialog; overrides config, defaults to true. */
   bell?: boolean;
   /** Local Pi preference; tree falls back to fork because RPC cannot navigate in place. */
   doubleEscapeAction?: DoubleEscapeAction;
@@ -174,6 +175,8 @@ export class RemoteTui {
   /** Undefined until local config is read; buffered startup events must respect its opt-out. */
   private bell?: boolean;
   private pendingBell = false;
+  private activity: ProgramActivity;
+  private programTerminal: ProgramStatusTerminal;
   private sideSplit: SplitDirection = 'auto';
   private sidePending = false;
   private sessionFlowPending = 0;
@@ -187,7 +190,9 @@ export class RemoteTui {
     try { initial = options.theme && resolveThemeSelection(options.theme, terminalAppearance()); } catch { /* Reported by initialize(). */ }
     initTheme(initial, false);
     this.view = new RemoteView(snapshot);
-    this.tui = new ScheduledTuiAltScreen(terminal, true, undefined, { renderIntervalMs: options.renderIntervalMs,
+    this.activity = new ProgramActivity(snapshot);
+    this.programTerminal = new ProgramStatusTerminal(terminal);
+    this.tui = new ScheduledTuiAltScreen(this.programTerminal, true, undefined, { renderIntervalMs: options.renderIntervalMs,
       // Like Pi's fullscreen mode: a clickable pill while the transcript is not following output.
       scrollToEndIndicator: () => {
         const shortcut = keyDisplayText('tui.altScreen.bottom');
@@ -448,7 +453,14 @@ export class RemoteTui {
       throw new Error('Remote Pi is starting or reloading. Nothing was sent. Your draft and local attachments are preserved.');
     }
     if (work) this.rpcWorkPending++;
+    const rollbackAbort = command.type === 'abort' || command.type === 'abort_retry' ? this.activity.abort() : undefined;
     try { return await this.connection.request('rpc', { slotId: this.slotId, command }) as T; }
+    catch (error) {
+      rollbackAbort?.();
+      if (command.type === 'prompt') this.activity.promptFailed(errorText(error));
+      if (rollbackAbort || command.type === 'prompt') this.syncProgramStatus();
+      throw error;
+    }
     finally { if (work) this.rpcWorkPending--; }
   }
 
@@ -469,6 +481,7 @@ export class RemoteTui {
         this.view.replace(snapshot);
         this.view.snapshot.presentation = { ...presentation, ...snapshot.presentation };
         this.reconcileWorkingLifecycle(wasBusy);
+        this.syncProgramStatus({ snapshot: true, reconnect: true });
         this.metadataPending.clear();
         this.transcript.reset();
         this.transcript.clearConnectionNotices();
@@ -585,6 +598,7 @@ export class RemoteTui {
       this.syncBottom(); return;
     }
     if (event.event.type === 'remote_refresh') this.completion?.invalidateCommands();
+    this.activity.event(event.event, this.view.snapshot);
     this.transcript.changed();
     this.displayEvent(event.event);
     this.reconcileWorkingLifecycle(wasBusy, event.event.type);
@@ -609,6 +623,7 @@ export class RemoteTui {
     this.generation++;
     this.view.invalidateHistory();
     this.view.snapshot.live = emptyLive(); this.view.snapshot.ui = []; delete this.view.snapshot.presentation;
+    this.activity.reset(this.view.snapshot);
     this.resetSnapshotFlight();
     this.metadataPending.clear(); this.completion?.invalidateCommands();
     this.lastEscapeTime = undefined;
@@ -648,6 +663,7 @@ export class RemoteTui {
         }
         this.view.snapshot.presentation = { ...presentation, ...snapshot.presentation };
         this.reconcileWorkingLifecycle(wasBusy);
+        this.syncProgramStatus({ snapshot: true });
         this.presentation?.update(this.view.snapshot);
         this.transcript.invalidate(); this.syncBottom();
         void this.refreshPresentationData();
@@ -752,11 +768,16 @@ export class RemoteTui {
   /** Share settle detection with snapshots/reconnects, without replaying bells or display hooks. */
   private reconcileWorkingLifecycle(wasBusy: boolean, eventType?: string): void {
     const busy = this.view.snapshot.live.busy;
-    // Notify only on a busy-to-idle transition: retries, duplicate settles and idle attaches are quiet.
-    if (wasBusy && !busy) this.ringBell();
     if (wasBusy !== busy && eventType !== 'agent_start' && eventType !== 'agent_settled') {
       this.displayEvent({ type: busy ? 'agent_start' : 'agent_settled' });
     }
+  }
+
+  private syncProgramStatus(options: { snapshot?: boolean; reconnect?: boolean } = {}): void {
+    if (this.detached) return;
+    const { status, bells } = this.activity.update(this.view.snapshot, options);
+    this.programTerminal.setProgramStatus(status);
+    for (let i = 0; i < bells; i++) this.ringBell();
   }
 
   private clearWorkingIndicator(): void {
@@ -793,7 +814,9 @@ export class RemoteTui {
   }
 
   private syncBottom(): void {
-    if (this.detached || this.externalEditorActive) return;
+    if (this.detached) return;
+    this.syncProgramStatus();
+    if (this.externalEditorActive) return;
     const ui = this.view.snapshot.ui;
     const editorText = ui.find(record => record.method === 'set_editor_text');
     if (editorText && editorText.id !== this.appliedEditorId) {
@@ -854,7 +877,7 @@ export class RemoteTui {
     const context = usage ? (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0) + (usage.output ?? 0) : undefined;
     const window = s.state.model?.contextWindow;
     const cost = messages.reduce((total, message) => total + (message.usage?.cost?.total ?? 0), 0);
-    const statuses = s.ui.filter(record => record.method === 'setStatus' && record.statusText).map(record => safeText(record.statusText));
+    const statuses = s.ui.filter(record => record.method === 'setStatus' && record.statusKey !== WAITING_STATUS_KEY && record.statusText).map(record => safeText(record.statusText));
     return muted([status, s.state.sessionName ?? s.slot.sessionName ?? this.slotId, sideParentLabel(s.slot),
       this.options.host ? `${REMOTE_ICON} ${this.options.host}` : undefined, s.slot.cwd,
       s.state.model?.id ?? assistant?.model, s.state.thinkingLevel,

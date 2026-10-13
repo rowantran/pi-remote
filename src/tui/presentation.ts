@@ -14,6 +14,7 @@ import { WidthCache } from './width-cache.js';
 import type { RecordValue, Snapshot } from '../protocol/types.js';
 import { ReadonlyHistory, readonlyCopy } from './presentation-history.js';
 import { safeText } from './view.js';
+import { WAITING_STATUS_KEY } from './program-status.js';
 import { configPath, parseConfig, type ClientConfig, type SplitDirection } from '../protocol/config.js';
 
 /**
@@ -407,9 +408,9 @@ export class PresentationHost {
       const statuses = new Map<string, string>();
       for (const record of this.snapshot.ui) if (record.method === 'setStatus') {
         const key = record.statusKey ?? record.key;
-        if (typeof key === 'string' && typeof record.statusText === 'string') statuses.set(key, record.statusText);
+        if (typeof key === 'string' && key !== WAITING_STATUS_KEY && typeof record.statusText === 'string') statuses.set(key, record.statusText);
       }
-      for (const [key, value] of this.statuses) statuses.set(key, value);
+      for (const [key, value] of this.statuses) if (key !== WAITING_STATUS_KEY) statuses.set(key, value);
       return statuses;
     },
     getAvailableProviderCount: (): number => new Set((this.snapshot.presentation?.models ?? []).map(model => model.provider)).size,

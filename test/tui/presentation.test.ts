@@ -102,6 +102,16 @@ test('display lifecycle uses readonly active branch, mirrored models, stats and 
   await host.shutdown(); await host.shutdown(); assert.equal(state.notices.filter(n => n === 'shutdown').length, 1);
 });
 
+test('custom footer status data omits the reserved background-wait key', async () => {
+  const initial = snapshot();
+  initial.ui.push({ method: 'setStatus', statusKey: 'waiting-on-background', statusText: 'Waiting on background task' });
+  const { host } = setup(initial);
+  await host.load([resolve(fixtures, 'display.ts')]); await host.start();
+  assert.deepEqual([...host.footerData.getExtensionStatuses()], [['remote', 'remote status'], ['local', 'local status']]);
+  assert.doesNotMatch(host.footer!.render(3000)[0], /Waiting on background task|waiting-on-background/);
+  await host.shutdown();
+});
+
 test('tool renderer context retains state and previous components without retaining execute', async () => {
   const { host } = setup(); await host.load([resolve(fixtures, 'display.ts')]);
   const context = { toolCallId: 'call1' };

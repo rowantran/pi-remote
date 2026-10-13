@@ -462,6 +462,8 @@ test('light/dark theme pairs pick the member for the local terminal and follow l
   class ColorTerminal extends FakeTerminal {
     background = 'ffff/ffff/ffff'; foreground = '0000/0000/0000';
     override write(data: string) {
+      // This terminal does not support program status, but answers its DA1 sentinel.
+      if (data.includes('\x1b]7501;?')) { setImmediate(() => this.input('\x1b[?62c')); return; }
       if (!data.includes('\x1b]11;?')) return;
       setImmediate(() => {
         this.input(`\x1b]10;rgb:${this.foreground}\x07`);
