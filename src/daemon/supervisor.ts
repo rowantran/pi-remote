@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { readJsonl, writeJsonl } from '../protocol/jsonl.js';
 import { emptyLive, applyLiveEvent, captureLiveSnapshot } from '../protocol/live.js';
-import { displayEvent, displaySnapshot } from '../protocol/display.js';
+import { stripEventSignatures, stripSnapshotSignatures } from '../protocol/strip-assistant-signatures.js';
 import { PiProcess, type PiLaunch } from './pi-process.js';
 import { remoteSessionEnv } from '../protocol/remote-session.js';
 import { socketPath } from '../protocol/paths.js';
@@ -176,7 +176,7 @@ export class Supervisor {
     // Raw RPC results are always untouched, even on a display attachment. Project each
     // peer's event copy here so live and buffered events follow the same policy.
     const outgoing = peer.displayOnly && record.type === 'event'
-      ? { ...record, event: displayEvent(record.event) } : record;
+      ? { ...record, event: stripEventSignatures(record.event) } : record;
     try { writeJsonl(peer.socket, outgoing); }
     catch { peer.socket.destroy(); }
   }
@@ -749,7 +749,7 @@ export class Supervisor {
             try {
               const snapshot: MethodResult<'attach'> = await this.snapshot(slot);
               peer.displayOnly = params.displayOnly === true;
-              data = peer.displayOnly ? displaySnapshot(snapshot) : snapshot;
+              data = peer.displayOnly ? stripSnapshotSignatures(snapshot) : snapshot;
               this.send(peer, { type: 'result', id, success: true, data });
               // Events may follow the entries response in the same stdout chunk, before this
               // await continuation runs. Buffer them and replay only those after the cut.
@@ -763,7 +763,7 @@ export class Supervisor {
           }
           case 'snapshot': {
             const snapshot = await this.snapshot(this.running(params.slotId), 2, historyCursor(params.historyCursor));
-            data = peer.displayOnly ? displaySnapshot(snapshot) : snapshot;
+            data = peer.displayOnly ? stripSnapshotSignatures(snapshot) : snapshot;
             break;
           }
           case 'sessions': {

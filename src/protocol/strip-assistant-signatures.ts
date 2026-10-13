@@ -41,14 +41,14 @@ function entry(value: RecordValue): RecordValue {
 }
 
 /** Preserve every entry, content index, identity, checkpoint and unknown field. */
-export function displaySnapshot(snapshot: Snapshot): Snapshot {
+export function stripSnapshotSignatures(snapshot: Snapshot): Snapshot {
   const entries = mapUnchanged(snapshot.entries, entry);
   const live = fields(snapshot.live, ['messages'], messages);
   return entries === snapshot.entries && live === snapshot.live ? snapshot : { ...snapshot, entries, live };
 }
 
 /** Project only documented message carriers, not arbitrary nested tool/custom payloads. */
-export function displayEvent(event: RecordValue): RecordValue {
+export function stripEventSignatures(event: RecordValue): RecordValue {
   switch (event.type) {
     case 'message_start': case 'message_end': case 'turn_end':
       return fields(event, ['message'], message);
