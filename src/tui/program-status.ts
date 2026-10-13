@@ -1,9 +1,10 @@
+import { buildSessionProjection, type SessionEntry } from '@earendil-works/pi-coding-agent';
 import type { Terminal } from '@earendil-works/pi-tui';
 import type { RecordValue, Snapshot } from '../protocol/types.js';
-import { DIALOG_METHODS, transcriptMessages } from './view.js';
+import { DIALOG_METHODS } from './view.js';
+import { messageKey } from '../protocol/live.js';
 
-export const WAITING_STATUS_KEY = 'waiting-on-background';
-export const WAITING_STATUS_TEXT = 'Waiting on background task';
+const WAITING_MESSAGE = 'Waiting on background task';
 export const PROGRAM_STATUS_QUERY = '\x1b]7501;?\x1b\\';
 export interface ProgramStatus {
   state: 'idle' | 'working' | 'blocked' | 'done' | 'error' | 'clear';
@@ -26,14 +27,32 @@ export function formatProgramStatus(status: ProgramStatus): string {
   return `\x1b]7501;${pairs.join(':')}\x1b\\`;
 }
 
-export function waitingOnBackground(snapshot: Snapshot): boolean {
-  return snapshot.ui.some(record => record.method === 'setStatus'
-    && record.statusKey === WAITING_STATUS_KEY && record.statusText === WAITING_STATUS_TEXT);
+/** Call only at a completed-run checkpoint, with messages scoped to that run. */
+export function waitingOnBackground(messages: RecordValue[]): boolean {
+  const [call, result, reply] = messages.slice(-3);
+  if (call?.role !== 'assistant' || call.stopReason !== 'toolUse'
+    || result?.role !== 'toolResult' || result.toolName !== 'background_wait' || reply?.role !== 'assistant') return false;
+  const calls = Array.isArray(call.content) ? call.content.filter((block: RecordValue) => block.type === 'toolCall') : [];
+  return calls.length === 1 && calls[0].name === 'background_wait' && typeof calls[0].id === 'string' && calls[0].id.length > 0
+    && result.toolCallId === calls[0].id && result.isError === false
+    && reply.stopReason === 'stop' && Array.isArray(reply.content)
+    && !reply.content.some((block: RecordValue) => block.type === 'toolCall');
 }
 
-type Outcome = { state: 'idle' | 'done' | 'error'; message?: string };
+type Outcome = { state: 'idle' | 'done' | 'error' | 'waiting'; message?: string };
+/** Waiting follows Pi's effective context, not raw display history containing omitted retries. */
+function activityMessages(snapshot: Snapshot): RecordValue[] {
+  const projection = buildSessionProjection(snapshot.entries as SessionEntry[], snapshot.leafId);
+  const omitted = new Set(projection.entries.flatMap(entry => entry.sourceEntry.type === 'message' && !entry.messages.length
+    ? [messageKey(entry.sourceEntry.message)] : []));
+  const messages: RecordValue[] = [...projection.messages, ...snapshot.live.messages.filter(message => !omitted.has(messageKey(message)))];
+  if (snapshot.historyComplete !== undefined) return messages;
+  const merged = new Map<string, RecordValue>();
+  for (const message of messages) merged.set(messageKey(message), message);
+  return [...merged.values()];
+}
 function lastAssistant(snapshot: Snapshot): RecordValue | undefined {
-  return transcriptMessages(snapshot).findLast(message => message.role === 'assistant');
+  return activityMessages(snapshot).findLast(message => message.role === 'assistant');
 }
 function assistantIdentity(message: RecordValue | undefined): string | undefined {
   // Stable across live messages and saved snapshot copies, regardless of property order.
@@ -58,24 +77,27 @@ export class ProgramActivity {
   private settledDuringAbort = false;
   private recoveredCompletion = false;
   private runAssistant?: string;
-  /** A signal clear precedes collection of the background result; it is not task completion. */
-  private waitingHandoff = false;
-  private handoffAssistant?: string;
+  /** Live busy changes are not completion; only agent_settled or an idle snapshot is. */
+  private agentActive = false;
+  private runTail: RecordValue[] = [];
+  private runError = false;
   private awaitingAgent = false;
   private exited = false;
   private dialogs = new Set<string>();
 
-  constructor(snapshot: Snapshot) { this.reset(snapshot); }
+  constructor(snapshot: Snapshot) { this.reset(snapshot, true); }
 
-  reset(snapshot: Snapshot): void {
+  reset(snapshot: Snapshot, recoverWaiting = false): void {
     this.operation++;
-    this.waitingHandoff = false;
+    this.agentActive = snapshot.live.busy;
+    this.runTail = []; this.runError = false;
     this.awaitingAgent = false;
     this.exited = false;
     this.localAbort = false; this.settledDuringAbort = false; this.recoveredCompletion = false;
     this.sessionId = snapshot.state.sessionId;
     this.active = snapshot.live.busy || snapshot.live.compacting;
-    this.outcome = { state: this.active ? 'done' : 'idle' };
+    this.outcome = { state: this.active ? 'done'
+      : recoverWaiting && snapshot.historyComplete !== false && waitingOnBackground(activityMessages(snapshot)) ? 'waiting' : 'idle' };
     this.cancelled = false;
     this.runAssistant = assistantIdentity(lastAssistant(snapshot));
     this.dialogs = new Set(snapshot.ui.filter(record => DIALOG_METHODS.has(record.method)).map(record => record.id));
@@ -85,7 +107,12 @@ export class ProgramActivity {
   event(event: RecordValue, snapshot: Snapshot): void {
     switch (event.type) {
       case 'agent_start': case 'compaction_start':
-        this.waitingHandoff = false;
+        if (!this.active || (event.type === 'agent_start' && !this.agentActive)) {
+          this.runTail = []; this.runError = false;
+          this.runAssistant = assistantIdentity(lastAssistant(snapshot));
+        }
+        if (event.type === 'compaction_start' && event.reason === 'overflow') this.omitFailedReply();
+        if (event.type === 'agent_start') this.agentActive = true;
         this.cancelled = false;
         this.awaitingAgent = event.type === 'compaction_start' && !snapshot.live.busy
           && event.reason !== undefined && event.reason !== 'manual';
@@ -93,48 +120,71 @@ export class ProgramActivity {
           this.operation++;
           this.localAbort = false; this.settledDuringAbort = false; this.recoveredCompletion = false;
           this.cancelled = false;
-          this.runAssistant = assistantIdentity(lastAssistant(snapshot));
         }
         this.active = true;
         this.outcome = { state: 'done' };
         break;
       case 'message_end': {
+        if (this.agentActive && event.message) this.runTail = [...this.runTail.slice(-2), event.message];
         const outcome = messageOutcome(event.message);
-        if (this.active && outcome) this.outcome = outcome;
+        if (this.active && outcome) {
+          this.outcome = outcome;
+          if (outcome.state === 'error') this.runError = true;
+        }
         break;
       }
       case 'agent_end': {
         const message = event.messages?.findLast((record: RecordValue) => record.role === 'assistant');
         const outcome = messageOutcome(message);
-        if (this.active && outcome) this.outcome = outcome;
+        if (this.active && outcome) {
+          this.outcome = outcome;
+          if (outcome.state === 'error') this.runError = true;
+        }
         break;
       }
+      case 'auto_retry_start':
+        this.omitFailedReply();
+        break;
       case 'auto_retry_end':
-        if (this.active && event.success === false) this.outcome = event.finalError === 'Retry cancelled'
-          ? { state: 'idle' } : { state: 'error', message: event.finalError };
+        if (this.active && event.success === false) {
+          this.runTail = [];
+          this.outcome = event.finalError === 'Retry cancelled' ? { state: 'idle' } : { state: 'error', message: event.finalError };
+        }
         break;
       case 'compaction_end':
         // Pre-prompt automatic compaction returns to prompt() even on failure/cancellation.
         // Its following agent_start, not this end event, owns the eventual completion.
         if (event.aborted) this.outcome = { state: 'idle' };
         else if (event.errorMessage) this.outcome = { state: 'error', message: event.errorMessage };
+        if (event.aborted || event.errorMessage) this.runTail = [];
         break;
       case 'agent_settled':
         this.awaitingAgent = false;
         // Newer remote Pi versions expose cancellation even after a successful reply.
         if (event.aborted === true) {
           this.cancelled = true;
-          this.waitingHandoff = false;
           this.outcome = { state: 'idle' };
+        } else if (this.agentActive && !this.runError && this.outcome.state === 'done' && waitingOnBackground(this.runTail)) {
+          this.outcome = { state: 'waiting' };
         }
+        this.agentActive = false;
         break;
       case 'remote_slot_exit':
+        this.agentActive = false;
         this.awaitingAgent = false;
         if (event.error) this.outcome = { state: 'error', message: event.error };
         break;
     }
     if (this.outcome.state === 'idle' && this.active) this.cancelled = true;
     if (this.cancelled) this.outcome = { state: 'idle' };
+  }
+
+  private omitFailedReply(): void {
+    const last = this.runTail.at(-1);
+    if (last?.role === 'assistant' && (last.stopReason === 'error' || last.stopReason === 'length')) {
+      this.runTail.pop();
+      this.runError = false;
+    }
   }
 
   /** RPC abort has no dedicated event. Mark the request before its settle can race the reply,
@@ -154,6 +204,7 @@ export class ProgramActivity {
   promptFailed(message: string): void {
     if (!this.awaitingAgent) return;
     this.awaitingAgent = false;
+    this.agentActive = false;
     this.cancelled = false;
     this.outcome = { state: 'error', message };
   }
@@ -161,31 +212,31 @@ export class ProgramActivity {
   /** Reconcile an authoritative snapshot without replaying completed runs or existing dialogs. */
   update(snapshot: Snapshot, options: { snapshot?: boolean; reconnect?: boolean } = {}): { status: ProgramStatus; bells: number } {
     if (this.sessionId !== snapshot.state.sessionId) this.reset(snapshot);
-    const last = options.snapshot ? lastAssistant(snapshot) : undefined;
-    if (snapshot.slot.status === 'exited') this.awaitingAgent = false;
+    const agentRun = this.agentActive;
+    const messages = options.snapshot ? activityMessages(snapshot) : [];
+    const last = options.snapshot ? messages.findLast(message => message.role === 'assistant') : undefined;
+    if (snapshot.slot.status === 'exited') { this.awaitingAgent = false; this.agentActive = false; }
+    if (options.snapshot && !snapshot.live.busy && !snapshot.live.compacting) this.agentActive = false;
     if (options.reconnect && this.awaitingAgent && !snapshot.live.busy && !snapshot.live.compacting) {
       // Pi 1.0.4 cannot expose another requester's preflight failure. A reconnect gives the
       // user a recovery path, but proves neither success nor failure: return quietly to idle.
       this.awaitingAgent = false; this.active = false; this.cancelled = true; this.outcome = { state: 'idle' };
     }
     if (options.snapshot && this.awaitingAgent && messageOutcome(last) && assistantIdentity(last) !== this.runAssistant) this.awaitingAgent = false;
-    const busy = snapshot.live.busy || snapshot.live.compacting || this.awaitingAgent;
+    const busy = snapshot.live.busy || snapshot.live.compacting || this.awaitingAgent || this.agentActive;
     let settled = this.active && !busy;
-    const waiting = waitingOnBackground(snapshot);
     if (snapshot.slot.status === 'exited') {
-      this.waitingHandoff = false;
+      if (this.outcome.state === 'waiting') this.outcome = { state: 'idle' };
       if (snapshot.slot.error) this.outcome = { state: 'error', message: snapshot.slot.error };
       else if (!this.exited && !this.active) this.outcome = { state: 'idle' };
       this.exited = true;
-    } else if (options.snapshot && !busy && !waiting && this.waitingHandoff) {
-      if (assistantIdentity(last) !== this.handoffAssistant && messageOutcome(last)) {
-        // A complete wake-up run may have happened while disconnected or across an event gap.
-        // New final assistant output proves completion; a signal clear alone does not.
-        this.outcome = messageOutcome(last)!;
-        this.cancelled = this.outcome.state === 'idle';
-        this.waitingHandoff = false;
-        settled = true;
-      }
+    } else if (options.snapshot && !busy && this.outcome.state === 'waiting'
+      && assistantIdentity(last) !== this.runAssistant && messageOutcome(last)) {
+      // An idle checkpoint can recover a whole wake-up run missed while disconnected.
+      this.outcome = snapshot.historyComplete !== false && waitingOnBackground(messages) ? { state: 'waiting' } : messageOutcome(last)!;
+      this.cancelled = this.outcome.state === 'idle';
+      this.runAssistant = assistantIdentity(last);
+      settled = true;
     }
     if (options.reconnect) {
       for (const record of snapshot.ui) if (DIALOG_METHODS.has(record.method)) this.dialogs.add(record.id);
@@ -196,13 +247,21 @@ export class ProgramActivity {
         // Never mistake a previous run's saved error/abort for this run's outcome.
         this.outcome = snapshot.slot.status === 'exited' && snapshot.slot.error ? { state: 'error', message: snapshot.slot.error }
           : assistantIdentity(last) !== this.runAssistant ? messageOutcome(last) ?? this.outcome : this.outcome;
+        // Both assistants must be new to this operation. An old wait followed by an empty,
+        // partial, or standalone-compaction run must not suppress that run's completion.
+        if (agentRun && snapshot.historyComplete !== false && this.outcome.state === 'done' && waitingOnBackground(messages)
+          && assistantIdentity(messages.at(-3)) !== this.runAssistant && assistantIdentity(last) !== this.runAssistant) {
+          this.outcome = { state: 'waiting' };
+        }
         if (this.outcome.state === 'idle') this.cancelled = true;
       }
       this.active = false;
+      this.runAssistant = assistantIdentity(lastAssistant(snapshot));
       if (this.localAbort) this.settledDuringAbort = true;
     } else if (!this.active && busy) {
       this.operation++;
-      this.waitingHandoff = false;
+      this.agentActive = snapshot.live.busy;
+      this.runTail = []; this.runError = false;
       this.localAbort = false; this.settledDuringAbort = false; this.recoveredCompletion = false;
       this.active = true;
       this.cancelled = false;
@@ -213,24 +272,18 @@ export class ProgramActivity {
     for (const record of snapshot.ui) if (DIALOG_METHODS.has(record.method) && !this.dialogs.has(record.id)) {
       this.dialogs.add(record.id); bells++;
     }
-    if (snapshot.slot.status !== 'exited' && !busy && !this.cancelled && !this.localAbort && this.outcome.state !== 'error' && waiting && !this.waitingHandoff) {
-      this.waitingHandoff = true;
-      this.handoffAssistant = assistantIdentity(lastAssistant(snapshot));
-    }
     const dialog = snapshot.slot.status !== 'exited' && snapshot.ui.find(record => DIALOG_METHODS.has(record.method));
-    const status: ProgramStatus = snapshot.slot.status === 'exited' ? { ...this.outcome } : dialog ? { state: 'blocked', kind: dialog.method === 'confirm' ? 'permission' : 'question',
-      message: dialog.title }
+    const result: ProgramStatus = this.outcome.state === 'waiting' ? { state: 'working', message: WAITING_MESSAGE }
+      : { state: this.outcome.state, message: this.outcome.message };
+    const status: ProgramStatus = snapshot.slot.status === 'exited' ? result
+      : dialog ? { state: 'blocked', kind: dialog.method === 'confirm' ? 'permission' : 'question', message: dialog.title }
       : busy ? { state: 'working', message: snapshot.live.compacting ? 'Compacting' : undefined }
-      : this.cancelled || this.localAbort ? { state: 'idle' }
-      : this.outcome.state === 'error' ? { ...this.outcome }
-      : this.waitingHandoff ? { state: 'working', message: waiting ? WAITING_STATUS_TEXT : undefined }
-      : { ...this.outcome };
+      : this.cancelled || this.localAbort ? { state: 'idle' } : result;
     if (status.state === 'error') status.message = status.message?.split(/[\r\n]/, 1)[0];
     if ((status.state === 'working' || status.state === 'done') && !status.message) {
       status.message = snapshot.state.sessionName ?? snapshot.slot.sessionName;
     }
-    // A signal clear can precede agent_start or a background completion wake-up.
-    // Only a real observed settlement may notify, never working -> done by itself.
+    // Notify only for an observed completion, never merely a working -> done change.
     if ((settled || this.recoveredCompletion) && (status.state === 'done' || status.state === 'error')) bells++;
     this.recoveredCompletion = false;
     return { status, bells };

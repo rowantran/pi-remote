@@ -5,7 +5,7 @@ import { ForkSelector } from './fork-selector.js';
 import { sessionTree } from './session-tree.js';
 import { ScheduledTuiAltScreen } from './scheduled-tui.js';
 import { WorkingIndicator } from './working-indicator.js';
-import { ProgramActivity, ProgramStatusTerminal, WAITING_STATUS_KEY } from './program-status.js';
+import { ProgramActivity, ProgramStatusTerminal } from './program-status.js';
 import { createRemoteKeybindings } from './keybindings.js';
 import { readLocalClipboard, editLocally } from './local-input.js';
 import { PresentationHost, readPresentationConfig, createPresentationTheme, type PresentationChange } from './presentation.js';
@@ -877,7 +877,7 @@ export class RemoteTui {
     const context = usage ? (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0) + (usage.output ?? 0) : undefined;
     const window = s.state.model?.contextWindow;
     const cost = messages.reduce((total, message) => total + (message.usage?.cost?.total ?? 0), 0);
-    const statuses = s.ui.filter(record => record.method === 'setStatus' && record.statusKey !== WAITING_STATUS_KEY && record.statusText).map(record => safeText(record.statusText));
+    const statuses = s.ui.filter(record => record.method === 'setStatus' && record.statusText).map(record => safeText(record.statusText));
     return muted([status, s.state.sessionName ?? s.slot.sessionName ?? this.slotId, sideParentLabel(s.slot),
       this.options.host ? `${REMOTE_ICON} ${this.options.host}` : undefined, s.slot.cwd,
       s.state.model?.id ?? assistant?.model, s.state.thinkingLevel,
