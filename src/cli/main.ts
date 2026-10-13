@@ -54,7 +54,7 @@ Options:
   --ui-config PATH     Alternate UI config (does not change host/cwd defaults)
   --theme NAME         Local UI theme, or a LIGHT/DARK pair
   --no-reconnect       Disable automatic client reconnection
-  --no-bell            Disable the local terminal bell when remote work settles
+  --no-bell            Disable bells for remote completion and blocking dialogs
 
 Configuration:
   $XDG_CONFIG_HOME/pi-remote/config.json (default ~/.config/pi-remote/config.json)

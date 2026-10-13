@@ -200,6 +200,21 @@ test('bell config reloads and a CLI opt-out always overrides it', async t => {
   });
 });
 
+test('config and CLI bell opt-outs apply to new blocking dialogs, including after UI reload', async t => {
+  for (const bell of [undefined, false]) await t.test(bell === false ? '--no-bell' : 'config', async t => {
+    const { ui, terminal, config, send } = await launch(t, { bell }, snapshot(), false);
+    await writeFile(config, JSON.stringify({ bell: false })); await ui.initialize();
+    await send('agent_start');
+    await send('extension_ui_request', { id: 'first', method: 'confirm', title: 'Approve' });
+    assert.equal(terminal.bells, 0);
+    await writeFile(config, JSON.stringify({ bell: true })); await (ui as any).builtin('/reload-ui', '');
+    assert.equal(terminal.bells, 0, 'reloading an existing dialog does not ring');
+    await send('remote_dialog_resolved', { id: 'first' });
+    await send('extension_ui_request', { id: 'second', method: 'input', title: 'Question' });
+    assert.equal(terminal.bells, bell === false ? 0 : 1);
+  });
+});
+
 test('settle before initialization respects the config rather than ringing with a provisional default', async t => {
   for (const bell of [undefined, true, false]) await t.test(String(bell), async t => {
     const { ui, terminal, config, send } = await launch(t, {}, snapshot(true), false);
