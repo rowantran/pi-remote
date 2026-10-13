@@ -9,12 +9,13 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { readJsonl, writeJsonl } from '../protocol/jsonl.js';
 import { emptyLive, applyLiveEvent, captureLiveSnapshot } from '../protocol/live.js';
+import { filterEvent, filterSnapshot } from '../protocol/transcript-filter.js';
 import { PiProcess, type PiLaunch } from './pi-process.js';
 import { remoteSessionEnv } from '../protocol/remote-session.js';
 import { socketPath } from '../protocol/paths.js';
 import type { FileMethod, MethodResult, SessionInfo } from '../protocol/methods.js';
 import { sessionDirArg, sideSessionDir, withSessionDir } from './side-sessions.js';
-import { PI_VERSION, PROTOCOL_VERSION, errorText, type CreateOptions, type HistoryCursor, type LiveState, type RecordValue, type Request, type SlotInfo, type Snapshot } from '../protocol/types.js';
+import { PI_VERSION, PROTOCOL_VERSION, errorText, type CreateOptions, type HistoryCursor, type LiveState, type RecordValue, type Request, type SlotInfo, type Snapshot, type RemoteEvent, type ServerRecord } from '../protocol/types.js';
 
 // SessionManager returns Dates; JSON serialization produces the protocol's ISO strings.
 type SessionInfoSource = Omit<SessionInfo, 'created' | 'modified'> & { created: Date; modified: Date };
@@ -57,7 +58,7 @@ interface Slot extends StoredSlot {
   /** Monotonic process generation; late replies and events cannot affect its replacement. */
   incarnation: number;
 }
-interface Peer { socket: Socket; slotId?: string; ready: boolean; verified: boolean; pending: number; attaching: boolean; buffer: RecordValue[]; bufferBytes: number }
+interface Peer { socket: Socket; slotId?: string; filterTranscript?: boolean; ready: boolean; verified: boolean; pending: number; attaching: boolean; buffer: RemoteEvent[]; bufferBytes: number }
 export interface DaemonOptions { stateDir: string; executable?: string; prefixArgs?: string[]; env?: NodeJS.ProcessEnv; skipVersionCheck?: boolean; sideIdleGraceMs?: number }
 function object(value: any, name: string): RecordValue {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Invalid ${name}`);
@@ -171,8 +172,12 @@ export class Supervisor {
       void this.handle(peer, request).finally(() => { peer.pending--; });
     }, () => socket.destroy());
   }
-  private send(peer: Peer, record: unknown) {
-    try { writeJsonl(peer.socket, record); }
+  private send(peer: Peer, record: ServerRecord) {
+    // Raw RPC results are always untouched, even when transcript filtering is enabled.
+    // Filter each peer's event copy here so live and buffered events follow the same policy.
+    const outgoing = peer.filterTranscript && record.type === 'event'
+      ? { ...record, event: filterEvent(record.event) } : record;
+    try { writeJsonl(peer.socket, outgoing); }
     catch { peer.socket.destroy(); }
   }
   private info(slot: Slot): SlotInfo {
@@ -189,7 +194,7 @@ export class Supervisor {
     return slot;
   }
   private publish(slot: Slot, event: RecordValue) {
-    const record = { type: 'event', slotId: slot.id, seq: ++slot.seq, event };
+    const record: RemoteEvent = { type: 'event', slotId: slot.id, seq: ++slot.seq, event };
     for (const peer of this.peers) {
       if (peer.slotId !== slot.id) continue;
       if (peer.ready) this.send(peer, record);
@@ -702,7 +707,7 @@ export class Supervisor {
       if (request.method === 'hello') {
         if (params.protocol !== PROTOCOL_VERSION || params.piVersion !== PI_VERSION) throw new Error(`Version mismatch: daemon protocol ${PROTOCOL_VERSION}, Pi ${PI_VERSION}`);
         peer.verified = true;
-        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, release: RELEASE, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots'] } satisfies MethodResult<'hello'>;
+        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, release: RELEASE, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'transcript_filtering'] } satisfies MethodResult<'hello'>;
       } else {
         if (!peer.verified) throw new Error('Send hello with matching versions first');
         switch (request.method) {
@@ -730,6 +735,7 @@ export class Supervisor {
           }
           case 'attach': {
             const slot = this.running(params.slotId);
+            if (params.filterTranscript !== undefined && typeof params.filterTranscript !== 'boolean') throw new Error('filterTranscript must be a boolean');
             if (peer.attaching) throw new Error('Attachment already in progress');
             peer.ready = false;
             peer.attaching = true;
@@ -742,7 +748,8 @@ export class Supervisor {
             slot.detachedAt = undefined;
             try {
               const snapshot: MethodResult<'attach'> = await this.snapshot(slot);
-              data = snapshot;
+              peer.filterTranscript = params.filterTranscript === true;
+              data = peer.filterTranscript ? filterSnapshot(snapshot) : snapshot;
               this.send(peer, { type: 'result', id, success: true, data });
               // Events may follow the entries response in the same stdout chunk, before this
               // await continuation runs. Buffer them and replay only those after the cut.
@@ -754,7 +761,11 @@ export class Supervisor {
               if (!peer.ready) { peer.slotId = undefined; this.peerLeft(slot.id); }
             }
           }
-          case 'snapshot': data = await this.snapshot(this.running(params.slotId), 2, historyCursor(params.historyCursor)) satisfies MethodResult<'snapshot'>; break;
+          case 'snapshot': {
+            const snapshot = await this.snapshot(this.running(params.slotId), 2, historyCursor(params.historyCursor));
+            data = peer.filterTranscript ? filterSnapshot(snapshot) : snapshot;
+            break;
+          }
           case 'sessions': {
             const slot = this.slot(params.slotId);
             const { SessionManager } = await import('@earendil-works/pi-coding-agent');
