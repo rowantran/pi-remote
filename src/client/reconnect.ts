@@ -25,6 +25,7 @@ export class ReconnectingConnection implements RemoteConnection {
   private current?: Generation;
   private error?: Error;
   private slotId?: string;
+  private displayOnly = false;
   private exited = false;
   private snapshotSeq = -1;
   private recoveredSnapshot?: Snapshot;
@@ -74,6 +75,7 @@ export class ReconnectingConnection implements RemoteConnection {
         const snapshot = result as Snapshot;
         this.validateSnapshot(snapshot, params.slotId);
         this.slotId = snapshot.slot.id;
+        this.displayOnly = params.displayOnly === true;
         this.recoveredSnapshot = undefined;
         this.acceptSnapshot(snapshot);
         generation.buffering = false;
@@ -204,7 +206,7 @@ export class ReconnectingConnection implements RemoteConnection {
         if (this.state !== 'recovering') { connection.close(); return; }
         generation = this.install(connection, true);
         if (this.current !== generation) continue;
-        const snapshot = await connection.request('attach', { slotId });
+        const snapshot = await connection.request('attach', { slotId, ...(this.displayOnly ? { displayOnly: true } : {}) });
         if (this.current !== generation || this.state !== 'recovering') continue;
         this.validateSnapshot(snapshot, slotId);
         this.acceptSnapshot(snapshot);

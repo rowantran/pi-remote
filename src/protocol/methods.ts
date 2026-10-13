@@ -49,8 +49,10 @@ export interface DaemonMethods {
   hello: { params: { protocol: number; piVersion: string }; result: HelloResult };
   list: { params: Record<string, never>; result: SlotInfo[] };
   create: { params: CreateOptions; result: SlotInfo };
-  /** Version fields are retained for callers that send legacy attachment metadata. */
-  attach: { params: { slotId: string; protocol?: number; piVersion?: string }; result: Snapshot };
+  /** displayOnly opts this attachment's snapshots/events into omitting assistant signature
+   * fields. Raw RPC results remain unchanged. Older daemons ignore this optional field.
+   * Version fields are retained for callers that send legacy attachment metadata. */
+  attach: { params: { slotId: string; protocol?: number; piVersion?: string; displayOnly?: boolean }; result: Snapshot };
   snapshot: { params: { slotId: string; historyCursor?: HistoryCursor }; result: Snapshot };
   sessions: { params: { slotId: string; side?: boolean }; result: SessionInfo[] };
   restart_daemon: { params: { force?: boolean }; result: RestartDaemonResult };

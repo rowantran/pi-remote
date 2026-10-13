@@ -1,6 +1,7 @@
 import type { DaemonMethod, MethodResult, RequestArgs } from './methods.js';
 
-/** Pi's inner RPC records are passed through unchanged. This envelope only adds routing. */
+/** Routing envelope for Pi RPC. Opted-in display snapshots/events omit assistant signatures;
+ * raw RPC replies and the authoritative Pi history remain unchanged. */
 export const PROTOCOL_VERSION = 1;
 export const PI_VERSION = "1.0.4";
 export type RecordValue = Record<string, any>;

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import test, { type TestContext } from 'node:test';
 import { completeWords, completionContext, completionScript, formatCompletions, matchCommand, numberSlots, resolveCommand, selectHost, tokenizeCompletionLine, unquoteWord, type CompletionItem, type NumberedSlot } from '../../src/cli/completion.js';
-import { main, parseOptions, pickSlot, resolveSlot, selectSlot, shouldReconnect } from '../../src/cli/main.js';
+import { main, parseOptions, pickSlot, resolveSlot, selectSlot, shouldReconnect, usesTerminalUi } from '../../src/cli/main.js';
 import { shellQuote } from '../../src/protocol/shell.js';
 import { PI_VERSION, PROTOCOL_VERSION } from '../../src/protocol/types.js';
 import { nodeModuleArgs } from '../../src/protocol/node-entry.js';
@@ -60,6 +60,20 @@ test('CLI parses and completes --no-bell as a local UI override', async () => {
   for (const command of ['attach', 'new']) {
     const items = await completeWords([command, '--no-b']);
     assert.ok(items.some(item => item.value === '--no-bell'));
+  }
+});
+
+test('CLI opts only interactive attach/new into display snapshots, independently of recovery', () => {
+  for (const command of ['attach', 'new']) {
+    assert.equal(usesTerminalUi(command, new Set(), true, true), true);
+    assert.equal(usesTerminalUi(command, new Set(['--no-reconnect']), true, true), true);
+    for (const [stdin, stdout] of [[false, true], [true, false], [false, false]]) {
+      assert.equal(usesTerminalUi(command, new Set(), stdin, stdout), false);
+    }
+  }
+  assert.equal(usesTerminalUi('new', new Set(['--no-attach']), true, true), false);
+  for (const command of ['rpc', 'watch', 'ls', 'kill', 'restart-daemon', 'complete', 'completion', 'fs', 'daemon', 'bridge']) {
+    assert.equal(usesTerminalUi(command, new Set(), true, true), false, command);
   }
 });
 

@@ -94,11 +94,15 @@ function append(message) { appendEntry({ type: 'message', message }); }
 const state = () => ({ sessionId, sessionFile, sessionName, isStreaming: streaming, isCompacting: compacting,
   thinkingLevel: 'off', steeringMode: 'all', followUpMode: 'one-at-a-time', autoCompactionEnabled: false,
   messageCount: entries.filter(entry => entry.type === 'message').length, pendingMessageCount: 0 });
+const signatures = args.includes('--fixture-signatures');
 const assistant = (text, timestamp, stopReason = 'pending') => ({ role: 'assistant',
-  content: text ? [{ type: 'text', text }] : [], api: 'fixture', provider: 'fixture', model: 'fixture',
-  usage, timestamp, stopReason });
+  content: [
+    ...(text || signatures ? [{ type: 'text', text, ...(signatures ? { textSignature: 'fixture-text-signature' } : {}) }] : []),
+    ...(signatures ? [{ type: 'thinking', thinking: 'fixture reasoning', thinkingSignature: 'fixture-thinking-signature', redacted: true }] : []),
+  ], api: 'fixture', provider: 'fixture', model: 'fixture', usage, timestamp, stopReason });
 const delta = text => ({ type: 'message_update', usage,
-  assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: text } });
+  assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: text,
+    ...(signatures ? { partial: assistant(text, 0) } : {}) } });
 function finish(message) {
   streaming = false;
   append(message);
