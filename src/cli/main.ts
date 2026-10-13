@@ -178,7 +178,7 @@ export function formatSlotList(slots: NumberedSlot[], hidden = 0): string {
   return lines.join('\n');
 }
 
-/** Only interactive attach/new use display-only snapshots; watch/rpc stay raw. */
+/** Only interactive attach/new request transcript filtering; watch/rpc stay raw. */
 export function usesTerminalUi(command: string, flags: ReadonlySet<string>, stdinIsTTY = Boolean(process.stdin.isTTY), stdoutIsTTY = Boolean(process.stdout.isTTY)): boolean {
   return stdinIsTTY && stdoutIsTTY && (command === 'attach' || (command === 'new' && !flags.has('--no-attach')));
 }
@@ -247,7 +247,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (command === 'kill') { await connection.request('kill', { slotId }); console.log(`Stopped ${slotId}`); return; }
     if (!['new', 'attach', 'rpc', 'watch'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
     const snapshot = await connection.request('attach', { slotId, protocol: PROTOCOL_VERSION, piVersion: PI_VERSION,
-      ...(usesTerminalUi(command, options.flags) ? { displayOnly: true } : {}),
+      ...(usesTerminalUi(command, options.flags) ? { filterTranscript: true } : {}),
     });
     // Power-user/debug interface: one explicit JSON command, not an interactive session.
     if (command === 'rpc') {

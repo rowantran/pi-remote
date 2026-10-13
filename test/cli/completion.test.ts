@@ -63,7 +63,7 @@ test('CLI parses and completes --no-bell as a local UI override', async () => {
   }
 });
 
-test('CLI opts only interactive attach/new into display snapshots, independently of recovery', () => {
+test('CLI opts only interactive attach/new into transcript filtering, independently of recovery', () => {
   for (const command of ['attach', 'new']) {
     assert.equal(usesTerminalUi(command, new Set(), true, true), true);
     assert.equal(usesTerminalUi(command, new Set(['--no-reconnect']), true, true), true);

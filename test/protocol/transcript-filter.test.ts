@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { stripEventSignatures, stripSnapshotSignatures } from '../../src/protocol/strip-assistant-signatures.js';
+import { filterEvent, filterSnapshot } from '../../src/protocol/transcript-filter.js';
 import type { RecordValue, Snapshot } from '../../src/protocol/types.js';
 
 function deepFreeze<T>(value: T): T {
@@ -59,7 +59,7 @@ function snapshot(entries: RecordValue[], messages: RecordValue[] = []): Snapsho
   };
 }
 
-test('stripSnapshotSignatures removes only matching assistant block signatures and preserves the frozen graph', () => {
+test('filterSnapshot removes only matching assistant block signatures and preserves the frozen graph', () => {
   const { message, displayed } = assistantPair();
   const user = { ...message, role: 'user' };
   const custom = { ...message, role: 'custom', customType: 'notice', details: message.unknown };
@@ -80,7 +80,7 @@ test('stripSnapshotSignatures removes only matching assistant block signatures a
   const before = structuredClone(original);
   deepFreeze(original);
 
-  const result = stripSnapshotSignatures(original);
+  const result = filterSnapshot(original);
   assert.deepEqual(result, {
     ...original,
     entries: entries.map((entry, index) => index === 2 ? { ...entry, message: displayed } : entry),
@@ -97,7 +97,7 @@ test('stripSnapshotSignatures removes only matching assistant block signatures a
   assert.equal(message.content[1].textSignature, 'private text');
 });
 
-test('stripSnapshotSignatures leaves unchanged snapshots valid, including empty live messages and full history', () => {
+test('filterSnapshot leaves unchanged snapshots valid, including empty live messages and full history', () => {
   for (const original of [
     snapshot([]),
     snapshot([{ type: 'message', id: 'clean', parentId: null, message: { role: 'assistant', content: [{ type: 'text', text: 'clean' }] } }]),
@@ -105,12 +105,12 @@ test('stripSnapshotSignatures leaves unchanged snapshots valid, including empty 
     delete original.historyDelta;
     delete original.historyComplete;
     deepFreeze(original);
-    assert.deepEqual(stripSnapshotSignatures(original), original);
+    assert.deepEqual(filterSnapshot(original), original);
   }
 });
 
 for (const type of ['message_start', 'message_end', 'turn_end']) {
-  test(`stripEventSignatures projects ${type}.message without touching nested payloads`, () => {
+  test(`filterEvent projects ${type}.message without touching nested payloads`, () => {
     const { message, displayed } = assistantPair();
     const event = deepFreeze({
       type, message, seq: 7, unknown: { message },
@@ -118,13 +118,13 @@ for (const type of ['message_start', 'message_end', 'turn_end']) {
       thinkingSignature: 'event thinking', textSignature: 'event text',
     });
     const before = structuredClone(event);
-    assert.deepEqual(stripEventSignatures(event), { ...event, message: displayed });
+    assert.deepEqual(filterEvent(event), { ...event, message: displayed });
     assert.deepEqual(event, before);
   });
 }
 
 for (const [type, carrier] of [['text_delta', 'partial'], ['done', 'message'], ['error', 'error']] as const) {
-  test(`stripEventSignatures projects message_update outer message and ${type}.${carrier}`, () => {
+  test(`filterEvent projects message_update outer message and ${type}.${carrier}`, () => {
     const { message, displayed } = assistantPair();
     const event = deepFreeze({
       type: 'message_update', message,
@@ -135,7 +135,7 @@ for (const [type, carrier] of [['text_delta', 'partial'], ['done', 'message'], [
       unknown: { partial: message, message, error: message },
     });
     const before = structuredClone(event);
-    assert.deepEqual(stripEventSignatures(event), {
+    assert.deepEqual(filterEvent(event), {
       ...event, message: displayed,
       assistantMessageEvent: { ...event.assistantMessageEvent, [carrier]: displayed },
     });
@@ -143,21 +143,21 @@ for (const [type, carrier] of [['text_delta', 'partial'], ['done', 'message'], [
   });
 }
 
-test('stripEventSignatures projects all message_update carriers together, including when the outer message is absent', () => {
+test('filterEvent projects all message_update carriers together, including when the outer message is absent', () => {
   const { message, displayed } = assistantPair();
   for (const outer of [{}, { message }]) {
     const event = deepFreeze({
       type: 'message_update', ...outer,
       assistantMessageEvent: { type: 'future', partial: message, message, error: message, details: { message } },
     });
-    assert.deepEqual(stripEventSignatures(event), {
+    assert.deepEqual(filterEvent(event), {
       ...event, ...('message' in outer ? { message: displayed } : {}),
       assistantMessageEvent: { ...event.assistantMessageEvent, partial: displayed, message: displayed, error: displayed },
     });
   }
 });
 
-test('stripEventSignatures projects agent_end.messages in order without changing other roles or metadata', () => {
+test('filterEvent projects agent_end.messages in order without changing other roles or metadata', () => {
   const { message, displayed } = assistantPair();
   const user = { ...message, role: 'user' };
   const custom = { ...message, role: 'custom' };
@@ -167,24 +167,24 @@ test('stripEventSignatures projects agent_end.messages in order without changing
     willRetry: true, seq: 8, details: { messages: [message] },
   });
   const before = structuredClone(event);
-  assert.deepEqual(stripEventSignatures(event), { ...event, messages: [user, displayed, custom, toolResult, displayed] });
+  assert.deepEqual(filterEvent(event), { ...event, messages: [user, displayed, custom, toolResult, displayed] });
   assert.deepEqual(event, before);
 });
 
-test('stripEventSignatures projects entry_appended message entries but not custom entries or entry data', () => {
+test('filterEvent projects entry_appended message entries but not custom entries or entry data', () => {
   const { message, displayed } = assistantPair();
   const entry = { type: 'message', id: 'entry', parentId: 'parent', message, data: { message }, unknown: 'keep' };
   const event = deepFreeze({ type: 'entry_appended', entry, seq: 9, unknown: { entry } });
   const before = structuredClone(event);
-  assert.deepEqual(stripEventSignatures(event), { ...event, entry: { ...entry, message: displayed } });
+  assert.deepEqual(filterEvent(event), { ...event, entry: { ...entry, message: displayed } });
   assert.deepEqual(event, before);
   for (const type of ['custom', 'future']) {
     const customEvent = deepFreeze({ ...event, entry: { ...entry, type } });
-    assert.deepEqual(stripEventSignatures(customEvent), customEvent);
+    assert.deepEqual(filterEvent(customEvent), customEvent);
   }
 });
 
-test('stripEventSignatures does not recursively strip tool, custom, or unknown event payloads', () => {
+test('filterEvent does not recursively strip tool, custom, or unknown event payloads', () => {
   const { message } = assistantPair();
   for (const type of ['tool_execution_start', 'tool_execution_update', 'tool_execution_end', 'custom', 'future']) {
     const event = deepFreeze({
@@ -194,54 +194,54 @@ test('stripEventSignatures does not recursively strip tool, custom, or unknown e
       result: { details: { thinkingSignature: 'result thinking', textSignature: 'result text', message } },
       partialResult: { message },
     });
-    assert.deepEqual(stripEventSignatures(event), event);
+    assert.deepEqual(filterEvent(event), event);
   }
 });
 
-test('stripEventSignatures removes matching signature properties even when their values are empty or undefined', () => {
+test('filterEvent removes matching signature properties even when their values are empty or undefined', () => {
   for (const signature of [undefined, null, '', false, 0]) {
     const message = deepFreeze({ role: 'assistant', content: [
       { type: 'thinking', thinking: 'reason', thinkingSignature: signature },
       { type: 'text', text: 'answer', textSignature: signature },
     ] });
-    const result = stripEventSignatures({ type: 'message_end', message });
+    const result = filterEvent({ type: 'message_end', message });
     assert.deepEqual(result.message.content, [{ type: 'thinking', thinking: 'reason' }, { type: 'text', text: 'answer' }]);
     assert.equal(Object.hasOwn(message.content[0], 'thinkingSignature'), true);
     assert.equal(Object.hasOwn(message.content[1], 'textSignature'), true);
   }
 });
 
-test('stripEventSignatures safely preserves absent or malformed optional message carriers', () => {
+test('filterEvent safely preserves absent or malformed optional message carriers', () => {
   const malformed = [undefined, null, false, 0, 'opaque', [], {}, { role: 'assistant' }, { role: 'assistant', content: null }, { role: 'assistant', content: 'opaque' }];
   for (const type of ['message_start', 'message_end', 'turn_end', 'message_update', 'agent_end', 'entry_appended']) {
     const absent = deepFreeze({ type, unknown: 'keep' });
-    assert.deepEqual(stripEventSignatures(absent), absent);
+    assert.deepEqual(filterEvent(absent), absent);
     for (const value of malformed) {
       const event = deepFreeze({ type, message: value, messages: value, entry: value, assistantMessageEvent: value });
-      assert.deepEqual(stripEventSignatures(event), event, `${type} must preserve malformed carriers`);
+      assert.deepEqual(filterEvent(event), event, `${type} must preserve malformed carriers`);
     }
   }
   for (const value of malformed) {
     const update = deepFreeze({ type: 'message_update', assistantMessageEvent: { type: 'error', partial: value, message: value, error: value } });
     const appended = deepFreeze({ type: 'entry_appended', entry: { type: 'message', id: 'entry', message: value } });
     const ended = deepFreeze({ type: 'agent_end', messages: [value] });
-    assert.deepEqual(stripEventSignatures(update), update);
-    assert.deepEqual(stripEventSignatures(appended), appended);
-    assert.deepEqual(stripEventSignatures(ended), ended);
+    assert.deepEqual(filterEvent(update), update);
+    assert.deepEqual(filterEvent(appended), appended);
+    assert.deepEqual(filterEvent(ended), ended);
   }
 });
 
-test('stripSnapshotSignatures safely preserves absent or malformed optional entry messages and live message values', () => {
+test('filterSnapshot safely preserves absent or malformed optional entry messages and live message values', () => {
   const malformed = [undefined, null, 'opaque', [], {}, { role: 'assistant' }, { role: 'assistant', content: {} }];
   const original = snapshot([
     { type: 'message', id: 'absent', parentId: null },
     ...malformed.map((message, index) => ({ type: 'message', id: String(index), parentId: 'absent', message })),
   ]);
   deepFreeze(original);
-  assert.deepEqual(stripSnapshotSignatures(original), original);
+  assert.deepEqual(filterSnapshot(original), original);
   for (const messages of malformed) {
     // Exercise defensive runtime handling without weakening the public Snapshot type.
     const value = deepFreeze({ ...original, live: { ...original.live, messages } });
-    assert.deepEqual(stripSnapshotSignatures(value as unknown as Snapshot), value);
+    assert.deepEqual(filterSnapshot(value as unknown as Snapshot), value);
   }
 });

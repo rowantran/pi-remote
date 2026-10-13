@@ -130,7 +130,7 @@ async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {
     if (verify) {
       const response = await peer.request('hello', hello);
       assert.deepEqual({protocol: response.protocol, piVersion: response.piVersion, pid: response.pid}, { ...hello, pid: process.pid });
-      assert.deepEqual(response.capabilities, ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'display_snapshots']);
+      assert.deepEqual(response.capabilities, ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'transcript_filtering']);
     }
     return peer;
   };
@@ -169,13 +169,13 @@ function assertSignatures(message: RecordValue, present: boolean): void {
   assert.equal(message.content[1].redacted, true);
 }
 
-test('display attachments strip snapshot/live-event signatures but preserve raw peers, RPC, files and history checkpoints', { timeout: 10_000 }, async t => {
+test('filtered attachments omit snapshot/live-event signatures but preserve raw peers, RPC, files and history checkpoints', { timeout: 10_000 }, async t => {
   const { peer, connect, slot, dir, supervisor } = await setup(t);
   const gate = join(dir, 'signature-finish');
   const { info } = await slot(['--fixture-signatures', '--fixture-prompt-gate', gate]);
   const baseline = await seedHistory(peer, info.id);
   const display = await connect();
-  const attached = await display.request<Snapshot>('attach', { slotId: info.id, displayOnly: true });
+  const attached = await display.request<Snapshot>('attach', { slotId: info.id, filterTranscript: true });
   assert.deepEqual(attached.entries, baseline.entries);
   const from = peer.records.length;
   await peer.request('rpc', { slotId: info.id, command: { type: 'prompt', message: 'signed fixture' } });
@@ -216,23 +216,23 @@ test('display attachments strip snapshot/live-event signatures but preserve raw 
   assertSignatures(saved.find(entry => entry.message?.role === 'assistant').message, true);
   // Fresh/reconnected attachments are full, and mode is opt-in on every attachment.
   const fresh = await connect();
-  const fullDisplay = await fresh.request<Snapshot>('attach', { slotId: info.id, displayOnly: true });
+  const fullDisplay = await fresh.request<Snapshot>('attach', { slotId: info.id, filterTranscript: true });
   assert.equal(fullDisplay.historyDelta, undefined);
   assertSignatures(fullDisplay.entries.find(entry => entry.message?.role === 'assistant')!.message, false);
-  for (const params of [{ slotId: info.id, displayOnly: false }, { slotId: info.id }]) {
+  for (const params of [{ slotId: info.id, filterTranscript: false }, { slotId: info.id }]) {
     const fullRaw = await fresh.request<Snapshot>('attach', params);
     assertSignatures(fullRaw.entries.find(entry => entry.message?.role === 'assistant')!.message, true);
   }
-  await assert.rejects(fresh.request('attach', { slotId: info.id, displayOnly: 'yes' }), /displayOnly must be a boolean/);
+  await assert.rejects(fresh.request('attach', { slotId: info.id, filterTranscript: 'yes' }), /filterTranscript must be a boolean/);
 });
 
-test('display mode also covers attach-buffered events and cached transition snapshots without changing the raw baseline', { timeout: 10_000 }, async t => {
+test('transcript filtering also covers attach-buffered events and cached transition snapshots without changing the raw baseline', { timeout: 10_000 }, async t => {
   const { peer, connect, slot } = await setup(t);
   const { info } = await slot(['--fixture-signatures', '--fixture-new-session-dialog']);
   await seedHistory(peer, info.id);
   await peer.request('rpc', { slotId: info.id, command: { type: 'prompt', message: '/boundary' } });
   const display = await connect();
-  const attached = await display.request<Snapshot>('attach', { slotId: info.id, displayOnly: true });
+  const attached = await display.request<Snapshot>('attach', { slotId: info.id, filterTranscript: true });
   const buffered = await display.waitFor(record => record.type === 'event' && record.event.type === 'message_end');
   assert.ok(buffered.seq > attached.seq);
   assertSignatures(buffered.event.message, false);

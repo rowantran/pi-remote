@@ -1,6 +1,6 @@
 import type { DaemonMethod, MethodResult, RequestArgs } from './methods.js';
 
-/** Routing envelope for Pi RPC. Opted-in display snapshots/events omit assistant signatures;
+/** Routing envelope for Pi RPC. Filtered snapshots/events omit assistant signatures;
  * raw RPC replies and the authoritative Pi history remain unchanged. */
 export const PROTOCOL_VERSION = 1;
 export const PI_VERSION = "1.0.4";

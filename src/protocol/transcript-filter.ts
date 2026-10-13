@@ -1,6 +1,6 @@
+/** Filter outgoing transcript copies without mutating Pi messages, cached history, or tool/custom data. */
 import type { RecordValue, Snapshot } from './types.js';
 
-/** A display copy only: never mutate Pi messages, cached history, or user-defined tool data. */
 function record(value: unknown): value is RecordValue {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -41,14 +41,14 @@ function entry(value: RecordValue): RecordValue {
 }
 
 /** Preserve every entry, content index, identity, checkpoint and unknown field. */
-export function stripSnapshotSignatures(snapshot: Snapshot): Snapshot {
+export function filterSnapshot(snapshot: Snapshot): Snapshot {
   const entries = mapUnchanged(snapshot.entries, entry);
   const live = fields(snapshot.live, ['messages'], messages);
   return entries === snapshot.entries && live === snapshot.live ? snapshot : { ...snapshot, entries, live };
 }
 
-/** Project only documented message carriers, not arbitrary nested tool/custom payloads. */
-export function stripEventSignatures(event: RecordValue): RecordValue {
+/** Filter only documented message carriers, not arbitrary nested tool/custom payloads. */
+export function filterEvent(event: RecordValue): RecordValue {
   switch (event.type) {
     case 'message_start': case 'message_end': case 'turn_end':
       return fields(event, ['message'], message);

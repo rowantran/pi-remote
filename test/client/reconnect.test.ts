@@ -83,27 +83,27 @@ async function attached(t: TestContext, ...attempts: Attempt[]) {
   return f;
 }
 
-test('reconnect retains display-only opt-in and accepts full replies from older daemons', async t => {
+test('reconnect retains transcript filtering opt-in and accepts full replies from older daemons', async t => {
   const first = new FakeConnection(), second = new FakeConnection();
   const message = { role: 'assistant', content: [{ type: 'thinking', thinking: 'visible', thinkingSignature: 'opaque' }] };
   // An older compatible daemon ignores the extra attach option and still returns signatures.
   first.attachedSnapshot.live.messages = [message];
   second.attachedSnapshot.live.messages = [message];
   const { connection } = await setup(t, first, second);
-  const initial = await connection.request('attach', { slotId: 'slot', displayOnly: true });
+  const initial = await connection.request('attach', { slotId: 'slot', filterTranscript: true });
   assert.equal(initial.live.messages[0].content[0].thinkingSignature, 'opaque');
   let recovered: Snapshot | undefined;
   connection.onReconnect(value => { recovered = value; });
   first.drop(); await tick(t, 10);
-  assert.deepEqual(second.calls[0].params, { slotId: 'slot', displayOnly: true });
+  assert.deepEqual(second.calls[0].params, { slotId: 'slot', filterTranscript: true });
   assert.equal(recovered?.live.messages[0].content[0].thinkingSignature, 'opaque');
 });
 
-test('a later raw attach clears the display-only recovery preference', async t => {
+test('a later raw attach clears the transcript filtering recovery preference', async t => {
   const first = new FakeConnection(), second = new FakeConnection();
   const { connection } = await setup(t, first, second);
-  await connection.request('attach', { slotId: 'slot', displayOnly: true });
-  await connection.request('attach', { slotId: 'slot', displayOnly: false });
+  await connection.request('attach', { slotId: 'slot', filterTranscript: true });
+  await connection.request('attach', { slotId: 'slot', filterTranscript: false });
   first.drop(); await tick(t, 10);
   assert.deepEqual(second.calls[0].params, { slotId: 'slot' });
 });

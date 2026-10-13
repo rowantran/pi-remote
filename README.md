@@ -383,9 +383,9 @@ local pi-tui client -> SSH stdio -> bridge -> private Unix socket
 
 Pi's exported `RpcClient` is not used for transport ownership: in 1.0.4 it has no public dialog-response method and imposes a fixed request timeout. `src/daemon/pi-process.ts` implements the documented stdio framing directly, with unique request IDs and no deadlines on agent commands that may await a dialog. This changes no Pi code.
 
-### Display-only attachments
+### Transcript filtering
 
-Interactive `attach` and `new` omit opaque assistant `thinkingSignature` and `textSignature` fields from snapshots and live events, including reconnects. All history entries, visible text/thinking, content positions, and history checkpoints remain intact. Pi's session files, the daemon's history cache, raw RPC replies, `watch`, and headless output are unchanged. Both an updated client and daemon are needed for this transfer reduction; older daemons still work and send the full fields. This does not add compression.
+Interactive `attach` and `new` request transcript filtering with the `filterTranscript` protocol flag, including reconnects. This omits opaque assistant `thinkingSignature` and `textSignature` fields from outgoing snapshots and live events. All history entries, visible text/thinking, content positions, and history checkpoints remain intact. Pi's session files, the daemon's history cache, raw RPC replies, `watch`, and headless output are unchanged. Both an updated client and daemon are needed for this transfer reduction; older daemons still work and send the full fields. This does not add compression.
 
 ### Incremental history refreshes
 

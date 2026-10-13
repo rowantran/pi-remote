@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { readJsonl, writeJsonl } from '../protocol/jsonl.js';
 import { emptyLive, applyLiveEvent, captureLiveSnapshot } from '../protocol/live.js';
-import { stripEventSignatures, stripSnapshotSignatures } from '../protocol/strip-assistant-signatures.js';
+import { filterEvent, filterSnapshot } from '../protocol/transcript-filter.js';
 import { PiProcess, type PiLaunch } from './pi-process.js';
 import { remoteSessionEnv } from '../protocol/remote-session.js';
 import { socketPath } from '../protocol/paths.js';
@@ -58,7 +58,7 @@ interface Slot extends StoredSlot {
   /** Monotonic process generation; late replies and events cannot affect its replacement. */
   incarnation: number;
 }
-interface Peer { socket: Socket; slotId?: string; displayOnly?: boolean; ready: boolean; verified: boolean; pending: number; attaching: boolean; buffer: RemoteEvent[]; bufferBytes: number }
+interface Peer { socket: Socket; slotId?: string; filterTranscript?: boolean; ready: boolean; verified: boolean; pending: number; attaching: boolean; buffer: RemoteEvent[]; bufferBytes: number }
 export interface DaemonOptions { stateDir: string; executable?: string; prefixArgs?: string[]; env?: NodeJS.ProcessEnv; skipVersionCheck?: boolean; sideIdleGraceMs?: number }
 function object(value: any, name: string): RecordValue {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Invalid ${name}`);
@@ -173,10 +173,10 @@ export class Supervisor {
     }, () => socket.destroy());
   }
   private send(peer: Peer, record: ServerRecord) {
-    // Raw RPC results are always untouched, even on a display attachment. Project each
-    // peer's event copy here so live and buffered events follow the same policy.
-    const outgoing = peer.displayOnly && record.type === 'event'
-      ? { ...record, event: stripEventSignatures(record.event) } : record;
+    // Raw RPC results are always untouched, even when transcript filtering is enabled.
+    // Filter each peer's event copy here so live and buffered events follow the same policy.
+    const outgoing = peer.filterTranscript && record.type === 'event'
+      ? { ...record, event: filterEvent(record.event) } : record;
     try { writeJsonl(peer.socket, outgoing); }
     catch { peer.socket.destroy(); }
   }
@@ -707,7 +707,7 @@ export class Supervisor {
       if (request.method === 'hello') {
         if (params.protocol !== PROTOCOL_VERSION || params.piVersion !== PI_VERSION) throw new Error(`Version mismatch: daemon protocol ${PROTOCOL_VERSION}, Pi ${PI_VERSION}`);
         peer.verified = true;
-        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, release: RELEASE, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'display_snapshots'] } satisfies MethodResult<'hello'>;
+        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, release: RELEASE, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'transcript_filtering'] } satisfies MethodResult<'hello'>;
       } else {
         if (!peer.verified) throw new Error('Send hello with matching versions first');
         switch (request.method) {
@@ -735,7 +735,7 @@ export class Supervisor {
           }
           case 'attach': {
             const slot = this.running(params.slotId);
-            if (params.displayOnly !== undefined && typeof params.displayOnly !== 'boolean') throw new Error('displayOnly must be a boolean');
+            if (params.filterTranscript !== undefined && typeof params.filterTranscript !== 'boolean') throw new Error('filterTranscript must be a boolean');
             if (peer.attaching) throw new Error('Attachment already in progress');
             peer.ready = false;
             peer.attaching = true;
@@ -748,8 +748,8 @@ export class Supervisor {
             slot.detachedAt = undefined;
             try {
               const snapshot: MethodResult<'attach'> = await this.snapshot(slot);
-              peer.displayOnly = params.displayOnly === true;
-              data = peer.displayOnly ? stripSnapshotSignatures(snapshot) : snapshot;
+              peer.filterTranscript = params.filterTranscript === true;
+              data = peer.filterTranscript ? filterSnapshot(snapshot) : snapshot;
               this.send(peer, { type: 'result', id, success: true, data });
               // Events may follow the entries response in the same stdout chunk, before this
               // await continuation runs. Buffer them and replay only those after the cut.
@@ -763,7 +763,7 @@ export class Supervisor {
           }
           case 'snapshot': {
             const snapshot = await this.snapshot(this.running(params.slotId), 2, historyCursor(params.historyCursor));
-            data = peer.displayOnly ? stripSnapshotSignatures(snapshot) : snapshot;
+            data = peer.filterTranscript ? filterSnapshot(snapshot) : snapshot;
             break;
           }
           case 'sessions': {
