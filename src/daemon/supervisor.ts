@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { readJsonl, writeJsonl } from '../protocol/jsonl.js';
 import { emptyLive, applyLiveEvent, captureLiveSnapshot } from '../protocol/live.js';
 import { filterEvent, filterSnapshot } from '../protocol/transcript-filter.js';
+import { ACTIVITY_CAPABILITY, activitySlot, activitySource, type ActivitySnapshot } from '../protocol/activity.js';
 import { PiProcess, type PiLaunch } from './pi-process.js';
 import { remoteSessionEnv } from '../protocol/remote-session.js';
 import { socketPath } from '../protocol/paths.js';
@@ -55,10 +56,13 @@ interface Slot extends StoredSlot {
   changing: boolean;
   restarting: boolean;
   mutations: number;
+  /** Notification-only compatibility flags; Pi 1.0.4 omits settled cancellation metadata. */
+  activityAborted?: boolean;
+  activityRetryError?: boolean;
   /** Monotonic process generation; late replies and events cannot affect its replacement. */
   incarnation: number;
 }
-interface Peer { socket: Socket; slotId?: string; filterTranscript?: boolean; ready: boolean; verified: boolean; pending: number; attaching: boolean; buffer: RemoteEvent[]; bufferBytes: number }
+interface Peer { socket: Socket; slotId?: string; activity?: boolean; filterTranscript?: boolean; ready: boolean; verified: boolean; pending: number; attaching: boolean; buffer: RemoteEvent[]; bufferBytes: number }
 export interface DaemonOptions { stateDir: string; executable?: string; prefixArgs?: string[]; env?: NodeJS.ProcessEnv; skipVersionCheck?: boolean; sideIdleGraceMs?: number }
 function object(value: any, name: string): RecordValue {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Invalid ${name}`);
@@ -195,7 +199,22 @@ export class Supervisor {
   }
   private publish(slot: Slot, event: RecordValue) {
     const record: RemoteEvent = { type: 'event', slotId: slot.id, seq: ++slot.seq, event };
+    let activity: RemoteEvent | undefined;
     for (const peer of this.peers) {
+      if (peer.activity) {
+        if (!activity) {
+          const source = activitySource(event);
+          if (!source) continue;
+          if (source.type === 'agent_settled') {
+            if (slot.activityAborted) source.aborted = true;
+            if (slot.activityRetryError) source.error = true;
+          }
+          activity = { ...record, event: { type: 'remote_activity', slot: activitySlot(this.info(slot)),
+            ...(typeof slot.state.sessionId === 'string' ? { sessionId: slot.state.sessionId } : {}), source } };
+        }
+        this.send(peer, activity);
+        continue;
+      }
       if (peer.slotId !== slot.id) continue;
       if (peer.ready) this.send(peer, record);
       else if (peer.attaching) {
@@ -206,6 +225,10 @@ export class Supervisor {
     }
   }
   private recordEvent(slot: Slot, event: RecordValue) {
+    if (event.type === 'auto_retry_end') {
+      slot.activityRetryError = event.success === false;
+      if (event.success === false && event.finalError === 'Retry cancelled') slot.activityAborted = true;
+    }
     applyLiveEvent(slot.live, event);
     if (event.type === 'extension_ui_request') {
       if (DIALOGS.has(event.method)) {
@@ -219,6 +242,9 @@ export class Supervisor {
       }
     }
     this.publish(slot, event);
+    if (event.type === 'agent_settled' || (event.type === 'compaction_end' && !slot.live.busy)) {
+      slot.activityAborted = false; slot.activityRetryError = false;
+    }
     if (event.type === 'agent_settled' || event.type === 'session_info_changed') void this.refreshState(slot).catch(() => {});
   }
   private resolveDialog(slot: Slot, id: string, reason: string) {
@@ -389,6 +415,7 @@ export class Supervisor {
   private launch(slot: Slot, forkPath?: string, prompt?: string): void {
     if (slot.stopping || this.stopping) throw new Error('Slot is stopping; not launching Pi');
     const incarnation = ++slot.incarnation;
+    slot.activityAborted = false; slot.activityRetryError = false;
     slot.initialPrompt = prompt !== undefined ? { message: prompt, incarnation } : undefined;
     const launch: PiLaunch = { executable: this.options.executable ?? 'pi', prefixArgs: this.options.prefixArgs, cwd: slot.cwd,
       env: { ...this.options.env, ...remoteSessionEnv({ host: hostname(), slotId: slot.id, slotNumber: slot.number }) },
@@ -707,10 +734,25 @@ export class Supervisor {
       if (request.method === 'hello') {
         if (params.protocol !== PROTOCOL_VERSION || params.piVersion !== PI_VERSION) throw new Error(`Version mismatch: daemon protocol ${PROTOCOL_VERSION}, Pi ${PI_VERSION}`);
         peer.verified = true;
-        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, release: RELEASE, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'transcript_filtering'] } satisfies MethodResult<'hello'>;
+        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, release: RELEASE, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'transcript_filtering', ACTIVITY_CAPABILITY] } satisfies MethodResult<'hello'>;
       } else {
         if (!peer.verified) throw new Error('Send hello with matching versions first');
+        if (peer.activity && request.method !== 'watch_activity') throw new Error('Activity watchers are read-only; use a separate connection');
         switch (request.method) {
+          case 'watch_activity': {
+            if (peer.slotId || peer.attaching || peer.pending > 1) throw new Error('Use a separate, unattached connection to watch activity');
+            peer.activity = true;
+            // Subscribe, capture the cut, and send synchronously. No Pi queries, awaits,
+            // attach bookkeeping, or side-idle timer changes may occur in this block.
+            const slots: ActivitySnapshot[] = [...this.slots.values()].map(slot => ({
+              slot: activitySlot(this.info(slot)), seq: slot.seq,
+              ...(typeof slot.state.sessionId === 'string' ? { sessionId: slot.state.sessionId } : {}),
+              busy: slot.live.busy, compacting: slot.live.compacting,
+              dialogs: [...slot.ui.values()].filter(event => DIALOGS.has(event.method)).map(event => event.id),
+            }));
+            this.send(peer, { type: 'result', id, success: true, data: { slots } satisfies MethodResult<'watch_activity'> });
+            return;
+          }
           case 'list': data = [...this.slots.values()].map(slot => this.info(slot)) satisfies MethodResult<'list'>; break;
           case 'complete_path': case 'read_attachment': case 'filesystem_metadata': {
             const { serveFileRequest } = await import('./files.js');
@@ -809,6 +851,10 @@ export class Supervisor {
             if (changing && slot.changing) throw new Error('A session change is already in progress');
             if (changing) slot.changing = true;
             if (mutating) slot.mutations++;
+            const aborting = ['abort', 'abort_retry'].includes(command.type) && (slot.live.busy || slot.live.compacting);
+            const previousAbort = slot.activityAborted;
+            if (aborting) slot.activityAborted = true; // before command(): settled can race its reply
+            let accepted = false;
             try {
               if (command.type === 'switch_session') {
                 reserved = await this.checkPath(string(command.sessionPath, 'sessionPath'), slot.id);
@@ -816,6 +862,7 @@ export class Supervisor {
                 command.sessionPath = reserved;
               }
               data = await slot.process!.command(command, QUERY_COMMANDS.has(command.type) ? 30_000 : undefined);
+              accepted = true;
               if (incarnation !== slot.incarnation) throw new Error('Remote Pi restarted while this command was pending; it was not replayed');
               if (command.type === 'bash' || command.type === 'abort_bash') {
                 this.recordEvent(slot, {type: 'remote_bash_end'});
@@ -833,6 +880,7 @@ export class Supervisor {
             } finally {
               if (reserved) this.reservedPaths.delete(reserved);
               if (mutating) slot.mutations--;
+              if (aborting && !accepted && incarnation === slot.incarnation) slot.activityAborted = (slot.live.busy || slot.live.compacting) && previousAbort;
               if (changing) { slot.changing = false; this.publish(slot, { type: 'remote_refresh' }); }
             }
             break;

@@ -1,4 +1,5 @@
 import { builtinModules, createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 import { copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -86,6 +87,26 @@ async function copyAssets(source: string, target: string, nested = false): Promi
   }
 }
 
+/** Version the worker from its template and the exact fixed shell bytes, never timestamps/paths. */
+async function writeServiceWorker(outdir: string): Promise<void> {
+  let source: string;
+  try { source = await readFile(join(root, 'src/web/sw.js'), 'utf8'); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+  if (!source.includes('__BUILD_ID__')) throw new Error('Service worker is missing its build ID placeholder');
+  const hash = createHash('sha256').update(source);
+  for (const name of ['index.html', 'app.js', 'app.css', 'xterm.css', 'icon.svg', 'icon-192.png', 'icon-512.png', 'manifest.webmanifest'].sort()) {
+    hash.update(`\0${name}\0`);
+    try {
+      const bytes = await readFile(join(outdir, name));
+      hash.update(`${bytes.length}\0`).update(bytes);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      hash.update('missing\0'); // Isolated entry probes may run before all UI assets exist.
+    }
+  }
+  await writeFile(join(outdir, 'sw.js'), source.replaceAll('__BUILD_ID__', hash.digest('hex')));
+}
+
 export interface BuildWebOptions { outdir?: string; entry?: string; minify?: boolean }
 export async function buildWeb(options: BuildWebOptions = {}): Promise<void> {
   const outdir = resolve(options.outdir ?? join(root, 'dist/web'));
@@ -122,6 +143,7 @@ export async function buildWeb(options: BuildWebOptions = {}): Promise<void> {
   const css = await readFile(require.resolve('@xterm/xterm/css/xterm.css'), 'utf8');
   await writeFile(join(outdir, 'xterm.css'), css);
   await copyAssets(join(root, 'src/web'), outdir);
+  await writeServiceWorker(outdir);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

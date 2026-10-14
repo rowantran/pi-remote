@@ -7,6 +7,8 @@ import { WebSocketConnection } from './connection.js';
 import { XtermTerminal } from './terminal.js';
 import { NativeInput } from './input.js';
 import { installTouchScroll } from './touch.js';
+import { Notifications } from './notifications.js';
+import { TranscriptCache, ReadOnlyConnection } from './cache.js';
 
 function element<T extends HTMLElement = HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -25,8 +27,11 @@ let terminal: XtermTerminal | undefined;
 let attaching = 0;
 let currentSlot: string | undefined;
 let ready = false;
+let offlinePreview = false;
 let removeTouch: ReturnType<typeof installTouchScroll> | undefined;
 const nativeInput = new NativeInput(report);
+const notifications = new Notifications(api, () => currentSlot, report);
+const transcriptCache = new TranscriptCache();
 
 function report(error: unknown): void {
   notice.textContent = error instanceof Error ? error.message : String(error); notice.hidden = false;
@@ -34,13 +39,18 @@ function report(error: unknown): void {
 async function api<T>(path: string, body?: unknown): Promise<T> {
   const response = await fetch(path, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   if (!response.ok) {
-    const text = await response.text();
-    if (response.status === 401) { ready = false; if (!pairDialog.open) pairDialog.showModal(); }
+    if (response.status === 401 || response.status === 403) { ready = false; offlinePreview = false; attaching++; currentSlot = undefined; clearDisplay(); void transcriptCache.clear(); if (!pairDialog.open) pairDialog.showModal(); }
+    let text = ''; try { text = await response.text(); } catch {}
     throw new Error(text.slice(0, 500) || `Request failed (${response.status})`);
   }
   return await response.json() as T;
 }
-function desiredSlot(): string | undefined { return new URLSearchParams(location.hash.slice(1)).get('slot') ?? undefined; }
+function desiredSlot(): string | undefined {
+  const explicit = new URLSearchParams(location.hash.slice(1)).get('slot');
+  if (explicit) return explicit;
+  try { const saved = localStorage.getItem('pi-remote-last-slot'); return saved && /^[a-f0-9-]{36}$/i.test(saved) ? saved : undefined; }
+  catch { return undefined; }
+}
 
 async function makeConnection(onTransport?: (value: WebSocketConnection) => void): Promise<ReconnectingConnection> {
   return ReconnectingConnection.connect(async () => {
@@ -61,13 +71,38 @@ async function showSlots(): Promise<void> {
   if (!list.children.length) list.textContent = 'No running sessions. Start one with pi-remote new on your laptop.';
   if (!slotsDialog.open) slotsDialog.showModal();
 }
-async function attach(reference: string): Promise<void> {
-  const generation = ++attaching;
+function clearDisplay(): void {
   nativeInput.release();
   client?.detach(); client = undefined; connection?.close(); connection = undefined;
   removeTouch?.dispose(); removeTouch = undefined;
   terminal?.dispose(); terminal = undefined;
+}
+async function attach(reference: string, offline = false): Promise<void> {
+  const generation = ++attaching;
+  clearDisplay(); currentSlot = undefined;
   status.textContent = 'Connecting…';
+  const cached = await transcriptCache.load(reference);
+  if (generation !== attaching) return;
+  if (cached) {
+    try {
+      const readOnly = new ReadOnlyConnection();
+      const draft = nativeInput.prepare(cached.slot.id);
+      currentSlot = cached.slot.id;
+      element('session-name').textContent = `${cached.slot.number ?? ''} · ${cached.slot.sessionName ?? 'Saved session'}`;
+      terminal = new XtermTerminal(element('terminal')); terminal.useNativeInput();
+      client = new RemoteTui(readOnly, cached.slot.id, cached, terminal, { theme: 'dark', bell: false, hideThinkingBlock: true, externalInput: nativeInput.callbacks });
+      nativeInput.bind(client, readOnly, cached.slot.id, draft); nativeInput.setConnected(false);
+      const preview = client;
+      removeTouch = installTouchScroll(element('terminal'), terminal, lines => preview.scrollTranscript(lines));
+      void preview.run().catch(() => {}); void preview.initialize().catch(() => {});
+      status.textContent = 'Saved · reconnecting';
+    } catch { clearDisplay(); }
+  }
+  if (offline) {
+    status.textContent = cached ? 'Saved · offline' : 'Offline';
+    report(cached ? 'Saved transcript only. Sending is disabled until the devbox reconnects.' : 'Offline. No saved transcript is available for this session.');
+    return;
+  }
   const conn = await makeConnection(value => { if (generation === attaching) transport = value; });
   try {
     const slots = await conn.request('list');
@@ -75,13 +110,16 @@ async function attach(reference: string): Promise<void> {
     if (!slot) throw new Error('Session not found. Choose another session.');
     const snapshot = await conn.request('attach', { slotId: slot.id, filterTranscript: true });
     if (generation !== attaching) { conn.close(); return; }
+    clearDisplay();
     currentSlot = slot.id; connection = conn;
+    try { localStorage.setItem('pi-remote-last-slot', slot.id); } catch {}
+    if (!location.hash) history.replaceState(null, '', `/#${new URLSearchParams({ slot: slot.id })}`);
     element('session-name').textContent = `${slot.number ?? ''} · ${slot.sessionName ?? 'Unnamed'}`;
     notice.hidden = true;
     const draft = nativeInput.prepare(slot.id);
     terminal = new XtermTerminal(element('terminal'));
     terminal.useNativeInput();
-    client = new RemoteTui(conn, slot.id, snapshot, terminal, { host: location.hostname, theme: 'dark', bell: true, hideThinkingBlock: true, externalInput: nativeInput.callbacks });
+    client = new RemoteTui(conn, slot.id, snapshot, terminal, { host: location.hostname, theme: 'dark', bell: true, hideThinkingBlock: true, externalInput: nativeInput.callbacks, onSnapshot: snapshot => transcriptCache.schedule(snapshot) });
     nativeInput.bind(client, conn, slot.id, draft);
     const scrollClient = client;
     removeTouch = installTouchScroll(element('terminal'), terminal, lines => scrollClient.scrollTranscript(lines));
@@ -94,10 +132,19 @@ async function attach(reference: string): Promise<void> {
   } catch (error) { conn.close(); throw error; }
 }
 async function boot(): Promise<void> {
-  const auth = await api<{ paired?: boolean; authenticated?: boolean }>('/api/status');
-  if (auth.paired === false || auth.authenticated === false) { if (!pairDialog.open) pairDialog.showModal(); return; }
-  configureVirtualFiles(await api<VirtualFiles>('/api/config'));
-  ready = true;
+  try {
+    const auth = await api<{ paired?: boolean; authenticated?: boolean }>('/api/status');
+    if (auth.paired === false || auth.authenticated === false) { ready = false; offlinePreview = false; attaching++; currentSlot = undefined; clearDisplay(); void transcriptCache.clear(); if (!pairDialog.open) pairDialog.showModal(); return; }
+    configureVirtualFiles(await api<VirtualFiles>('/api/config'));
+  } catch (error) {
+    // Fetch rejection, not an online HTTP 401/403, permits a device-local read-only preview.
+    const slot = desiredSlot();
+    if (!(error instanceof TypeError) || !slot) throw error;
+    ready = false; offlinePreview = true;
+    await attach(slot, true); return;
+  }
+  offlinePreview = false; ready = true;
+  void notifications.initialize().catch(report);
   const slot = desiredSlot();
   if (slot) await attach(slot); else await showSlots();
 }
@@ -113,9 +160,17 @@ element<HTMLFormElement>('pair-form').addEventListener('submit', event => {
 element('slots-button').addEventListener('click', () => { void showSlots().catch(report); });
 element('refresh-slots').addEventListener('click', () => { void showSlots().catch(report); });
 element('close-slots').addEventListener('click', () => slotsDialog.close());
-element('menu-button').addEventListener('click', () => menuDialog.showModal());
+element('menu-button').addEventListener('click', () => { menuDialog.showModal(); void notifications.refresh().catch(report); });
 element('close-menu').addEventListener('click', () => menuDialog.close());
 element('reconnect').addEventListener('click', () => { menuDialog.close(); void boot().catch(report); });
+element('clear-cache').addEventListener('click', () => { void transcriptCache.clear().then(() => { menuDialog.close(); report('Saved transcripts cleared. Prompt drafts remain on this device.'); }); });
+element('unpair').addEventListener('click', () => {
+  void api('/api/logout', {}).then(async () => {
+    ready = false; attaching++; currentSlot = undefined; clearDisplay(); await transcriptCache.clear();
+    try { for (const key of Object.keys(localStorage)) if (key.startsWith('pi-remote-draft:') || key === 'pi-remote-last-slot') localStorage.removeItem(key); } catch {}
+    location.reload();
+  }).catch(report);
+});
 const keys: Record<string, string> = { escape: '\x1b', up: '\x1b[A', down: '\x1b[B', enter: '\r', tools: '\x0f', thinking: '\x14', latest: '\x1b[1;5F' };
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-key]')) {
   button.addEventListener('pointerdown', event => event.preventDefault());
@@ -135,7 +190,12 @@ window.addEventListener('hashchange', () => { const slot = desiredSlot(); if (re
 // A socket can look open after iOS suspends the page. A foreground reconnect gets an
 // authoritative snapshot, never replays commands, and preserves remote work.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && ready && currentSlot) transport?.disconnect(new Error('Resuming after background suspension'));
+  if (document.visibilityState !== 'visible') return;
+  if (offlinePreview) void boot().catch(report);
+  else if (ready && currentSlot) transport?.disconnect(new Error('Resuming after background suspension'));
 });
-window.addEventListener('online', () => { if (ready && currentSlot) transport?.disconnect(new Error('Network changed')); });
+window.addEventListener('online', () => {
+  if (offlinePreview) void boot().catch(report);
+  else if (ready && currentSlot) transport?.disconnect(new Error('Network changed'));
+});
 void boot().catch(report);

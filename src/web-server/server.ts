@@ -64,6 +64,8 @@ const STATIC = new Map([
   ['/app.css', ['app.css', 'text/css; charset=utf-8']],
   ['/xterm.css', ['xterm.css', 'text/css; charset=utf-8']],
   ['/icon.svg', ['icon.svg', 'image/svg+xml']],
+  ['/icon-192.png', ['icon-192.png', 'image/png']],
+  ['/icon-512.png', ['icon-512.png', 'image/png']],
   ['/manifest.webmanifest', ['manifest.webmanifest', 'application/manifest+json']],
   ['/sw.js', ['sw.js', 'text/javascript; charset=utf-8']],
 ]);

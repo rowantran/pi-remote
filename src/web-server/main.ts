@@ -2,6 +2,10 @@ import { join, resolve } from 'node:path';
 import { DeviceStore } from './devices.js';
 import { privateDirectory } from './private-state.js';
 import { defaultWebStateDir, startWebServer } from './server.js';
+import { PushService } from './push.js';
+import { startActivityMonitor } from './activity-monitor.js';
+import { Connection, handshake } from '../client/connection.js';
+import { ensureDaemon } from '../daemon/launch.js';
 
 export { startWebServer, defaultWebStateDir, defaultStaticDir, readJsonBody } from './server.js';
 export type { WebServerOptions, WebServerHandle, WebServerContext, AuthenticatedContext } from './server.js';
@@ -62,11 +66,29 @@ export async function serveMain(args: string[]): Promise<void> {
   }
   const origin = flags.get('--origin');
   if (!origin) throw new Error('--origin is required; use an exact HTTPS Tailscale Serve origin');
+  let push: PushService | undefined;
   const server = await startWebServer({
     origin, allowedLogins, stateDir,
     socketPath: flags.get('--socket') ?? join(stateDir, 'web.sock'),
     daemonStateDir: flags.get('--state-dir'),
+    handleApi: (request, response, context) => push?.handleApi(request, response, context) ?? false,
   });
+  let monitor: Awaited<ReturnType<typeof startActivityMonitor>>;
+  try {
+    // Acquire the exclusive socket before generating keys; a second service instance must
+    // never replace the VAPID keys used by an already-running instance.
+    push = await PushService.open({ stateDir, origin: server.origin, devices: server.devices, allowedLogins });
+    monitor = await startActivityMonitor({
+      connect: async () => {
+        const socket = await ensureDaemon(flags.get('--state-dir'));
+        const connection = new Connection(socket, socket, () => socket.destroy());
+        try { await handshake(connection); return connection; }
+        catch (error) { connection.close(); throw error; }
+      },
+      onBell: notice => push!.notify(notice),
+      onStatus: status => push!.setMonitorStatus(status),
+    });
+  } catch (error) { await server.close(); await push?.close(); throw error; }
   process.stdout.write(`Web listener: ${server.socketPath}\nOrigin: ${server.origin}\n`);
   await new Promise<void>((accept, reject) => {
     let stopping = false;
@@ -74,7 +96,7 @@ export async function serveMain(args: string[]): Promise<void> {
       if (stopping) return;
       stopping = true;
       process.off('SIGINT', stop); process.off('SIGTERM', stop);
-      void server.close().then(accept, reject);
+      void (async () => { await monitor.close(); await server.close(); await push!.close(); })().then(accept, reject);
     };
     process.on('SIGINT', stop); process.on('SIGTERM', stop);
   });

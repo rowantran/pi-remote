@@ -8,6 +8,8 @@
   <meta name="apple-mobile-web-app-title" content="Pi Remote">
   <title>Pi Remote</title>
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon-192.png">
+  <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/xterm.css">
   <link rel="stylesheet" href="/app.css">
   <script type="module" src="/app.js"></script>
@@ -65,6 +67,14 @@
     <h1>Pi Remote</h1>
     <p>The agent runs on your devbox even when you close this app.</p>
     <button id="reconnect">Reconnect</button>
+    <h2>Notifications</h2>
+    <p id="notification-status" role="status">Install on the Home Screen to receive pushes while the app is closed.</p>
+    <button id="enable-notifications">Enable notifications</button>
+    <button id="test-notification" disabled>Send test notification</button>
+    <button id="disable-notifications" disabled>Disable notifications</button>
+    <h2>This device</h2>
+    <button id="clear-cache">Clear saved transcripts</button>
+    <button id="unpair">Unpair this device</button>
     <button id="close-menu">Close</button>
   </dialog>
 </body>

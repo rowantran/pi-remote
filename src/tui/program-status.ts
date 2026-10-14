@@ -3,6 +3,8 @@ import type { Terminal } from '@earendil-works/pi-tui';
 import type { RecordValue, Snapshot } from '../protocol/types.js';
 import { DIALOG_METHODS } from './view.js';
 import { messageKey } from '../protocol/live.js';
+import { waitingOnBackground } from '../protocol/activity.js';
+export { waitingOnBackground } from '../protocol/activity.js';
 
 const WAITING_MESSAGE = 'Waiting on background task';
 export const PROGRAM_STATUS_QUERY = '\x1b]7501;?\x1b\\';
@@ -25,18 +27,6 @@ export function formatProgramStatus(status: ProgramStatus): string {
   }
   if (message) pairs.push(`msg=${Buffer.from(message, 'utf8').toString('base64')}`);
   return `\x1b]7501;${pairs.join(':')}\x1b\\`;
-}
-
-/** Call only at a completed-run checkpoint, with messages scoped to that run. */
-export function waitingOnBackground(messages: RecordValue[]): boolean {
-  const [call, result, reply] = messages.slice(-3);
-  if (call?.role !== 'assistant' || call.stopReason !== 'toolUse'
-    || result?.role !== 'toolResult' || result.toolName !== 'background_wait' || reply?.role !== 'assistant') return false;
-  const calls = Array.isArray(call.content) ? call.content.filter((block: RecordValue) => block.type === 'toolCall') : [];
-  return calls.length === 1 && calls[0].name === 'background_wait' && typeof calls[0].id === 'string' && calls[0].id.length > 0
-    && result.toolCallId === calls[0].id && result.isError === false
-    && reply.stopReason === 'stop' && Array.isArray(reply.content)
-    && !reply.content.some((block: RecordValue) => block.type === 'toolCall');
 }
 
 type Outcome = { state: 'idle' | 'done' | 'error' | 'waiting'; message?: string };

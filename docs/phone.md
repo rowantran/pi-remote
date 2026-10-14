@@ -54,17 +54,22 @@ Do not run `deploy` or restart the daemon merely to start the web server.
 For example, from the checkout on the devbox (replace the hostname and login):
 
 ```sh
-node bin/pi-remote serve --origin https://devbox.your-tailnet.ts.net --allow-user you@example.com
-# In a second terminal; --bg persists the Serve configuration:
-tailscale serve --bg --https=443 "unix:$HOME/.pi/remote/web/web.sock"
-node bin/pi-remote serve pair
-node bin/pi-remote serve devices
-node bin/pi-remote serve revoke DEVICE_ID
+WEB_STATE="$HOME/.pi-remote-web"
+node bin/pi-remote serve --origin https://devbox.your-tailnet.ts.net --allow-user you@example.com \
+  --web-state-dir "$WEB_STATE"
+# In a second terminal; use the same WEB_STATE. --bg persists the Serve configuration:
+tailscale serve --bg --https=443 "unix:$WEB_STATE/web.sock"
+node bin/pi-remote serve pair --web-state-dir "$WEB_STATE"
+node bin/pi-remote serve devices --web-state-dir "$WEB_STATE"
+node bin/pi-remote serve revoke DEVICE_ID --web-state-dir "$WEB_STATE"
 ```
 
 Use a user service to keep `serve` running without a terminal. Pairing and revocation commands must
 use the same `--web-state-dir` as the service. Do not reset the whole Tailscale Serve configuration
-or change unrelated existing handlers. The server expects Serve's Unix-proxy header shape
+or change unrelated existing handlers. State directory ancestors must not be symlinks or writable
+by other users. If the default path fails because `~/.pi` is group-writable, use a dedicated
+`~/.pi-remote-web` directory as above; do not loosen the checks or change unrelated permissions.
+The server expects Serve's Unix-proxy header shape
 (`Host: localhost`, exact `X-Forwarded-Host`, and `X-Forwarded-Proto: https`), not a generic proxy.
 
 Open the origin in Safari over Tailscale. Install on the Home Screen **before pairing**: iOS can
@@ -92,6 +97,59 @@ arrow and Enter buttons appear while it is open, without stealing native prompt 
 This app keeps prompt drafts on the device. Use a device passcode and revoke lost devices. Removing
 a device's authorization cannot erase information it already downloaded or copied while authorized.
 
+## Home Screen app and notifications
+
+On iOS 16.4 or later:
+
+1. Connect Tailscale, open the HTTPS origin in Safari, and use **Share → Add to Home Screen**.
+2. Open the installed app, pair that installation, and select a session.
+3. In the app menu, tap **Enable notifications** and accept the iOS permission prompt.
+4. Tap **Send test notification**, then verify a real notification with the app backgrounded.
+
+No Apple Developer account, native app signing, or APNs certificate is needed. The devbox generates
+its own VAPID key pair (the standard Web Push server identity) and stores it with device subscriptions
+in private `push.json`. Back up that file securely to preserve subscriptions; deleting or replacing
+its keys requires enabling notifications again. Outbound HTTPS to the browser's push service is
+required. Subscription registration accepts only the known Apple, Chrome, and Firefox push hosts,
+not arbitrary callback URLs. See [Apple's Web Push requirements](https://developer.apple.com/documentation/usernotifications/sending-web-push-notifications-in-web-apps-and-browsers)
+and [WebKit's iPhone guide](https://webkit.org/blog/13878/web-push-for-web-apps-on-ios-and-ipados/).
+
+A lightweight server-side activity monitor observes all slots without attaching transcript clients
+or keeping side slots alive. It sends notifications for completed runs, new blocking questions, and
+busy process exits. Retries and automatic compaction belong to the same run. Aborted runs and
+intentional background waits do not notify. Existing idle state and old questions do not ring at
+startup. Notifications include only a session label and outcome, not transcript text or tool output.
+Session names can still be sensitive on a Lock Screen; configure iOS previews accordingly.
+
+The monitor requires the daemon's `activity_stream` capability. A web server connected to an older
+running daemon remains usable but reports notifications as unsupported. Upgrade/restart the daemon
+at a safe time; starting the web service does **not** restart it. Do not interrupt an active session
+just to enable push. The monitor probes again automatically after a daemon upgrade.
+
+Push does not depend on the browser WebSocket staying alive. Every received push requests a visible
+notification, even with the page open; there are no silent pushes or background socket workarounds.
+Tapping it opens the relevant session after normal Tailscale and device authentication. Delivery is
+best-effort: three bounded attempts for transient failures, no indefinite queue, and at most one hour
+of push-service retention. Focus mode, notification settings, network conditions, and OS policy can
+delay or suppress alerts. Revocation and unsubscribe prevent future sends/retries; an already-sent
+notification cannot be recalled. Use **Disable notifications**, **Unpair this device**, or the CLI
+revocation command to stop future delivery.
+
+## Saved transcripts and resume
+
+The service worker caches only the fixed app shell. It never caches API responses, pairing requests,
+or WebSocket messages. Online authentication failures are never replaced with cached successes.
+The browser separately keeps up to three verified transcript snapshots in IndexedDB, up to 8 MiB
+each, and per-session drafts in local storage. These bytes can contain private conversation text;
+use a passcode on the phone. **Clear saved transcripts** removes transcript snapshots; **Unpair this
+device** also clears drafts. Revocation cannot erase information already downloaded while authorized.
+
+A saved transcript is a read-only preview while the daemon reconnects, including after an offline
+reload. Sending and answering old questions are disabled. Once authenticated, the daemon's current
+snapshot replaces the preview; neither cached messages nor unsent drafts are submitted to Pi.
+Quota/private-browsing errors only disable caching. iOS can evict local storage; the remote session
+remains authoritative and continues running on the devbox.
+
 ## Compatibility
 
 The browser uses the pinned Pi 1.0.4 transcript components, not an agent in the browser. No provider
@@ -108,6 +166,9 @@ Run `npm run test:mobile` after installing Playwright's Chromium and WebKit brow
 check uses an isolated daemon, a deterministic Pi-shaped child, and a loopback-only TLS test proxy
 into the Unix listener. It checks pairing, local painting, prompts, work while disconnected,
 reconnect/reload, and no prompt replay. It never accesses real sessions or model credentials.
+`npm run test:push` injects real Chromium service-worker push events through the browser debugging
+protocol and checks displayed notification requests and offline-shell behavior. This is not external
+Web Push or APNs delivery.
 
 Browser emulation does not prove iOS keyboard/autocorrect behavior, Home Screen installation, or
 real Apple push delivery. Those require a physical iPhone acceptance check.

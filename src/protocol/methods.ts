@@ -1,4 +1,5 @@
 import type { Attachment, FilesystemMetadata, PathCompletionResult } from './files.js';
+import type { ActivitySnapshot } from './activity.js';
 import type { CreateOptions, HistoryCursor, RecordValue, SlotInfo, Snapshot } from './types.js';
 
 /** Session catalogue data after JSON serialization; no upstream runtime dependency. */
@@ -48,6 +49,8 @@ type EmptyResult = Record<string, never>;
 export interface DaemonMethods {
   hello: { params: { protocol: number; piVersion: string }; result: HelloResult };
   list: { params: Record<string, never>; result: SlotInfo[] };
+  /** Read-only, all-slot lifecycle stream. Not an attachment and never a slot client. */
+  watch_activity: { params: Record<string, never>; result: { slots: ActivitySnapshot[] } };
   create: { params: CreateOptions; result: SlotInfo };
   /** filterTranscript opts this attachment's snapshots/events into omitting assistant signature
    * fields. Raw RPC results remain unchanged. Older daemons ignore this optional field.

@@ -122,6 +122,8 @@ export interface TuiOptions {
   sideLauncher?: GhosttyLauncher;
   /** A host-owned prompt and simple dialogs, for example native browser controls. */
   externalInput?: ExternalInput;
+  /** A display host may cache verified snapshots locally. It must never feed them back to Pi. */
+  onSnapshot?: (snapshot: Snapshot) => void;
 }
 
 /** Exported for terminal-adapter tests; uses only the public pi-tui API. */
@@ -222,6 +224,12 @@ export class RemoteTui {
     ]);
     this.tui.setLayoutRoot(this.root);
     options.externalInput?.onDraftChange(this.editor.getExpandedText());
+    this.observeSnapshot();
+  }
+
+  private observeSnapshot(): void {
+    try { this.options.onSnapshot?.(this.view.snapshot); }
+    catch { this.notify('Local transcript caching failed; remote work is unaffected.'); }
   }
 
   /** Replace the local draft without sending a request, including while disconnected. */
@@ -586,7 +594,7 @@ export class RemoteTui {
         this.transcript.clearConnectionNotices();
         this.displayEvent({ type: 'session_switch', reason: 'reconnect' });
         this.answering.clear();
-        this.transcript.invalidate(); this.syncBottom();
+        this.transcript.invalidate(); this.syncBottom(); this.observeSnapshot();
         this.notify('Reattached. Remote history restored; no submitted commands were replayed.', 'connection');
         void this.refreshPresentationData();
       }));
@@ -771,7 +779,7 @@ export class RemoteTui {
         this.reconcileWorkingLifecycle(wasBusy);
         this.syncProgramStatus({ snapshot: true });
         this.presentation?.update(this.view.snapshot);
-        this.transcript.invalidate(); this.syncBottom();
+        this.transcript.invalidate(); this.syncBottom(); this.observeSnapshot();
         void this.refreshPresentationData();
       } finally {
         if (generation !== this.generation) return;
