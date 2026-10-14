@@ -5,6 +5,8 @@ import type { SlotInfo } from '../protocol/types.js';
 import { configureVirtualFiles, type VirtualFiles } from './shims/vfs.js';
 import { WebSocketConnection } from './connection.js';
 import { XtermTerminal } from './terminal.js';
+import { NativeInput } from './input.js';
+import { installTouchScroll } from './touch.js';
 
 function element<T extends HTMLElement = HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -23,6 +25,8 @@ let terminal: XtermTerminal | undefined;
 let attaching = 0;
 let currentSlot: string | undefined;
 let ready = false;
+let removeTouch: ReturnType<typeof installTouchScroll> | undefined;
+const nativeInput = new NativeInput(report);
 
 function report(error: unknown): void {
   notice.textContent = error instanceof Error ? error.message : String(error); notice.hidden = false;
@@ -59,7 +63,9 @@ async function showSlots(): Promise<void> {
 }
 async function attach(reference: string): Promise<void> {
   const generation = ++attaching;
+  nativeInput.release();
   client?.detach(); client = undefined; connection?.close(); connection = undefined;
+  removeTouch?.dispose(); removeTouch = undefined;
   terminal?.dispose(); terminal = undefined;
   status.textContent = 'Connecting…';
   const conn = await makeConnection(value => { if (generation === attaching) transport = value; });
@@ -72,13 +78,18 @@ async function attach(reference: string): Promise<void> {
     currentSlot = slot.id; connection = conn;
     element('session-name').textContent = `${slot.number ?? ''} · ${slot.sessionName ?? 'Unnamed'}`;
     notice.hidden = true;
+    const draft = nativeInput.prepare(slot.id);
     terminal = new XtermTerminal(element('terminal'));
-    client = new RemoteTui(conn, slot.id, snapshot, terminal, { host: location.hostname, theme: 'dark', bell: true, hideThinkingBlock: true });
+    terminal.useNativeInput();
+    client = new RemoteTui(conn, slot.id, snapshot, terminal, { host: location.hostname, theme: 'dark', bell: true, hideThinkingBlock: true, externalInput: nativeInput.callbacks });
+    nativeInput.bind(client, conn, slot.id, draft);
+    const scrollClient = client;
+    removeTouch = installTouchScroll(element('terminal'), terminal, lines => scrollClient.scrollTranscript(lines));
     status.textContent = 'Connected';
-    conn.onDisconnect(() => { status.textContent = 'Reconnecting…'; });
-    conn.onReconnect(() => { status.textContent = 'Connected'; });
+    conn.onDisconnect(() => { if (connection === conn) { status.textContent = 'Reconnecting…'; nativeInput.setConnected(false); } });
+    conn.onReconnect(() => { if (connection === conn) { status.textContent = 'Connected'; nativeInput.setConnected(true); } });
     const thisClient = client;
-    void thisClient.run().then(() => { if (client === thisClient) status.textContent = thisClient.stoppedSlot ? 'Stopped' : 'Detached'; }).catch(report);
+    void thisClient.run().then(() => { if (client === thisClient) { status.textContent = thisClient.stoppedSlot ? 'Stopped' : 'Detached'; nativeInput.release(); } }).catch(report);
     void thisClient.initialize().catch(report);
   } catch (error) { conn.close(); throw error; }
 }
@@ -106,7 +117,20 @@ element('menu-button').addEventListener('click', () => menuDialog.showModal());
 element('close-menu').addEventListener('click', () => menuDialog.close());
 element('reconnect').addEventListener('click', () => { menuDialog.close(); void boot().catch(report); });
 const keys: Record<string, string> = { escape: '\x1b', up: '\x1b[A', down: '\x1b[B', enter: '\r', tools: '\x0f', thinking: '\x14', latest: '\x1b[1;5F' };
-for (const button of document.querySelectorAll<HTMLButtonElement>('[data-key]')) button.addEventListener('click', () => terminal?.sendKey(keys[button.dataset.key!]!));
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-key]')) {
+  button.addEventListener('pointerdown', event => event.preventDefault());
+  button.addEventListener('click', () => {
+    const key = button.dataset.key!;
+    if (key === 'slash' || key === 'mention') nativeInput.insert(key === 'slash' ? '/' : '@');
+    else if (key === 'latest') { removeTouch?.stop(); client?.followLatest(); }
+    else terminal?.sendKey(keys[key]!);
+  });
+}
+element('composer').addEventListener('submit', () => { removeTouch?.stop(); client?.followLatest(); });
+// Hardware keyboards keep native text navigation; only explicit command-Enter submits.
+nativeInput.textarea.addEventListener('keydown', event => {
+  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.isComposing) { event.preventDefault(); void nativeInput.submit(); }
+});
 window.addEventListener('hashchange', () => { const slot = desiredSlot(); if (ready && slot) void attach(slot).catch(report); });
 // A socket can look open after iOS suspends the page. A foreground reconnect gets an
 // authoritative snapshot, never replays commands, and preserves remote work.

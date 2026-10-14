@@ -35,6 +35,11 @@ export class XtermTerminal implements Terminal {
   write(data: string): void { this.xterm.write(data); }
   sendKey(data: string): void { if (this.running) this.input?.(data); }
   focus(): void { this.xterm.focus(); }
+  useNativeInput(): void {
+    this.xterm.options.disableStdin = true;
+    const input = this.element.querySelector<HTMLTextAreaElement>('.xterm-helper-textarea');
+    if (input) { input.readOnly = true; input.tabIndex = -1; input.setAttribute('aria-hidden', 'true'); }
+  }
   get columns(): number { return this.xterm.cols; }
   get rows(): number { return this.xterm.rows; }
   moveBy(lines: number): void { if (lines) this.write(`\x1b[${Math.abs(lines)}${lines > 0 ? 'B' : 'A'}`); }

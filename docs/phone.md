@@ -72,6 +72,26 @@ isolate the installed app's browser storage from the Safari tab. Generate a pair
 same devbox and with the same web state directory as the running service, then enter it in the
 installed app. Do not paste pairing codes into shared logs or commit them.
 
+## Phone controls
+
+The prompt is an ordinary native textarea, not the terminal's hidden input. iOS owns autocorrect,
+dictation, selection, composition, and cursor movement. Return inserts a newline. Tap **Send**, or
+use Command/Ctrl+Enter with a hardware keyboard, to submit. Choose **Follow-up** to queue work after
+the current run; **Send / steer** uses the laptop client's normal steering behavior.
+
+Drafts are stored locally per slot and restored after a reload. They are never submitted merely
+because the app reconnects. Send and dialog answers are disabled while disconnected, but you can
+keep editing the draft. A failed/uncertain submission restores its text for inspection, not replay.
+
+Drag the transcript to scroll it locally, with momentum. **Latest** returns to following output.
+The **Tools**, **Thinking**, and **Esc** controls match the laptop TUI; Esc can abort running work.
+`/` commands and `@` remote-file references have native suggestion buttons. Remote questions and
+simple choices use native input sheets. The complex fork/tree picker still uses the terminal;
+arrow and Enter buttons appear while it is open, without stealing native prompt cursor keys.
+
+This app keeps prompt drafts on the device. Use a device passcode and revoke lost devices. Removing
+a device's authorization cannot erase information it already downloaded or copied while authorized.
+
 ## Compatibility
 
 The browser uses the pinned Pi 1.0.4 transcript components, not an agent in the browser. No provider

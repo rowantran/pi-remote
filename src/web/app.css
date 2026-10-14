@@ -1,11 +1,11 @@
 :root { color-scheme: dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; background: #161616; color: #dedede; }
 * { box-sizing: border-box; }
 html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
-body { display: flex; flex-direction: column; height: 100dvh; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+body { display: flex; flex-direction: column; height: var(--viewport-height, 100dvh); padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
 header { display: flex; align-items: center; gap: 8px; padding: 6px; border-bottom: 1px solid #333; flex: 0 0 auto; }
 #session-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; font-size: 14px; }
 #status { font-size: 11px; color: #aaa; max-width: 90px; }
-button, input, textarea { font: inherit; }
+button, input, textarea, select { font: inherit; }
 button { border: 1px solid #444; background: #262626; color: inherit; border-radius: 8px; padding: 9px 12px; min-height: 42px; touch-action: manipulation; }
 button:active { background: #444; }
 button:disabled { opacity: .45; }
@@ -25,5 +25,17 @@ input, textarea { display: block; width: 100%; margin-top: 6px; padding: 10px; f
 #slot-list { display: grid; gap: 7px; margin-bottom: 12px; }
 #slot-list button { text-align: left; overflow-wrap: anywhere; }
 #pair-error { color: #ffaaaa; }
+#composer { padding: 4px 6px 6px; display: flex; gap: 6px; flex: 0 0 auto; align-items: end; border-top: 1px solid #333; }
+#prompt { flex: 1; min-width: 0; margin: 0; resize: none; line-height: 1.35; min-height: 54px; max-height: 30dvh; }
+#send-controls { display: grid; gap: 4px; flex: 0 0 92px; }
+#send { background: #32476b; font-weight: 600; }
+#send-mode { color: #ccc; background: #262626; border: 1px solid #444; border-radius: 6px; max-width: 92px; height: 28px; font-size: 11px; }
+#completions { flex: 0 0 auto; overflow-x: auto; white-space: nowrap; padding: 4px; max-height: 56px; }
+#completions button { font-size: 13px; margin-right: 4px; }
+#terminal.touch-terminal { touch-action: none; -webkit-user-select: none; user-select: none; }
+#terminal.touch-terminal .xterm-helper-textarea { pointer-events: none; }
+.choices { display: grid; gap: 4px; max-height: 50dvh; overflow: auto; margin: 8px 0; }
+.choices button { text-align: left; overflow-wrap: anywhere; }
+#action-content textarea { min-height: 110px; }
 code { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
 @media (min-width: 800px) { #terminal { padding: 8px; } }

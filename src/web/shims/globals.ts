@@ -40,6 +40,23 @@ export function browserModuleResolve(specifier: string): string {
   if (specifier === '@earendil-works/pi-coding-agent') return 'file:///__pi_browser__/index.js';
   return unavailable(`Module resolution (${specifier}); browser presentation extensions must be statically bundled`);
 }
+/** Pi's ScrollView/selection timers use Node's unref(). Bind timer calls in the bundle
+ * to these handles rather than patching the pinned package or browser globals. */
+class BrowserTimer {
+  constructor(readonly id: number) {}
+  unref(): this { return this; }
+  ref(): this { return this; }
+  hasRef(): boolean { return false; }
+  [Symbol.toPrimitive](): number { return this.id; }
+}
+export function setTimeout(callback: (...args: any[]) => void, delay?: number, ...args: any[]): any {
+  return typeof window === 'undefined' ? globalThis.setTimeout(callback, delay, ...args) : new BrowserTimer(window.setTimeout(callback, delay, ...args));
+}
+export function setInterval(callback: (...args: any[]) => void, delay?: number, ...args: any[]): any {
+  return typeof window === 'undefined' ? globalThis.setInterval(callback, delay, ...args) : new BrowserTimer(window.setInterval(callback, delay, ...args));
+}
+export function clearTimeout(handle: any): void { globalThis.clearTimeout(handle instanceof BrowserTimer ? handle.id : handle); }
+export function clearInterval(handle: any): void { globalThis.clearInterval(handle instanceof BrowserTimer ? handle.id : handle); }
 /** Syntax highlighting uses the Node immediate API to defer optional language loading. */
 export const setImmediate = (callback: (...args: any[]) => void, ...args: any[]): ReturnType<typeof setTimeout> => setTimeout(callback, 0, ...args);
 export const clearImmediate = (handle: ReturnType<typeof setTimeout>): void => clearTimeout(handle);

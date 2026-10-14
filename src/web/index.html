@@ -21,15 +21,28 @@
   </header>
   <p id="notice" role="alert" hidden></p>
   <main id="terminal" aria-label="Session transcript"></main>
-  <nav id="keybar" aria-label="Terminal shortcuts">
+  <div id="completions" aria-label="Suggestions" hidden></div>
+  <nav id="keybar" aria-label="Session controls">
     <button data-key="escape">Esc</button>
-    <button data-key="up">↑</button>
-    <button data-key="down">↓</button>
-    <button data-key="enter">Enter</button>
+    <button data-key="up" data-picker hidden>↑</button>
+    <button data-key="down" data-picker hidden>↓</button>
+    <button data-key="enter" data-picker hidden>Enter</button>
     <button data-key="tools">Tools</button>
     <button data-key="thinking">Thinking</button>
+    <button data-key="slash" aria-label="Command suggestions">/</button>
+    <button data-key="mention" aria-label="Remote file suggestions">@</button>
     <button data-key="latest">Latest</button>
   </nav>
+  <form id="composer">
+    <textarea id="prompt" aria-label="Message Pi" placeholder="Message Pi…" rows="2" maxlength="262144" autocorrect="on" autocapitalize="sentences" autocomplete="on" spellcheck="true" enterkeyhint="enter"></textarea>
+    <div id="send-controls">
+      <select id="send-mode" aria-label="How to send this message">
+        <option value="steer">Send / steer</option>
+        <option value="followUp">Follow-up</option>
+      </select>
+      <button id="send" type="submit" disabled>Send</button>
+    </div>
+  </form>
   <dialog id="pair-dialog">
     <form id="pair-form">
       <h1>Pair this device</h1>
@@ -47,6 +60,7 @@
     <button id="refresh-slots">Refresh</button>
     <button id="close-slots">Close</button>
   </dialog>
+  <dialog id="action-dialog"><div id="action-content"></div></dialog>
   <dialog id="menu-dialog">
     <h1>Pi Remote</h1>
     <p>The agent runs on your devbox even when you close this app.</p>

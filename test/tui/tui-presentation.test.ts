@@ -442,8 +442,8 @@ test('partial shell timers are retired on UI reload, reconnect and detach withou
       ui.tui.renderNow(); assert.equal(active.size, 1);
       const originalTimer = [...active][0];
       if (action === 'reload') {
-        await launched.submit('/reload-ui');
-        for (let i = 0; i < 20 && active.has(originalTimer); i++) await flush();
+        ui.setDraft('/reload-ui');
+        await ui.submitDraft('steer'); // Wait for the command, not a machine-speed-dependent flush budget.
         ui.tui.renderNow();
       }
       if (action === 'async-reload') {

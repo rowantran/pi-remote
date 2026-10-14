@@ -66,13 +66,52 @@ try {
       await page.waitForFunction(() => document.querySelector('#status')?.textContent === 'Connected');
       await page.locator('.xterm-rows').getByText('local transcript scrolling', { exact: false }).first().waitFor();
 
-      const message = `Phone prompt from ${browserType.name()}`;
+      const prompt = page.locator('#prompt');
+      assert.equal(await prompt.getAttribute('autocorrect'), 'on');
+      assert.equal(await page.locator('.xterm-helper-textarea').getAttribute('readonly'), '');
+      // Native composition must not become terminal keystrokes or an early submission.
+      const message = `Phone prompt from ${browserType.name()}\nNative second line 🐈 ${browserType.name()}`;
+      await prompt.dispatchEvent('compositionstart');
+      await prompt.fill(message);
+      assert.equal(await page.locator('#send').isDisabled(), true);
+      await prompt.dispatchEvent('compositionend');
       const settled = event(control, value => value.event.type === 'agent_settled');
-      await page.locator('.xterm-helper-textarea').focus();
-      await page.keyboard.type(message); await page.keyboard.press('Enter');
+      await page.locator('#send-mode').selectOption('followUp');
+      await page.locator('#send').click();
       await settled;
-      await page.locator('.xterm-rows').getByText(`${message} complete`, { exact: false }).first().waitFor();
+      await page.locator('.xterm-rows').getByText(`Native second line 🐈 ${browserType.name()} complete`, { exact: false }).first().waitFor();
       await page.screenshot({ path: join(dir, `${browserType.name()}-attached.png`) });
+
+      const viewportBefore = await page.locator('.xterm-rows').textContent();
+      await page.locator('#terminal').evaluate(target => {
+        const rect = target.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        // WebKit's desktop runner does not expose a constructible Touch. Exercise the
+        // same touch-handler boundary with independent coordinates in both engines.
+        const first = { identifier: 1, clientX: x, clientY: rect.top + 35 };
+        const last = { identifier: 1, clientX: x, clientY: rect.top + Math.min(rect.height - 20, 260) };
+        const start = new Event('touchstart', { bubbles: true, cancelable: true });
+        Object.defineProperty(start, 'touches', { value: [first] }); target.dispatchEvent(start);
+        const move = new Event('touchmove', { bubbles: true, cancelable: true });
+        Object.defineProperty(move, 'touches', { value: [last] }); target.dispatchEvent(move);
+        const end = new Event('touchend', { bubbles: true, cancelable: true });
+        Object.defineProperty(end, 'touches', { value: [] }); target.dispatchEvent(end);
+      });
+      await page.waitForFunction(before => document.querySelector('.xterm-rows')?.textContent !== before, viewportBefore);
+      await page.locator('[data-key=latest]').click();
+      await page.locator('.xterm-rows').getByText(`Native second line 🐈 ${browserType.name()} complete`, { exact: false }).first().waitFor();
+
+      await prompt.fill('/di');
+      await page.locator('#completions button').getByText('/dialog', { exact: true }).click();
+      assert.equal(await prompt.inputValue(), '/dialog ');
+      await prompt.fill('/dialog');
+      await page.locator('#send').click();
+      await page.locator('#action-dialog').waitFor({ state: 'visible' });
+      await page.locator('#dialog-input').fill(`Native answer ${browserType.name()}`);
+      const answered = event(control, value => value.event.type === 'remote_dialog_resolved');
+      await page.locator('#action-content button').getByText('Submit answer', { exact: true }).click();
+      await answered;
+      await page.locator('#action-dialog').waitFor({ state: 'hidden' });
 
       await context.setOffline(true);
       const backgroundMessage = `Completed while phone offline ${browserType.name()}`;
@@ -81,13 +120,20 @@ try {
       await context.setOffline(false);
       await page.waitForFunction(() => document.querySelector('#status')?.textContent === 'Connected');
       await page.locator('.xterm-rows').getByText(`${backgroundMessage} complete`, { exact: false }).first().waitFor();
+      const unsent = `Unsent native draft ${browserType.name()}`;
+      await prompt.fill(unsent);
       await page.reload();
       await page.waitForFunction(() => document.querySelector('#status')?.textContent === 'Connected');
       await page.locator('.xterm-rows').getByText(`${backgroundMessage} complete`, { exact: false }).first().waitFor();
+      assert.equal(await page.locator('#prompt').inputValue(), unsent);
       const log = (await readFile(commandsLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-      assert.equal(log.filter(record => record.command.type === 'prompt' && record.command.message === message).length, 1);
+      const submissions = log.filter(record => record.command.type === 'prompt' && record.command.message === message);
+      assert.equal(submissions.length, 1);
+      assert.equal(submissions[0].command.streamingBehavior, 'followUp');
+      assert.equal(log.filter(record => record.command.type === 'prompt' && record.command.message === unsent).length, 0);
+      assert.equal(log.filter(record => record.command.type === 'extension_ui_response' && record.command.value === `Native answer ${browserType.name()}`).length, 1);
       assert.deepEqual(errors, []);
-      console.log(`${browserType.name()}: pairing, attach, local transcript, prompt, offline work, reconnect, reload, no replay passed`);
+      console.log(`${browserType.name()}: pairing, native multiline/IME input, follow-up, touch scroll, completion, native dialog, offline work, reconnect, saved draft, no replay passed`);
     } finally { await context.close(); await browser.close(); }
   }
   console.log(`Screenshots: ${dir}`);
