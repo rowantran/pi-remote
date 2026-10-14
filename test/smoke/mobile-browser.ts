@@ -119,6 +119,8 @@ try {
 
   proxy = await testProxy(join(webState, 'web.sock'));
   web = await startWebServer({ origin: proxy.origin, allowedLogins: ['rowan@example.test'], stateDir: webState,
+    // A missing isolated config means no adapters; never execute the runner's real extensions.
+    uiConfig: join(dir, 'config.json'),
     daemonStateDir: stateDir, openDaemon: async () => {
       const gate = daemonGate;
       if (gate) { gate.entered.resolve(); await gate.release.promise; }

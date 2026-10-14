@@ -44,6 +44,34 @@ test('browser config exposes only safe settings, pinned themes, bounded custom t
   assert.doesNotMatch(JSON.stringify(config), /DO_NOT_EXPORT|DO_NOT_OVERRIDE|private\/plugin|private-host|private\/project/);
 });
 
+test('explicit config and Pi directory override use normal files but expose only canonical display files', async t => {
+  const home = await mkdtemp('/tmp/pi-web-config-path-');
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const agent = join(home, 'agent-elsewhere');
+  const xdg = join(home, 'xdg');
+  const uiConfig = join(home, 'phone-config.json');
+  await mkdir(join(agent, 'themes'), { recursive: true });
+  await mkdir(join(xdg, 'pi-remote'), { recursive: true });
+  await writeFile(join(xdg, 'pi-remote', 'config.json'), JSON.stringify({ theme: 'dark', bell: true }));
+  await writeFile(uiConfig, JSON.stringify({ theme: 'custom/light', bell: false, host: 'PRIVATE_HOST', extensions: ['/PRIVATE_EXTENSION'] }));
+  await writeFile(join(agent, 'settings.json'), JSON.stringify({ hideThinkingBlock: true, apiKey: 'PRIVATE_KEY' }));
+  await writeFile(join(agent, 'themes', 'custom.json'), JSON.stringify({ name: 'custom', colors: { text: '#123456' } }));
+  const env = { XDG_CONFIG_HOME: xdg, PI_CODING_AGENT_DIR: '~/agent-elsewhere' };
+  const normal = await defaultBrowserConfig({ home, env });
+  const virtualConfig = join(home, '.config', 'pi-remote', 'config.json');
+  assert.deepEqual(JSON.parse(normal.files[virtualConfig]), { theme: 'dark', bell: true });
+  const explicit = await defaultBrowserConfig({ home, env, uiConfig });
+  assert.deepEqual(JSON.parse(explicit.files[virtualConfig]), { theme: 'custom/light', bell: false });
+  assert.deepEqual(JSON.parse(explicit.files[join(home, '.pi', 'agent', 'settings.json')]), { hideThinkingBlock: true });
+  assert.deepEqual(JSON.parse(explicit.files[join(home, '.pi', 'agent', 'themes', 'custom.json')]).colors, { text: '#123456' });
+  assert.ok(Object.keys(explicit.files).every(path => !path.startsWith(agent) && !path.startsWith(xdg)));
+  assert.doesNotMatch(JSON.stringify(explicit), /PRIVATE_/);
+  const linked = join(home, 'dotfiles-config.json');
+  await symlink(uiConfig, linked);
+  const fromDotfiles = await defaultBrowserConfig({ home, env, uiConfig: linked });
+  assert.deepEqual(JSON.parse(fromDotfiles.files[virtualConfig]), { theme: 'custom/light', bell: false });
+});
+
 test('custom theme inventory and individual input reads are bounded', async t => {
   const home = await mkdtemp('/tmp/pi-web-theme-limit-');
   t.after(() => rm(home, { recursive: true, force: true }));
@@ -55,6 +83,21 @@ test('custom theme inventory and individual input reads are bounded', async t =>
   assert.equal(Object.keys(config.files).filter(path => path.includes('/themes/')).length, 34); // 32 custom + 2 pinned
   assert.deepEqual(JSON.parse(config.files[join(home, '.pi', 'agent', 'settings.json')]), {});
   assert.deepEqual(JSON.parse(config.files[join(home, '.config', 'pi-remote', 'config.json')]), {});
+});
+
+test('browser settings accept theme names and light/dark pairs, but never paths', async t => {
+  const home = await mkdtemp('/tmp/pi-web-theme-pair-');
+  t.after(() => rm(home, { recursive: true, force: true }));
+  await mkdir(join(home, '.pi', 'agent'), { recursive: true });
+  await mkdir(join(home, '.config', 'pi-remote'), { recursive: true });
+  for (const selection of ['gruvbox-light/gruvbox-dark', 'light', 'system', '../dark', 'light/', 'a/b/c', '/etc/passwd']) {
+    await writeFile(join(home, '.pi', 'agent', 'settings.json'), JSON.stringify({ theme: selection }));
+    await writeFile(join(home, '.config', 'pi-remote', 'config.json'), JSON.stringify({ theme: selection }));
+    const config = await defaultBrowserConfig({ home, env: {} });
+    const expected = ['gruvbox-light/gruvbox-dark', 'light', 'system'].includes(selection) ? { theme: selection } : {};
+    assert.deepEqual(JSON.parse(config.files[join(home, '.pi', 'agent', 'settings.json')]), expected);
+    assert.deepEqual(JSON.parse(config.files[join(home, '.config', 'pi-remote', 'config.json')]), expected);
+  }
 });
 
 test('authenticated /api/config delivers the provider output only to paired devices', async t => {

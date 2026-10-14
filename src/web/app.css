@@ -1,4 +1,4 @@
-:root { color-scheme: dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; background: #161616; color: #dedede; }
+:root { color-scheme: dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; background: var(--app-bg, #161616); color: var(--app-fg, #dedede); }
 * { box-sizing: border-box; }
 html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; overscroll-behavior: none; }
 /* Pin the app to the visual viewport. iOS pans the layout viewport when the keyboard opens;
@@ -46,3 +46,19 @@ input, textarea { display: block; width: 100%; margin-top: 6px; padding: 10px; f
 #action-content textarea { min-height: 110px; }
 code { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
 @media (min-width: 800px) { #terminal { padding: 8px; } }
+/* Theme colors only: keep presentation independent of composer layout. */
+body { background: var(--app-bg, #161616); color: var(--app-fg, #dedede); }
+#terminal .xterm-viewport { background: var(--app-bg, #161616); }
+header { border-color: var(--border, #333); }
+header, #composer, dialog { background: var(--chrome-bg, #202020); }
+#status { color: var(--muted, #aaa); }
+button { background: var(--button-bg, #262626); border-color: var(--border, #444); }
+button:active, #notice { background: var(--info-bg, #4d3025); }
+input, textarea { background: var(--input-bg, #111); border-color: var(--border, #555); }
+dialog { border-color: var(--border, #555); }
+button:focus-visible, input:focus-visible, textarea:focus-visible { outline-color: var(--accent, #89b4fa); }
+#prompt { background: var(--input-bg, #1e1e1e); border-color: var(--border, #444); }
+#send { background: var(--accent, #3478f6); color: var(--app-bg, #fff); }
+#send:disabled { background: var(--button-bg, #333); color: var(--muted, #888); }
+#stop { background: var(--app-fg, #dedede); color: var(--app-bg, #161616); }
+#pair-error { color: var(--error, #ffaaaa); }

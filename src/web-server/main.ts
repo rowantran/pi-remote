@@ -12,7 +12,7 @@ export type { WebServerOptions, WebServerHandle, WebServerContext, Authenticated
 export { DeviceStore, DEVICE_COOKIE } from './devices.js';
 export type { Device } from './devices.js';
 export { defaultBrowserConfig } from './browser-config.js';
-export type { BrowserConfig } from './browser-config.js';
+export type { BrowserConfig, PresentationMetadata } from './browser-config.js';
 
 const HELP = `Usage:
   pi-remote serve --origin https://HOST --allow-user LOGIN [--allow-user LOGIN ...]
@@ -26,6 +26,10 @@ Options:
   --state-dir DIR     Existing private daemon state directory
   --origin ORIGIN     Exact HTTPS browser origin; no path or trailing slash
   --allow-user LOGIN  Exact Tailscale-User-Login; repeat for each allowed user
+  --ui-config PATH    Normal pi-remote config on this server (default XDG config path)
+
+The web client uses this server's configured themes and trusted presentation extensions.
+Extension paths resolve on this server. Reload the phone after editing config or source.
 
 The listener is Unix-socket only. Put it behind private Tailscale Serve, never Funnel.
 A pairing code expires after 10 minutes and can be used once. Codes are printed only
@@ -41,7 +45,7 @@ export async function serveMain(args: string[]): Promise<void> {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (!arg.startsWith('-')) { positional.push(arg); continue; }
-    if (!['--web-state-dir', '--socket', '--state-dir', '--origin', '--allow-user'].includes(arg)) throw new Error(`Unknown serve option: ${arg}`);
+    if (!['--web-state-dir', '--socket', '--state-dir', '--origin', '--allow-user', '--ui-config'].includes(arg)) throw new Error(`Unknown serve option: ${arg}`);
     const value = args[++i];
     if (!value || value.startsWith('-')) throw new Error(`Missing value for ${arg}`);
     if (arg === '--allow-user') allowedLogins.push(value);
@@ -71,6 +75,7 @@ export async function serveMain(args: string[]): Promise<void> {
     origin, allowedLogins, stateDir,
     socketPath: flags.get('--socket') ?? join(stateDir, 'web.sock'),
     daemonStateDir: flags.get('--state-dir'),
+    uiConfig: flags.get('--ui-config'),
     handleApi: (request, response, context) => push?.handleApi(request, response, context) ?? false,
   });
   let monitor: Awaited<ReturnType<typeof startActivityMonitor>>;

@@ -8,7 +8,9 @@ Version 0.2 adds automatic client reconnect, numbered slots, remote path complet
 
 A browser client renders the Pi transcript locally and connects to the devbox through Tailscale
 Serve. `pi-remote serve` has only a private Unix socket, requires your Tailscale identity and device
-pairing, and never opens a public TCP port. See [phone setup and security](docs/phone.md).
+pairing, and never opens a public TCP port. The web client uses the normal pi-remote config on
+the server for themes and trusted presentation extensions; `serve --ui-config PATH` selects
+another config file. See [phone setup, configuration, and security](docs/phone.md).
 
 ## Quick start
 

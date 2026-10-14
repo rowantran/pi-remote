@@ -1,6 +1,4 @@
-import { readFile, stat } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { createJiti } from 'jiti';
@@ -14,7 +12,8 @@ import { WidthCache } from './width-cache.js';
 import type { RecordValue, Snapshot } from '../protocol/types.js';
 import { ReadonlyHistory, readonlyCopy } from './presentation-history.js';
 import { safeText } from './view.js';
-import { configPath, parseConfig, type ClientConfig, type SplitDirection } from '../protocol/config.js';
+import { modulePath } from '../protocol/presentation-config.js';
+export { readPresentationConfig, type PresentationConfig, type PresentationConfigOptions } from '../protocol/presentation-config.js';
 
 /**
  * Local presentation compatibility, NOT a JavaScript sandbox. Only explicitly trusted files may
@@ -26,37 +25,6 @@ import { configPath, parseConfig, type ClientConfig, type SplitDirection } from 
  * This is not the complete ExtensionAPI: local dialogs/custom overlays (ui.custom), credential
  * access, provider registration and session-control APIs are intentionally unsupported.
  */
-export interface PresentationConfig { extensions: string[]; theme?: string; bell?: boolean; sideSplit?: SplitDirection }
-export interface PresentationConfigOptions {
-  env?: NodeJS.ProcessEnv;
-  home?: string;
-}
-export async function readPresentationConfig(
-  path?: string, cliExtensions: string[] = [], options: PresentationConfigOptions = {},
-): Promise<PresentationConfig> {
-  const home = options.home ?? homedir();
-  // Explicit --ui-config replaces the UI defaults, never the connection defaults.
-  const file = path ?? configPath(options.env, home);
-  let text: string | undefined;
-  try { text = await readFile(file, 'utf8'); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-  let config: ClientConfig = {};
-  if (text !== undefined) {
-    try { config = parseConfig(text, file); }
-    catch (error) { throw new Error(`Invalid presentation config: ${(error as Error).message}`); }
-  }
-  return {
-    extensions: [...new Set([
-      ...(config.extensions ?? []).map(p => modulePath(p, dirname(resolve(file)), home)),
-      ...cliExtensions.map(p => modulePath(p, undefined, home)),
-    ])],
-    theme: config.theme, bell: config.bell, ...(config.sideSplit !== undefined ? { sideSplit: config.sideSplit } : {}),
-  };
-}
-function modulePath(path: string, base = process.cwd(), home = homedir()): string {
-  return resolve(base, path.startsWith('~/') ? resolve(home, path.slice(2)) : path);
-}
-
 type DisposableComponent = Component & { dispose?(): void };
 type EditorFactory = NonNullable<Parameters<ExtensionUIContext['setEditorComponent']>[0]>;
 type RenderContext = Parameters<NonNullable<ToolDefinition<any, any>['renderCall']>>[2];
@@ -72,6 +40,9 @@ export interface RemotePresentationWidget {
 export interface PresentationUIContext extends ExtensionUIContext {
   getRemoteWidget(key: string): RemotePresentationWidget | undefined;
 }
+/** Pre-bundled trusted adapters use the same host without filesystem or jiti access. */
+export type PresentationFactory = (api: ExtensionAPI) => unknown | Promise<unknown>;
+export type PresentationFactoryEntry = PresentationFactory | { path: string; factory: PresentationFactory };
 export type PresentationChange = 'layout' | 'transcript';
 export interface PresentationHostOptions {
   snapshot: () => Snapshot;
@@ -205,18 +176,32 @@ export class PresentationHost {
     for (const path of paths) {
       const resolved = modulePath(path);
       if (this.loaded.has(resolved)) continue;
-      this.loaded.add(resolved);
-      const owner: Owner = { path: resolved, enabled: true };
-      try {
+      await this.loadFactory(resolved, async () => {
         if (!(await stat(resolved)).isFile()) throw new Error('Select a trusted extension file, not a directory');
-        const factory = await jiti.import<any>(resolved, { default: true });
-        if (typeof factory !== 'function') throw new Error('Extension must export a default factory');
-        await factory(this.makeAPI(owner));
-      } catch (error) {
-        owner.enabled = false; this.renderersChanged(); this.report(resolved, error);
-      }
+        return jiti.import<any>(resolved, { default: true });
+      });
     }
     this.changed();
+  }
+  /** Factories are already loaded by the browser's same-origin, trusted presentation bundle. */
+  async loadFactories(factories: readonly PresentationFactoryEntry[]): Promise<void> {
+    for (const [index, entry] of factories.entries()) {
+      const path = typeof entry === 'function' ? `bundled-extension:${index}` : entry.path;
+      await this.loadFactory(path, async () => typeof entry === 'function' ? entry : entry.factory);
+    }
+    this.changed();
+  }
+  private async loadFactory(path: string, load: () => Promise<unknown>): Promise<void> {
+    if (this.stopped || this.loaded.has(path)) return;
+    this.loaded.add(path);
+    const owner: Owner = { path, enabled: true };
+    try {
+      const factory = await load();
+      if (typeof factory !== 'function') throw new Error('Extension must export a default factory');
+      await factory(this.makeAPI(owner));
+    } catch (error) {
+      owner.enabled = false; this.renderersChanged(); this.report(path, error);
+    }
   }
   async start(): Promise<void> {
     if (this.started || this.stopped) return;

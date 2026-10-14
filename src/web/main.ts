@@ -2,7 +2,8 @@ import './shims/globals.js';
 import { RemoteTui } from '../tui/tui.js';
 import { ReconnectingConnection } from '../client/reconnect.js';
 import type { SlotInfo } from '../protocol/types.js';
-import { configureVirtualFiles, type VirtualFiles } from './shims/vfs.js';
+import { configureVirtualFiles } from './shims/vfs.js';
+import { browserPresentationOptions, browserTerminalTheme, loadBrowserPresentation, presentationWarning, type BrowserPresentationConfig } from './presentation.js';
 import { WebSocketConnection } from './connection.js';
 import { XtermTerminal } from './terminal.js';
 import { NativeInput } from './input.js';
@@ -81,6 +82,8 @@ async function attach(reference: string, offline = false): Promise<void> {
   const generation = ++attaching;
   clearDisplay(); currentSlot = undefined;
   status.textContent = 'Connecting…';
+  const presentation = await browserPresentationOptions(report);
+  if (generation !== attaching) return;
   const cached = await transcriptCache.load(reference);
   if (generation !== attaching) return;
   if (cached) {
@@ -89,8 +92,8 @@ async function attach(reference: string, offline = false): Promise<void> {
       const draft = nativeInput.prepare(cached.slot.id);
       currentSlot = cached.slot.id;
       element('session-name').textContent = `${cached.slot.number ?? ''} · ${cached.slot.sessionName ?? 'Saved session'}`;
-      terminal = new XtermTerminal(element('terminal')); terminal.useNativeInput();
-      client = new RemoteTui(readOnly, cached.slot.id, cached, terminal, { theme: 'dark', bell: false, hideThinkingBlock: true, externalInput: nativeInput.callbacks });
+      terminal = new XtermTerminal(element('terminal'), undefined, browserTerminalTheme()); terminal.useNativeInput();
+      client = new RemoteTui(readOnly, cached.slot.id, cached, terminal, { ...presentation, externalInput: nativeInput.callbacks });
       nativeInput.bind(client, readOnly, cached.slot.id, draft); nativeInput.setConnected(false);
       const preview = client;
       removeTouch = installTouchScroll(element('terminal'), terminal, lines => preview.scrollTranscript(lines));
@@ -115,11 +118,11 @@ async function attach(reference: string, offline = false): Promise<void> {
     try { localStorage.setItem('pi-remote-last-slot', slot.id); } catch {}
     if (!location.hash) history.replaceState(null, '', `/#${new URLSearchParams({ slot: slot.id })}`);
     element('session-name').textContent = `${slot.number ?? ''} · ${slot.sessionName ?? 'Unnamed'}`;
-    notice.hidden = true;
+    notice.hidden = !presentationWarning;
     const draft = nativeInput.prepare(slot.id);
-    terminal = new XtermTerminal(element('terminal'));
+    terminal = new XtermTerminal(element('terminal'), undefined, browserTerminalTheme());
     terminal.useNativeInput();
-    client = new RemoteTui(conn, slot.id, snapshot, terminal, { host: location.hostname, theme: 'dark', bell: true, hideThinkingBlock: true, externalInput: nativeInput.callbacks, onSnapshot: snapshot => transcriptCache.schedule(snapshot) });
+    client = new RemoteTui(conn, slot.id, snapshot, terminal, { ...presentation, host: location.hostname, externalInput: nativeInput.callbacks, onSnapshot: snapshot => transcriptCache.schedule(snapshot) });
     nativeInput.bind(client, conn, slot.id, draft);
     const scrollClient = client;
     removeTouch = installTouchScroll(element('terminal'), terminal, lines => scrollClient.scrollTranscript(lines));
@@ -135,7 +138,10 @@ async function boot(): Promise<void> {
   try {
     const auth = await api<{ paired?: boolean; authenticated?: boolean }>('/api/status');
     if (auth.paired === false || auth.authenticated === false) { ready = false; offlinePreview = false; attaching++; currentSlot = undefined; clearDisplay(); void transcriptCache.clear(); if (!pairDialog.open) pairDialog.showModal(); return; }
-    configureVirtualFiles(await api<VirtualFiles>('/api/config'));
+    const config = await api<BrowserPresentationConfig>('/api/config');
+    configureVirtualFiles(config);
+    await loadBrowserPresentation(config, report);
+    await browserPresentationOptions(report);
   } catch (error) {
     // Fetch rejection, not an online HTTP 401/403, permits a device-local read-only preview.
     const slot = desiredSlot();

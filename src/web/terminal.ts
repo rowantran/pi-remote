@@ -1,4 +1,4 @@
-import { Terminal as Xterm } from '@xterm/xterm';
+import { Terminal as Xterm, type ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import type { Terminal } from '@earendil-works/pi-tui';
 
@@ -13,11 +13,11 @@ export class XtermTerminal implements Terminal {
   private running = false;
   readonly kittyProtocolActive = false;
 
-  constructor(readonly element: HTMLElement, private onBell: () => void = () => {}) {
+  constructor(readonly element: HTMLElement, private onBell: () => void = () => {}, theme?: ITheme) {
     this.xterm = new Xterm({
       fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 13, lineHeight: 1.15,
       scrollback: 0, cursorBlink: false, convertEol: false, allowProposedApi: false,
-      theme: { background: '#161616', foreground: '#dedede', cursor: '#dedede' },
+      theme: theme ?? { background: '#161616', foreground: '#dedede', cursor: '#dedede' },
     });
     this.xterm.loadAddon(this.fit);
     this.xterm.open(element);
@@ -35,6 +35,7 @@ export class XtermTerminal implements Terminal {
   write(data: string): void { this.xterm.write(data); }
   sendKey(data: string): void { if (this.running) this.input?.(data); }
   focus(): void { this.xterm.focus(); }
+  setTheme(theme: ITheme): void { this.xterm.options.theme = theme; }
   useNativeInput(): void {
     this.xterm.options.disableStdin = true;
     const input = this.element.querySelector<HTMLTextAreaElement>('.xterm-helper-textarea');

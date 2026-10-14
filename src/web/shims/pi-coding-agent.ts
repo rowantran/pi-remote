@@ -9,11 +9,13 @@ export { BranchSummaryMessageComponent } from 'pi-coding-agent-dist/modes/intera
 export { CompactionSummaryMessageComponent } from 'pi-coding-agent-dist/modes/interactive/components/compaction-summary-message.js';
 export { CustomEditor } from 'pi-coding-agent-dist/modes/interactive/components/custom-editor.js';
 export { CustomMessageComponent } from 'pi-coding-agent-dist/modes/interactive/components/custom-message.js';
+// Shared for trusted adapters that patch this display component, not arbitrary private imports.
+export { CustomEntryComponent } from 'pi-coding-agent-dist/modes/interactive/components/custom-entry.js';
 export { SkillInvocationMessageComponent } from 'pi-coding-agent-dist/modes/interactive/components/skill-invocation-message.js';
 export { ToolExecutionComponent } from 'pi-coding-agent-dist/modes/interactive/components/tool-execution.js';
 export { TreeSelectorComponent } from 'pi-coding-agent-dist/modes/interactive/components/tree-selector.js';
 export { UserMessageComponent } from 'pi-coding-agent-dist/modes/interactive/components/user-message.js';
-export { Theme, getMarkdownTheme, getSelectListTheme, initTheme } from 'pi-coding-agent-dist/modes/interactive/theme/theme.js';
+export { Theme, getMarkdownTheme, getSelectListTheme, getSettingsListTheme, getLanguageFromPath, highlightCode, initTheme } from 'pi-coding-agent-dist/modes/interactive/theme/theme.js';
 export { buildSessionProjection } from 'pi-coding-agent-dist/core/session-manager.js';
 import {
   createShellRenderers, editRenderers, findRenderers, grepRenderers, lsRenderers, readRenderers, writeRenderers,

@@ -9,6 +9,8 @@ export const BUILTIN_THEME_DIR = '/__pi_browser__/modes/interactive/theme';
 const builtins = new Map([
   [`${BUILTIN_THEME_DIR}/dark.json`, JSON.stringify(darkTheme)],
   [`${BUILTIN_THEME_DIR}/light.json`, JSON.stringify(lightTheme)],
+  // Metadata marker only. Dynamic import resolves the shared class from the app registry.
+  ['/__pi_browser__/modes/interactive/components/custom-entry.js', ''],
 ]);
 let files = new Map(builtins);
 let home = '/';

@@ -77,6 +77,65 @@ isolate the installed app's browser storage from the Safari tab. Generate a pair
 same devbox and with the same web state directory as the running service, then enter it in the
 installed app. Do not paste pairing codes into shared logs or commit them.
 
+## Use a normal pi-remote config
+
+The web client reads a normal pi-remote `config.json` **on the devbox**. The default is
+`$XDG_CONFIG_HOME/pi-remote/config.json`, or `~/.config/pi-remote/config.json` when XDG is unset.
+Use the same schema as the terminal client:
+
+```json
+{
+  "theme": "gruvbox-light/gruvbox-dark",
+  "extensions": ["~/workplace/pi-remote/example-configs/rowan-ui.ts"],
+  "bell": true
+}
+```
+
+To use a different file, add `--ui-config /path/to/config.json` to the existing `serve` command.
+There is no upload protocol, sync command, or saved presentation JSON in web state. Copy the
+normal config with `scp`, manage it with dotfiles, or edit it on the devbox.
+
+Extension paths resolve on the devbox: `~/` uses its home directory, and relative paths use the
+config file's directory. A laptop-only absolute path such as `/Users/rowan/...` will not work on
+Linux. Extension files and their dependencies must already exist on the devbox. Update those
+checkouts separately; editing an extension only on the laptop does not update the phone.
+The web client does not use `host` or `cwd` from the config to select another server or session.
+
+Themes and Pi display preferences (`hideThinkingBlock`, `doubleEscapeAction`, and the theme
+fallback) come from the devbox's `~/.pi/agent`, or `PI_CODING_AGENT_DIR` if set. The phone chooses
+the light or dark member of a theme pair from its appearance setting. Theme colors also set the
+terminal and page colors. Only display settings and sanitized theme data are sent to the browser,
+not the complete config or Pi settings. Do not embed credentials in presentation code.
+
+The server builds the configured extensions into a browser JavaScript module with esbuild,
+which is included as a runtime dependency. It runs their setup in a bounded, short-lived child
+process to trace dynamic `jiti` imports. This creates no Pi session and makes no daemon request.
+The generated module stays in memory. Config, theme, and bundled source changes are picked up
+when the phone reloads; unchanged sources reuse the bundle. Normal config and loaded-source
+edits need no daemon or web-service restart. Remove an extension from the normal config to turn
+it off. A missing config means default display settings and no extensions. Restart the web service
+if you change package/TypeScript resolution settings or add a competing file that changes which
+module an unchanged import resolves to; these are not loaded-source edits.
+
+Import display modules during factory initialization: dynamic imports performed only later by
+an event handler cannot be traced. Browser Node API support is limited to display helpers and
+read-only virtual theme/config files. Unsupported filesystem, process, editor, or worker
+operations throw when called. Runtime agent/provider/tool executor imports fail the build.
+The native phone composer still replaces extension-provided editors such as `prompt-caret`.
+
+**Only configure extensions you trust.** Setup runs with your ordinary devbox privileges. A
+separate child process limits build lifetime, not access to files or credentials. In the browser,
+the extension runs with the paired device's full authority, including authenticated session
+commands. This is trusted same-user code, not a sandbox.
+
+Both `/api/config` and the hash-bound `/api/presentation.js` require identity, trusted Host/Origin,
+and device pairing. Responses are no-store and the service worker never caches the module.
+CSP remains `script-src 'self'`: no eval or inline scripts. Invalid config or a failed server build
+shows a warning and uses the built-in display, never stale renderer code. Safe themes and settings
+remain available; local service logs contain build diagnostics. Fix the source and reload to recover.
+Listing and attaching sessions remain available, and remote work continues independently. A
+browser-side extension load failure also shows a warning and uses the normal display.
+
 ## Phone controls
 
 The message bar works like a chat app. It is a one-line bar at the bottom of the screen. Tap it to
@@ -157,7 +216,9 @@ A saved transcript is a read-only preview while the daemon reconnects, including
 reload. Sending and answering old questions are disabled. Once authenticated, the daemon's current
 snapshot replaces the preview; neither cached messages nor unsent drafts are submitted to Pi.
 Quota/private-browsing errors only disable caching. iOS can evict local storage; the remote session
-remains authoritative and continues running on the devbox.
+remains authoritative and continues running on the devbox. Synced presentation bundles and
+settings are not persisted with snapshots; an offline reload uses built-in presentation until
+online authentication and configuration loading succeed again.
 
 ## Compatibility
 
@@ -168,13 +229,18 @@ uncertain commands are never replayed after reconnect.
 Some shared laptop modules import Node APIs. The web build selects display modules directly and
 provides narrow read-only browser replacements for themes, paths, and terminal operations.
 Unsupported local filesystem/process operations throw rather than attempting remote execution.
-Dynamic Node presentation adapters, external editors, local path attachments, and Ghostty splits
-are not supported by the browser. Built-in renderers and remote text widgets remain available.
+Server-configured presentation adapters can use traced dynamic imports and the browser's shared Pi display
+modules. Arbitrary Node module loading, external editors, local path attachments, and Ghostty
+splits are not supported. Built-in renderers and remote text widgets remain available.
 
 Run `npm run test:mobile` after installing Playwright's Chromium and WebKit browsers. The smoke
 check uses an isolated daemon, a deterministic Pi-shaped child, and a loopback-only TLS test proxy
 into the Unix listener. It checks pairing, local painting, prompts, work while disconnected,
 reconnect/reload, and no prompt replay. It never accesses real sessions or model credentials.
+`npm run test:presentation` checks server-configured static/dynamic display adapters and light/dark page
+colors in Chromium and WebKit. After building, run
+`node --import tsx test/smoke/presentation-browser.ts --real` on a machine with the example
+adapter's display dependencies and gruvbox themes to check the real Rowan presentation.
 `npm run test:push` injects real Chromium service-worker push events through the browser debugging
 protocol and checks displayed notification requests and offline-shell behavior. This is not external
 Web Push or APNs delivery.

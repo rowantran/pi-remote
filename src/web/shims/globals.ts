@@ -35,10 +35,33 @@ if (typeof window !== 'undefined') {
 }
 export { processShim as process, Buffer };
 export const global = globalThis;
-/** Resolve the one metadata URL used by shared theme readers, not arbitrary module imports. */
+/** Runtime bridge shared with separately bundled, trusted presentation adapters. */
+export interface BrowserPresentationRegistry {
+  modules: Record<string, Record<string, any>>;
+  dynamic: Record<string, any>;
+  traceHome?: string;
+  resolve: typeof browserModuleResolve;
+  import: (specifier: string) => Promise<any>;
+  globals: Record<string, any>;
+}
+export function presentationRegistry(): BrowserPresentationRegistry {
+  const host = globalThis as typeof globalThis & { __piRemotePresentation?: BrowserPresentationRegistry };
+  return host.__piRemotePresentation ??= {
+    modules: Object.create(null), dynamic: Object.create(null), resolve: browserModuleResolve,
+    import: async specifier => unavailable(`Presentation module ${specifier} was not bundled`),
+    globals: { process: processShim, Buffer, global, setTimeout, clearTimeout, setInterval, clearInterval, setImmediate, clearImmediate },
+  };
+}
+/** Metadata URLs only; this does not import Node modules or grant filesystem access. */
 export function browserModuleResolve(specifier: string): string {
-  if (specifier === '@earendil-works/pi-coding-agent') return 'file:///__pi_browser__/index.js';
-  return unavailable(`Module resolution (${specifier}); browser presentation extensions must be statically bundled`);
+  const canonical = specifier.replace(/^@mariozechner\//, '@earendil-works/');
+  if (canonical === '@earendil-works/pi-coding-agent') return 'file:///__pi_browser__/index.js';
+  if (/^@earendil-works\/pi-(?:tui|ai|agent-core)(?:\/(?:compat|oauth|providers\/all))?$/.test(canonical)) {
+    return `file:///__pi_browser__/${canonical.slice('@earendil-works/'.length)}/index.js`;
+  }
+  if (specifier.startsWith('file:') || specifier.startsWith('/')) return new URL(specifier, 'file:///').href;
+  if (Object.hasOwn(presentationRegistry().modules, specifier)) return `file:///__pi_browser__/modules/${encodeURIComponent(specifier)}.js`;
+  return unavailable(`Module resolution (${specifier}); sync and bundle this presentation dependency first`);
 }
 /** Pi's ScrollView/selection timers use Node's unref(). Bind timer calls in the bundle
  * to these handles rather than patching the pinned package or browser globals. */

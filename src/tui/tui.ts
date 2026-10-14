@@ -11,7 +11,7 @@ import { WorkingIndicator } from './working-indicator.js';
 import { ProgramActivity, ProgramStatusTerminal } from './program-status.js';
 import { createRemoteKeybindings } from './keybindings.js';
 import { readLocalClipboard, editLocally } from './local-input.js';
-import { PresentationHost, readPresentationConfig, createPresentationTheme, type PresentationChange } from './presentation.js';
+import { PresentationHost, readPresentationConfig, createPresentationTheme, type PresentationChange, type PresentationFactoryEntry } from './presentation.js';
 import { loadLocalTheme, readPiDoubleEscapeAction, readPiHideThinkingBlock, readPiThemeSetting, resolveThemeSelection, terminalAppearance, type DoubleEscapeAction } from './local-theme.js';
 import { hostname } from 'node:os';
 import { remoteSessionEnv } from '../protocol/remote-session.js';
@@ -106,6 +106,10 @@ class Dialog extends Container implements Focusable {
 
 export interface TuiOptions {
   presentationPaths?: string[]; presentationConfig?: string; theme?: string;
+  /** Trusted preloaded adapters; when supplied, extension paths are never read from disk. */
+  presentationFactories?: readonly PresentationFactoryEntry[];
+  /** Browser clients know the display appearance without querying terminal OSC colors. */
+  appearance?: TerminalColorScheme;
   /** Remote host label for the footer, such as the SSH host alias. */
   host?: string;
   /** Minimum interval between normal frame starts; defaults to 8 ms locally. */
@@ -341,11 +345,12 @@ export class RemoteTui {
   }
 
   private get appearance(): TerminalColorScheme {
-    return terminalAppearance(this.terminalColors, this.terminalColorScheme);
+    return this.options.appearance ?? terminalAppearance(this.terminalColors, this.terminalColorScheme);
   }
 
   /** Query OSC 10/11/4 colors. Late replies, such as over slow SSH links, still apply. */
   private async queryTerminalColors(): Promise<void> {
+    if (this.options.appearance) return;
     let colors: TerminalColors = {};
     try {
       colors = await this.tui.queryTerminalColors({ timeoutMs: TERMINAL_COLOR_TIMEOUT_MS, onLateReply: late => this.terminalColorsChanged(late) });
@@ -414,7 +419,7 @@ export class RemoteTui {
     this.themeSelection = selection;
     // Theme pairs follow live terminal light/dark switches. Without Pi's private terminal-color
     // state, the system theme uses palette indices and default colors, which the terminal adapts itself.
-    this.tui.setTerminalColorSchemeNotifications(selection.includes('/'));
+    this.tui.setTerminalColorSchemeNotifications(!this.options.appearance && selection.includes('/'));
     const previous = this.presentation;
     this.presentation = undefined; // Async shutdown must not rebuild rows against a retiring host.
     this.clearWorkingIndicator();
@@ -432,7 +437,8 @@ export class RemoteTui {
       setTitle: title => this.tui.terminal.setTitle(safeText(title).replace(/\n/g, ' ')),
     });
     this.presentation = host;
-    await host.load(config.extensions);
+    if (this.options.presentationFactories) await host.loadFactories(this.options.presentationFactories);
+    else await host.load(config.extensions);
     if (this.detached) { await host.shutdown(); return; }
     await host.start();
     // Loading a factory can request a render before its later registrations finish.

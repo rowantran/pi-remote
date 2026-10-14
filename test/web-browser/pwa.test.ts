@@ -117,7 +117,8 @@ test('only rejected network fetches use the cached shell; online authorization f
 test('API, pairing, transcripts, WebSockets, cross-origin, query, range, and non-GET requests bypass the worker', async () => {
   const h = harness(); await h.install(); h.fetches.length = 0;
   for (const [path, options] of [
-    ['/api/config', undefined], ['/api/status', undefined], ['/api/pair', { method: 'POST', body: 'SECRET_PAIR_CODE' }],
+    ['/api/config', undefined], ['/api/status', undefined], ['/api/presentation.js', undefined], ['/api/presentation.js?v=HASH', undefined],
+    ['/api/pair', { method: 'POST', body: 'SECRET_PAIR_CODE' }],
     ['/api/push/subscribe', { method: 'POST', body: 'SECRET_SUBSCRIPTION' }], ['/session/transcript.json', undefined],
     ['/ws', undefined], ['wss://remote.example/ws', undefined], ['/sw.js', undefined],
     ['/app.js?token=SECRET_TOKEN', undefined], ['/?pair=SECRET_PAIR_CODE', undefined],

@@ -35,16 +35,22 @@ export async function readPrivateJson(path: string, limit = 1024 * 1024): Promis
   try { file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
   catch (error: any) { if (error.code === 'ENOENT') return undefined; throw error; }
   try {
-    privateFile(await file.stat());
-    const data = Buffer.alloc(limit + 1);
+    const stat = await file.stat();
+    privateFile(stat);
+    if (stat.size > limit) throw new Error('Web state file exceeds limit');
+    // Read incrementally: presentation state has a large ceiling, not a large allocation
+    // on every request. Also bound a file that grows after the initial stat.
+    const data = Buffer.alloc(Math.min(64 * 1024, limit + 1));
+    const chunks: Buffer[] = [];
     let length = 0;
-    while (length < data.length) {
-      const { bytesRead } = await file.read(data, length, data.length - length, null);
+    while (length <= limit) {
+      const { bytesRead } = await file.read(data, 0, Math.min(data.length, limit + 1 - length), null);
       if (!bytesRead) break;
+      chunks.push(Buffer.from(data.subarray(0, bytesRead)));
       length += bytesRead;
     }
     if (length > limit) throw new Error('Web state file exceeds limit');
-    return JSON.parse(data.subarray(0, length).toString('utf8'));
+    return JSON.parse(Buffer.concat(chunks, length).toString('utf8'));
   } finally { await file.close(); }
 }
 
