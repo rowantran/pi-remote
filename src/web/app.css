@@ -1,0 +1,29 @@
+:root { color-scheme: dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; background: #161616; color: #dedede; }
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+body { display: flex; flex-direction: column; height: 100dvh; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+header { display: flex; align-items: center; gap: 8px; padding: 6px; border-bottom: 1px solid #333; flex: 0 0 auto; }
+#session-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; font-size: 14px; }
+#status { font-size: 11px; color: #aaa; max-width: 90px; }
+button, input, textarea { font: inherit; }
+button { border: 1px solid #444; background: #262626; color: inherit; border-radius: 8px; padding: 9px 12px; min-height: 42px; touch-action: manipulation; }
+button:active { background: #444; }
+button:disabled { opacity: .45; }
+button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid #89b4fa; outline-offset: 1px; }
+#terminal { min-height: 0; min-width: 0; flex: 1 1 0; padding: 4px; overflow: hidden; position: relative; }
+#terminal .xterm { height: 100%; }
+#notice { margin: 0; padding: 8px; background: #4d3025; font-size: 13px; max-height: 18dvh; overflow: auto; flex-shrink: 0; }
+#keybar { display: flex; gap: 5px; padding: 5px; overflow-x: auto; flex: 0 0 auto; border-top: 1px solid #333; }
+#keybar button { font-size: 13px; padding: 7px 12px; white-space: nowrap; }
+dialog { background: #202020; color: inherit; border: 1px solid #555; border-radius: 14px; padding: 18px; max-width: min(94vw, 600px); max-height: 85dvh; overscroll-behavior: contain; }
+dialog::backdrop { background: #000a; }
+dialog h1 { font-size: 20px; margin: 0 0 16px; }
+dialog p { font-size: 14px; line-height: 1.5; }
+dialog button { margin: 4px; }
+label { display: block; margin: 12px 0; font-size: 14px; }
+input, textarea { display: block; width: 100%; margin-top: 6px; padding: 10px; font-size: 16px; color: inherit; background: #111; border: 1px solid #555; border-radius: 8px; }
+#slot-list { display: grid; gap: 7px; margin-bottom: 12px; }
+#slot-list button { text-align: left; overflow-wrap: anywhere; }
+#pair-error { color: #ffaaaa; }
+code { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+@media (min-width: 800px) { #terminal { padding: 8px; } }

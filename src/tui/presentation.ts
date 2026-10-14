@@ -186,6 +186,7 @@ export class PresentationHost {
   }
   /** Load exact files only. No directory, package, git, glob, or standard Pi resource discovery. */
   async load(paths: readonly string[]): Promise<void> {
+    if (!paths.length) return;
     const require = createRequire(import.meta.url);
     const alias: Record<string, string> = {};
     for (const pkg of ['pi-coding-agent', 'pi-tui', 'pi-agent-core', 'pi-ai']) {

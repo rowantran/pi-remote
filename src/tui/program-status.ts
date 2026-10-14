@@ -321,7 +321,7 @@ export class ProgramStatusTerminal implements Terminal {
     if (this.pending) {
       this.awaitingDeviceAttributes = true;
       this.timeout = setTimeout(() => { this.pending = false; }, 1000);
-      this.timeout.unref();
+      this.timeout.unref?.();
       this.terminal.write(`${PROGRAM_STATUS_QUERY}\x1b[c`);
     }
     this.report();

@@ -4,6 +4,12 @@ Type locally while an **unmodified Pi coding agent runs on a remote machine**. C
 
 Version 0.2 adds automatic client reconnect, numbered slots, remote path completion, file/image attachments, and opt-in local presentation adapters. It is not full Pi TUI parity. It uses Pi's documented JSONL RPC interface, not `InteractiveMode`, a fake `AgentSession`, or Pi Durable.
 
+## Phone client
+
+A browser client renders the Pi transcript locally and connects to the devbox through Tailscale
+Serve. `pi-remote serve` has only a private Unix socket, requires your Tailscale identity and device
+pairing, and never opens a public TCP port. See [phone setup and security](docs/phone.md).
+
 ## Quick start
 
 Requires Node.js 22.19+ on both machines, working SSH authentication, and **Pi 1.0.4** installed and configured on the remote host. Local dependencies are pinned to the same Pi version; a separate local Pi CLI is not required. Replace `devbox` with your SSH host alias and `/remote/project` with an existing remote directory.

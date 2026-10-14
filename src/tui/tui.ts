@@ -246,7 +246,7 @@ export class RemoteTui {
     if (this.detached) return;
     this.refreshPresentationData();
     this.metadataTimer = setInterval(() => this.refreshPresentationData(), 15_000);
-    this.metadataTimer.unref();
+    this.metadataTimer.unref?.();
   }
 
   private get appearance(): TerminalColorScheme {

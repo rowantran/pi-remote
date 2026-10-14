@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#161616">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Pi Remote">
+  <title>Pi Remote</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/xterm.css">
+  <link rel="stylesheet" href="/app.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header>
+    <button id="slots-button" aria-label="Choose session">Sessions</button>
+    <span id="session-name">Pi Remote</span>
+    <span id="status" role="status">Connecting…</span>
+    <button id="menu-button" aria-label="More actions">⋯</button>
+  </header>
+  <p id="notice" role="alert" hidden></p>
+  <main id="terminal" aria-label="Session transcript"></main>
+  <nav id="keybar" aria-label="Terminal shortcuts">
+    <button data-key="escape">Esc</button>
+    <button data-key="up">↑</button>
+    <button data-key="down">↓</button>
+    <button data-key="enter">Enter</button>
+    <button data-key="tools">Tools</button>
+    <button data-key="thinking">Thinking</button>
+    <button data-key="latest">Latest</button>
+  </nav>
+  <dialog id="pair-dialog">
+    <form id="pair-form">
+      <h1>Pair this device</h1>
+      <p>This gives the device full access to your agent sessions and devbox.</p>
+      <p>On the devbox, run <code>pi-remote serve pair</code>. Install this page on your Home Screen first, then pair from the installed app.</p>
+      <label>Pairing code<input id="pair-code" name="code" required autocomplete="one-time-code" autocapitalize="none" spellcheck="false"></label>
+      <label>Device name<input id="device-name" name="label" required maxlength="80" value="My phone" autocomplete="off"></label>
+      <p id="pair-error" role="alert"></p>
+      <button type="submit">Pair device</button>
+    </form>
+  </dialog>
+  <dialog id="slots-dialog">
+    <h1>Sessions</h1>
+    <div id="slot-list"></div>
+    <button id="refresh-slots">Refresh</button>
+    <button id="close-slots">Close</button>
+  </dialog>
+  <dialog id="menu-dialog">
+    <h1>Pi Remote</h1>
+    <p>The agent runs on your devbox even when you close this app.</p>
+    <button id="reconnect">Reconnect</button>
+    <button id="close-menu">Close</button>
+  </dialog>
+</body>
+</html>
