@@ -79,20 +79,29 @@ installed app. Do not paste pairing codes into shared logs or commit them.
 
 ## Phone controls
 
-The prompt is an ordinary native textarea, not the terminal's hidden input. iOS owns autocorrect,
-dictation, selection, composition, and cursor movement. Return inserts a newline. Tap **Send**, or
-use Command/Ctrl+Enter with a hardware keyboard, to submit. Choose **Follow-up** to queue work after
-the current run; **Send / steer** uses the laptop client's normal steering behavior.
+The message bar works like a chat app. It is a one-line bar at the bottom of the screen. Tap it to
+open the iOS keyboard; the bar moves up and stays directly above the keyboard. It grows to a few lines
+as you type. The bar is an ordinary native text field, not the terminal's hidden input, so iOS owns
+autocorrect, dictation, selection, composition, and cursor movement. Return inserts a newline. Tap the
+round **↑** button to send; the keyboard closes and the compact bar returns. With a hardware keyboard,
+Command/Ctrl+Enter also sends.
+
+Sending works like Enter in the laptop client: an idle session starts a run, and a running session
+receives the message as steering. While Pi works and the bar is empty, the send button becomes **■
+Stop**, which does what Escape does on the laptop (it interrupts the run and restores queued messages
+to the draft). Type anything and the send button returns. A hardware keyboard's Escape key keeps its
+laptop meaning. iOS web apps cannot add keys to the system keyboard, so there is no separate Esc row.
 
 Drafts are stored locally per slot and restored after a reload. They are never submitted merely
 because the app reconnects. Send and dialog answers are disabled while disconnected, but you can
 keep editing the draft. A failed/uncertain submission restores its text for inspection, not replay.
 
-Drag the transcript to scroll it locally, with momentum. **Latest** returns to following output.
-The **Tools**, **Thinking**, and **Esc** controls match the laptop TUI; Esc can abort running work.
-`/` commands and `@` remote-file references have native suggestion buttons. Remote questions and
-simple choices use native input sheets. The complex fork/tree picker still uses the terminal;
-arrow and Enter buttons appear while it is open, without stealing native prompt cursor keys.
+Drag the transcript to scroll it locally, with momentum. When you are not at the end, the transcript
+shows a **Jump to latest message** pill; tap it to follow new output again. Tool output expansion and
+thinking visibility are in the **⋯** menu. Typing `/` or `@` shows native suggestion buttons for
+commands and remote files. Remote questions and simple choices use native input sheets. The complex
+fork/tree picker still uses the terminal; while it is open, **↑ ↓ Choose Cancel** buttons appear above
+the bar.
 
 This app keeps prompt drafts on the device. Use a device passcode and revoke lost devices. Removing
 a device's authorization cannot erase information it already downloaded or copied while authorized.

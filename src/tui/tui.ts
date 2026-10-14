@@ -162,6 +162,7 @@ export class RemoteTui {
   private appliedEditorId?: string;
   private appliedTitle?: string;
   private bashRunning = false;
+  private reportedWorking?: boolean;
   private pendingAttachments: Attachment[] = [];
   private editorHistory: string[] = [];
   private completion?: RemoteAutocompleteProvider;
@@ -622,7 +623,7 @@ export class RemoteTui {
             else this.localDialog.cancel();
             this.tui.requestRender();
           }
-          else if (this.view.snapshot.live.busy || this.view.snapshot.live.compacting || this.hasQueue() || this.bashRunning || Object.keys(this.view.snapshot.live.bash ?? {}).length) void this.interrupt();
+          else if (this.interruptible()) void this.interrupt();
           else if (this.connected && this.view.snapshot.slot.status === 'running' && !this.commandPending && !this.interruptPending
             && !this.editor.getExpandedText().trim() && this.options.doubleEscapeAction !== 'none') {
             const now = Date.now();
@@ -793,6 +794,10 @@ export class RemoteTui {
     return this.refreshPromise;
   }
 
+  private interruptible(): boolean {
+    const live = this.view.snapshot.live;
+    return !!(live.busy || live.compacting || this.hasQueue() || this.bashRunning || Object.keys(live.bash ?? {}).length);
+  }
   private hasQueue(): boolean { const live = this.view.snapshot.live; return !!(live.steering.length || live.followUp.length); }
   /** Like Pi's app.message.dequeue: move queued text into the editor; keep the run going. */
   private async dequeue(): Promise<void> {
@@ -952,6 +957,11 @@ export class RemoteTui {
   private syncBottom(): void {
     if (this.detached) return;
     this.syncProgramStatus();
+    const working = this.interruptible();
+    if (working !== this.reportedWorking) {
+      this.reportedWorking = working;
+      try { this.options.externalInput?.onWorkingChange?.(working); } catch { /* Host display only. */ }
+    }
     if (this.externalEditorActive) return;
     const ui = this.view.snapshot.ui;
     const editorText = ui.find(record => record.method === 'set_editor_text');

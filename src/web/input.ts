@@ -20,8 +20,13 @@ export class NativeInput {
   private answerPending = false;
   private localChoice?: (value?: string) => void;
   private terminalDialog = false;
+  private working = false;
+  /** Sends Esc through the TUI: interrupts work exactly like the laptop's Escape key. */
+  onStop?: () => void;
   readonly textarea = document.getElementById('prompt') as HTMLTextAreaElement;
   private sendButton = document.getElementById('send') as HTMLButtonElement;
+  private stopButton = document.getElementById('stop') as HTMLButtonElement;
+  private pickerKeys = document.getElementById('picker-keys')!;
   private results = document.getElementById('completions')!;
   private sheet = document.getElementById('action-dialog') as HTMLDialogElement;
   private content = document.getElementById('action-content')!;
@@ -38,9 +43,20 @@ export class NativeInput {
       if (this.localChoice) this.localChoice();
       else if (this.remote && this.connected) void this.answer(this.remote.id, { cancelled: true });
     });
+    // Keep the keyboard state unchanged when tapping Stop.
+    this.stopButton.addEventListener('pointerdown', event => event.preventDefault());
+    this.stopButton.addEventListener('click', () => this.onStop?.());
     this.updateControls();
     const viewport = () => {
-      document.documentElement.style.setProperty('--viewport-height', `${window.visualViewport?.height ?? window.innerHeight}px`);
+      const visual = window.visualViewport;
+      const height = visual?.height ?? window.innerHeight;
+      const style = document.documentElement.style;
+      style.setProperty('--viewport-height', `${height}px`);
+      style.setProperty('--viewport-top', `${Math.max(0, visual?.offsetTop ?? 0)}px`);
+      // A much shorter visual viewport means the software keyboard covers the home-indicator area.
+      const keyboard = height < window.innerHeight - 120;
+      document.body.classList.toggle('keyboard-open', keyboard);
+      if (!keyboard && (window.scrollY || document.documentElement.scrollTop)) window.scrollTo(0, 0);
       this.resize();
     };
     window.visualViewport?.addEventListener('resize', viewport);
@@ -56,11 +72,12 @@ export class NativeInput {
     onDialogChange: (record: RecordValue | undefined) => this.showRemote(record),
     choose: (title: string, items: SelectItem[], signal: AbortSignal) => this.choose(title, items, signal),
     onTerminalDialogChange: (active: boolean) => { this.terminalDialog = active; this.updateControls(); },
+    onWorkingChange: (working: boolean) => { this.working = working; this.updateControls(); },
   };
 
-  release(): void { this.client = undefined; this.setConnected(false); this.hideSuggestions(); }
+  release(): void { this.client = undefined; this.working = false; this.setConnected(false); this.hideSuggestions(); }
   prepare(slotId: string): string {
-    this.client = undefined; this.slotId = slotId; this.connected = false; this.provider = undefined;
+    this.client = undefined; this.slotId = slotId; this.connected = false; this.provider = undefined; this.working = false;
     this.hideSuggestions(); this.updateControls();
     try { return localStorage.getItem(`pi-remote-draft:${slotId}`) ?? ''; } catch { return ''; }
   }
@@ -85,29 +102,28 @@ export class NativeInput {
   private changed(): void { this.client?.setDraft(this.textarea.value); this.saveDraft(this.textarea.value); this.complete(); this.updateControls(); }
   private resize(): void {
     this.textarea.style.height = 'auto';
-    this.textarea.style.height = `${Math.min(Math.max(54, this.textarea.scrollHeight), (window.visualViewport?.height ?? window.innerHeight) * 0.3)}px`;
+    const borders = this.textarea.offsetHeight - this.textarea.clientHeight;
+    const limit = (window.visualViewport?.height ?? window.innerHeight) * 0.4;
+    this.textarea.style.height = `${Math.min(Math.max(36, this.textarea.scrollHeight + borders), limit)}px`;
   }
   private updateControls(): void {
     this.sendButton.disabled = !this.connected || !this.client || this.submitting || this.composing || !this.textarea.value.trim() || this.terminalDialog;
     this.textarea.disabled = this.terminalDialog;
-    for (const button of document.querySelectorAll<HTMLElement>('[data-picker]')) button.hidden = !this.terminalDialog;
-    this.textarea.placeholder = this.terminalDialog ? 'Use the arrow keys and Enter to choose' : this.connected ? 'Message Pi…' : 'Draft saved locally · reconnect to send';
+    this.pickerKeys.hidden = !this.terminalDialog;
+    // Like a chat app: an empty composer offers Stop while Pi works; typing brings Send back (steering).
+    const stop = this.working && this.connected && !!this.client && !this.terminalDialog && !this.textarea.value.trim();
+    this.stopButton.hidden = !stop; this.sendButton.hidden = stop;
+    this.textarea.placeholder = this.terminalDialog ? 'Choose with the buttons above' : this.connected ? 'Message Pi' : 'Draft saved · reconnecting';
   }
   async submit(): Promise<void> {
     if (this.sendButton.disabled || !this.client) return;
     const client = this.client;
     this.submitting = true; this.hideSuggestions(); this.updateControls();
-    const behavior = (document.getElementById('send-mode') as HTMLSelectElement).value === 'followUp' ? 'followUp' : 'steer';
-    // Keep the native keyboard open during a user-initiated tap, before any await.
-    this.textarea.focus({ preventScroll: true });
-    try { client.setDraft(this.textarea.value); await client.submitDraft(behavior); }
+    // Return to the compact bar, like iMessage: dismiss the keyboard during the tap itself.
+    this.textarea.blur();
+    try { client.setDraft(this.textarea.value); await client.submitDraft('steer'); }
     catch (error) { this.report(error); }
     finally { this.submitting = false; this.updateControls(); }
-  }
-  insert(text: string): void {
-    const start = this.textarea.selectionStart, end = this.textarea.selectionEnd;
-    this.textarea.setRangeText(text, start, end, 'end'); this.changed();
-    this.textarea.focus({ preventScroll: true }); this.resize();
   }
   private hideSuggestions(): void {
     clearTimeout(this.completionTimer); this.suggestions?.abort();

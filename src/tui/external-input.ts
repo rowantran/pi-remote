@@ -12,6 +12,8 @@ export interface ExternalInput {
   choose?(title: string, items: SelectItem[], signal: AbortSignal): Promise<string | undefined>;
   /** Complex pickers still use terminal keys; the host can temporarily disable its text input. */
   onTerminalDialogChange?(active: boolean): void;
+  /** True while Esc would interrupt remote work (running, compacting, queued prompts, or shell). */
+  onWorkingChange?(working: boolean): void;
 }
 
 /** Keep Pi's input/history behavior, but leave all prompt painting to the host. */

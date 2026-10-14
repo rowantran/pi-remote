@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
 import { createECDH, randomBytes } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,7 +22,8 @@ const stateDir = join(dir, 'daemon');
 const webState = join(dir, 'web');
 const commandsLog = join(dir, 'commands.jsonl');
 const daemon = new Supervisor({ stateDir, executable: process.execPath, skipVersionCheck: true,
-  prefixArgs: [fileURLToPath(new URL('../fixtures/fixture-pi.mjs', import.meta.url))],
+  // Prompts finish only while the gate file exists, so the Stop check can hold one open deterministically.
+  prefixArgs: [fileURLToPath(new URL('../fixtures/fixture-pi.mjs', import.meta.url)), '--fixture-prompt-gate', join(dir, 'prompt-gate')],
   env: { PI_FIXTURE_COMMANDS_LOG: commandsLog, PI_OFFLINE: '1' } });
 const connect = async () => { const socket = createConnection(socketPath(stateDir)); await once(socket, 'connect'); return socket; };
 let control: Connection | undefined;
@@ -106,6 +107,7 @@ function event(connection: Connection, predicate: (event: RemoteEvent) => boolea
   });
 }
 try {
+  await writeFile(join(dir, 'prompt-gate'), '');
   await daemon.start();
   const socket = await connect();
   control = new Connection(socket, socket, () => socket.destroy()); await handshake(control);
@@ -148,6 +150,20 @@ try {
     // Chromium's service-worker loader does not inherit the page's self-signed TLS override.
     const browser = await browserType.launch({ headless: true, ...(browserType === chromium ? { args: ['--ignore-certificate-errors'] } : {}) });
     const context = await browser.newContext({ ...devices['iPhone 13'], ignoreHTTPSErrors: true, serviceWorkers: 'allow' });
+    // Desktop browsers have no software keyboard. Wrap visualViewport so the test can apply the
+    // geometry iOS reports while its keyboard is open (shorter, and panned down by offsetTop).
+    // A string, not a function: tsx's name helpers do not exist inside the page.
+    await context.addInitScript({ content: `(() => {
+      const viewport = window.visualViewport;
+      if (!viewport) return;
+      const proto = Object.getPrototypeOf(viewport);
+      let keyboard;
+      for (const key of ['height', 'offsetTop']) {
+        const real = Object.getOwnPropertyDescriptor(proto, key).get;
+        Object.defineProperty(viewport, key, { configurable: true, get: () => keyboard ? keyboard[key] : real.call(viewport) });
+      }
+      window.simulateKeyboard = value => { keyboard = value; viewport.dispatchEvent(new Event('resize')); };
+    })();` });
     const page = await context.newPage();
     page.setDefaultTimeout(20_000);
     const errors: string[] = [];
@@ -185,6 +201,21 @@ try {
 
       const prompt = page.locator('#prompt');
       assert.equal(await prompt.getAttribute('autocorrect'), 'on');
+      // Compact chat bar: no terminal key row or send-mode selector, one-line idle composer.
+      assert.equal(await page.locator('#keybar, #send-mode').count(), 0);
+      assert.ok((await prompt.boundingBox())!.height <= 40, 'idle composer is a single-line bar');
+      const composerBox = (await page.locator('#composer').boundingBox())!;
+      assert.ok(composerBox.y + composerBox.height >= page.viewportSize()!.height - 40, 'composer sits at the bottom of the screen');
+      // Keyboard open: the bar must sit directly above the keyboard, not jump to the top of the screen.
+      const screenHeight = page.viewportSize()!.height;
+      await page.evaluate(height => (window as any).simulateKeyboard({ height: height - 330, offsetTop: 280 }), screenHeight);
+      await page.waitForFunction(() => document.body.classList.contains('keyboard-open'));
+      const raised = (await page.locator('#composer').boundingBox())!;
+      assert.ok(Math.abs(raised.y + raised.height - (280 + screenHeight - 330)) <= 2, `composer bottom ${raised.y + raised.height} follows the visual viewport`);
+      await page.evaluate(() => (window as any).simulateKeyboard(undefined));
+      await page.waitForFunction(() => !document.body.classList.contains('keyboard-open'));
+      const lowered = (await page.locator('#composer').boundingBox())!;
+      assert.ok(Math.abs(lowered.y - composerBox.y) <= 2, 'closing the keyboard restores the compact bottom bar');
       assert.equal(await page.locator('.xterm-helper-textarea').getAttribute('readonly'), '');
       // Native composition must not become terminal keystrokes or an early submission.
       const message = `Phone prompt from ${browserType.name()}\nNative second line 🐈 ${browserType.name()}`;
@@ -194,8 +225,9 @@ try {
       await prompt.dispatchEvent('compositionend');
       const settled = event(control, value => value.event.type === 'agent_settled');
       const completionPush = pushed(endpoint, 'done');
-      await page.locator('#send-mode').selectOption('followUp');
+      await prompt.focus();
       await page.locator('#send').click();
+      assert.equal(await prompt.evaluate(node => node === document.activeElement), false, 'Send returns to the compact bar');
       await settled;
       assertPush(await completionPush, 'done');
       await page.locator('.xterm-rows').getByText(`Native second line 🐈 ${browserType.name()} complete`, { exact: false }).first().waitFor();
@@ -217,8 +249,43 @@ try {
         Object.defineProperty(end, 'touches', { value: [] }); target.dispatchEvent(end);
       });
       await page.waitForFunction(before => document.querySelector('.xterm-rows')?.textContent !== before, viewportBefore);
-      await page.locator('[data-key=latest]').click();
+      // The TUI's own "Jump to latest" pill replaces the old Latest button; tap it.
+      const pill = await page.locator('#terminal').evaluate(target => {
+        const rows = [...target.querySelectorAll('.xterm-rows > div')];
+        const index = rows.findIndex(row => row.textContent?.includes('Jump to latest'));
+        if (index < 0) return undefined;
+        const rect = rows[index]!.getBoundingClientRect();
+        const column = rows[index]!.textContent!.indexOf('Jump to latest');
+        const screen = target.querySelector('.xterm-screen')!.getBoundingClientRect();
+        const cell = screen.width / (rows[index]!.textContent!.length || 1);
+        return { x: screen.left + (column + 2) * cell, y: rect.top + rect.height / 2 };
+      });
+      assert.ok(pill, 'scrolling away from the end shows the Jump to latest pill');
+      await page.locator('#terminal').evaluate((target, point) => {
+        const touch = { identifier: 2, clientX: point.x, clientY: point.y };
+        const start = new Event('touchstart', { bubbles: true, cancelable: true });
+        Object.defineProperty(start, 'touches', { value: [touch] }); target.dispatchEvent(start);
+        const end = new Event('touchend', { bubbles: true, cancelable: true });
+        Object.defineProperty(end, 'touches', { value: [] }); target.dispatchEvent(end);
+      }, pill!);
+      await page.waitForFunction(() => !document.querySelector('.xterm-rows')?.textContent?.includes('Jump to latest'));
       await page.locator('.xterm-rows').getByText(`Native second line 🐈 ${browserType.name()} complete`, { exact: false }).first().waitFor();
+
+      // While Pi works, the empty composer offers Stop; it sends the laptop's Esc (abort).
+      await rm(join(dir, 'prompt-gate'), { force: true });
+      const stopMessage = `Long running ${browserType.name()}`;
+      await prompt.fill(stopMessage);
+      await page.locator('#send').click();
+      await page.locator('#stop').waitFor({ state: 'visible' });
+      assert.equal(await page.locator('#send').isHidden(), true);
+      await prompt.fill('typing brings Send back');
+      assert.equal(await page.locator('#stop').isHidden(), true);
+      await prompt.fill('');
+      const stopped = event(control, value => value.event.type === 'agent_settled');
+      await page.locator('#stop').click();
+      await stopped;
+      await writeFile(join(dir, 'prompt-gate'), '');
+      await page.locator('#stop').waitFor({ state: 'hidden' });
 
       await prompt.fill('/di');
       await page.locator('#completions button').getByText('/dialog', { exact: true }).click();
@@ -324,7 +391,8 @@ try {
       const log = (await readFile(commandsLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
       const submissions = log.filter(record => record.command.type === 'prompt' && record.command.message === message);
       assert.equal(submissions.length, 1);
-      assert.equal(submissions[0].command.streamingBehavior, 'followUp');
+      assert.notEqual(submissions[0].command.streamingBehavior, 'followUp');
+      assert.equal(log.filter(record => record.command.type === 'abort').length >= 1, true, 'Stop sent an abort');
       for (const draft of [unsent, reconnectDraft, offlineDraft]) assert.equal(log.filter(record => record.command.type === 'prompt' && record.command.message === draft).length, 0);
       assert.equal(log.filter(record => record.command.type === 'extension_ui_response' && record.command.value === `Native answer ${browserType.name()}`).length, 1);
       // An online authorization failure must never fall back to private saved text.
@@ -347,7 +415,7 @@ try {
       const unsubscribed = await page.request.post(`${proxy.origin}/api/push/unsubscribe`, { headers: { Origin: proxy.origin }, data: {} });
       assert.equal(unsubscribed.status(), 200);
       assert.deepEqual(errors, []);
-      console.log(`${browserType.name()}: pairing, native multiline/IME input, follow-up, touch scroll, completion, native dialog, automatic done/blocked push online and offline, IndexedDB persistence, gated saved reconnect, worker-backed offline reload, editable drafts, authoritative replacement, no replay, 403 cache clearing passed`);
+      console.log(`${browserType.name()}: pairing, compact composer, keyboard-raised bar, native multiline/IME input, Stop, jump-to-latest, touch scroll, completion, native dialog, automatic done/blocked push online and offline, IndexedDB persistence, gated saved reconnect, worker-backed offline reload, editable drafts, authoritative replacement, no replay, 403 cache clearing passed`);
     } catch (error) {
       await page.screenshot({ path: join(dir, `${browserType.name()}-failure.png`) }).catch(() => {});
       console.error(`${browserType.name()} failed; screenshots: ${dir}; status: ${await page.locator('#status').textContent().catch(() => 'unavailable')}`);

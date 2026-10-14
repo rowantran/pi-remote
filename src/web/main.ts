@@ -171,19 +171,21 @@ element('unpair').addEventListener('click', () => {
     location.reload();
   }).catch(report);
 });
-const keys: Record<string, string> = { escape: '\x1b', up: '\x1b[A', down: '\x1b[B', enter: '\r', tools: '\x0f', thinking: '\x14', latest: '\x1b[1;5F' };
+const keys: Record<string, string> = { escape: '\x1b', up: '\x1b[A', down: '\x1b[B', enter: '\r', tools: '\x0f', thinking: '\x14' };
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-key]')) {
   button.addEventListener('pointerdown', event => event.preventDefault());
   button.addEventListener('click', () => {
     const key = button.dataset.key!;
-    if (key === 'slash' || key === 'mention') nativeInput.insert(key === 'slash' ? '/' : '@');
-    else if (key === 'latest') { removeTouch?.stop(); client?.followLatest(); }
-    else terminal?.sendKey(keys[key]!);
+    if (menuDialog.contains(button)) menuDialog.close();
+    terminal?.sendKey(keys[key]!);
   });
 }
+nativeInput.onStop = () => terminal?.sendKey(keys.escape!);
 element('composer').addEventListener('submit', () => { removeTouch?.stop(); client?.followLatest(); });
 // Hardware keyboards keep native text navigation; only explicit command-Enter submits.
 nativeInput.textarea.addEventListener('keydown', event => {
+  // A hardware keyboard's Escape keeps its laptop meaning (interrupt or cancel).
+  if (event.key === 'Escape' && !event.isComposing) { event.preventDefault(); terminal?.sendKey(keys.escape!); return; }
   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.isComposing) { event.preventDefault(); void nativeInput.submit(); }
 });
 window.addEventListener('hashchange', () => { const slot = desiredSlot(); if (ready && slot) void attach(slot).catch(report); });
