@@ -66,6 +66,13 @@ test('seeded idle completions and dialogs never ring; a busy seed may complete o
   assert.deepEqual(f.notices.slice(1).map(notice => [notice.kind, notice.method]), ['select', 'confirm', 'input', 'editor'].map(method => ['blocked', method]));
 });
 
+test('a busy seed cannot infer a wait from a result whose call was never observed', () => {
+  const f = tracker(seed({ busy: true }));
+  for (const message of waitMessages().slice(1)) f.send('message_end', { message });
+  f.send('agent_settled'); f.send('agent_settled');
+  assert.deepEqual(f.notices.map(notice => notice.kind), ['done']);
+});
+
 test('session/process changes and reload clear stale runs and dialog dedupe without false completions', () => {
   for (const change of ['session', 'process', 'restart']) {
     const f = tracker();
@@ -104,16 +111,36 @@ test('aborts suppress completion, errors ring once, and an unexpected busy-slot 
   assert.equal(idle.notices.length, 0);
 });
 
-test('exact redacted background_wait tail suppresses completion, not parallel/failed/interrupted waits', () => {
+test('latest successful background_wait suppresses completion regardless of notices or sibling result order', () => {
   const cases: [string, (messages: RecordValue[]) => void, boolean][] = [
     ['wait', () => {}, true],
-    ['parallel', messages => messages[0].content.push({ type: 'toolCall', name: 'bash', id: 'other' }), false],
+    ['no final reply', messages => { messages.pop(); }, true],
+    ['no toolUse stop reason', messages => { delete messages[0].stopReason; }, true],
+    ['wait is not last sibling', messages => messages[0].content.push({ type: 'toolCall', name: 'bash', id: 'other' }), false],
+    ...[false, true].map(reverse => [`wait last, ${reverse ? 'reversed' : 'ordered'} results`, (messages: RecordValue[]) => {
+      messages[0].content.unshift({ type: 'toolCall', name: 'bash', id: 'other' });
+      messages.splice(reverse ? 2 : 1, 0, { role: 'toolResult', toolName: 'bash', toolCallId: 'other', isError: false });
+    }, true] as [string, (messages: RecordValue[]) => void, boolean]),
     ['failed', messages => { messages[1].isError = true; }, false],
     ['missing success', messages => { delete messages[1].isError; }, false],
     ['mismatched ID', messages => { messages[1].toolCallId = 'other'; }, false],
-    ['trailing custom', messages => messages.push({ role: 'custom', content: 'private' }), false],
+    ['empty ID', messages => { messages[0].content[1].id = ''; messages[1].toolCallId = ''; }, false],
+    ['wrong tool name', messages => { messages[1].toolName = 'bash'; }, false],
+    ['result before call', messages => { messages.unshift(messages.splice(1, 1)[0]); }, false],
+    ['trailing custom', messages => messages.push({ role: 'custom', content: 'private' }), true],
+    ['intermixed notices', messages => {
+      messages.splice(1, 0, { role: 'custom', customType: 'background-checkin', content: 'private' });
+      messages.splice(3, 0, { role: 'custom', customType: 'background-completion', content: 'private' });
+    }, true],
+    ['many later messages', messages => {
+      for (let index = 0; index < 10; index++) {
+        messages.push({ role: 'custom', customType: 'background-checkin', content: 'private' },
+          { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'private' }] });
+      }
+    }, true],
+    ['later assistant without content', messages => messages.push({ role: 'assistant', stopReason: 'stop' }), true],
     ['tool reply', messages => messages[2].content.push({ type: 'toolCall', id: 'next', name: 'read' }), false],
-    ['error', messages => { messages[2].stopReason = 'error'; }, false],
+    ['delivered user', messages => messages.push({ role: 'user', content: 'private' }), false],
   ];
   for (const [name, mutate, waiting] of cases) {
     const messages = waitMessages(); mutate(messages);
@@ -124,6 +151,42 @@ test('exact redacted background_wait tail suppresses completion, not parallel/fa
     for (const message of messages) f.send('message_end', { message });
     f.send('agent_end'); f.send('agent_settled');
     assert.equal(f.notices.length, waiting ? 0 : 1, name);
+  }
+});
+
+test('delivered steering and follow-up input clear a wait decision even within an active run', () => {
+  for (const input of ['steering', 'follow-up']) {
+    for (const waitAgain of [false, true]) {
+      const f = tracker(); f.send('agent_start');
+      for (const message of waitMessages()) f.send('message_end', { message });
+      if (input === 'follow-up') f.send('agent_end');
+      f.send('message_end', { message: { role: 'user', content: `${input} private` } });
+      f.send('agent_start');
+      f.send('message_end', { message: { role: 'custom', customType: 'background-checkin', content: 'private' } });
+      if (waitAgain) {
+        for (const message of waitMessages()) f.send('message_end', { message });
+      } else {
+        // A delayed result for the previous wait cannot restore that old decision.
+        f.send('message_end', { message: waitMessages()[1] });
+        f.send('message_end', { message: { role: 'assistant', stopReason: 'stop', content: [] } });
+      }
+      f.send('agent_settled');
+      assert.deepEqual(f.notices.map(notice => notice.kind), waitAgain ? [] : ['done'], `${input}, wait again: ${waitAgain}`);
+    }
+  }
+});
+
+test('fresh wake-ups notify without tool calls and cannot inherit an earlier run wait', () => {
+  for (const reply of ['silent', 'text', 'background notice']) {
+    const f = tracker(); f.send('agent_start');
+    for (const message of waitMessages()) f.send('message_end', { message });
+    f.send('agent_settled');
+    assert.equal(f.notices.length, 0);
+    f.send('agent_start');
+    if (reply === 'text') f.send('message_end', { message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'private' }] } });
+    if (reply === 'background notice') f.send('message_end', { message: { role: 'custom', customType: 'background-completion', content: 'private' } });
+    f.send('agent_end'); f.send('agent_settled'); f.send('agent_settled');
+    assert.deepEqual(f.notices.map(notice => notice.kind), ['done'], reply);
   }
 });
 
@@ -156,12 +219,17 @@ test('retry/overflow preserves a background_wait pair when only the final assist
   }
 });
 
-test('settled cancellation and retry-exhaustion flags override an otherwise valid wait tail', () => {
-  for (const outcome of ['cancelled', 'error']) {
-    const f = tracker(); f.send('agent_start');
-    for (const message of waitMessages()) f.send('message_end', { message });
-    f.send('agent_settled', outcome === 'cancelled' ? { aborted: true } : { error: true });
-    assert.deepEqual(f.notices.map(notice => notice.kind), outcome === 'cancelled' ? [] : ['error']);
+test('cancellation and errors override an otherwise successful background_wait', () => {
+  for (const source of ['message', 'agent_end', 'settled']) {
+    for (const outcome of ['cancelled', 'error']) {
+      const f = tracker(); f.send('agent_start');
+      for (const message of waitMessages()) f.send('message_end', { message });
+      const stopReason = outcome === 'cancelled' ? 'aborted' : 'error';
+      if (source === 'message') f.send('message_end', { message: { role: 'assistant', stopReason, content: [] } });
+      if (source === 'agent_end') f.send('agent_end', { messages: [{ role: 'assistant', stopReason }] });
+      f.send('agent_settled', source === 'settled' ? (outcome === 'cancelled' ? { aborted: true } : { error: true }) : {});
+      assert.deepEqual(f.notices.map(notice => notice.kind), outcome === 'cancelled' ? [] : ['error'], `${source}: ${outcome}`);
+    }
   }
 });
 

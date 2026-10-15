@@ -11,7 +11,7 @@ interface TrackedSlot {
   slot: SlotInfo; sessionId?: string; seq: number; run: number;
   active: boolean; agent: boolean; manualCompaction: boolean;
   cancelled: boolean; outcome: 'done' | 'error'; runError: boolean;
-  tail: ActivityMessage[]; dialogs: Set<string>;
+  messages: ActivityMessage[]; dialogs: Set<string>;
 }
 
 /** Lifecycle-only state machine. Never queries history or infers completion from agent_end. */
@@ -31,7 +31,7 @@ export class ActivityTracker {
   }
   private fresh(slot: SlotInfo, sessionId: string | undefined, seq: number): TrackedSlot {
     return { slot: activitySlot(slot), sessionId, seq, run: seq, active: false, agent: false, manualCompaction: false,
-      cancelled: false, outcome: 'done', runError: false, tail: [], dialogs: new Set() };
+      cancelled: false, outcome: 'done', runError: false, messages: [], dialogs: new Set() };
   }
   event(record: RemoteEvent): ActivityNotice[] {
     if (record.event.type !== 'remote_activity' || !Number.isSafeInteger(record.seq) || record.seq < 0) return [];
@@ -56,25 +56,30 @@ export class ActivityTracker {
       slot: { ...state!.slot }, kind, ...(method ? { method } : {}),
     });
     const settle = () => {
-      if (state!.active && !state!.cancelled && (state!.runError || !waitingOnBackground(state!.tail))) notices.push(notice(state!.outcome, state!.run));
-      state!.active = false; state!.agent = false; state!.manualCompaction = false; state!.tail = [];
+      if (state!.active && !state!.cancelled && (state!.runError || !waitingOnBackground(state!.messages))) notices.push(notice(state!.outcome, state!.run));
+      state!.active = false; state!.agent = false; state!.manualCompaction = false; state!.messages = [];
     };
     switch (source.type) {
       case 'agent_start': {
         if (!state.active) state.run = record.seq;
-        if (!state.active || !state.agent) state.tail = [];
+        if (!state.active || !state.agent) state.messages = [];
         else {
           // Retry starts share one logical run. Drop the omitted failed assistant,
           // but retain its preceding background_wait call/result pair.
-          const last = state.tail.at(-1);
-          if (last?.role === 'assistant' && ['error', 'length'].includes(last.stopReason ?? '')) state.tail.pop();
+          const last = state.messages.at(-1);
+          if (last?.role === 'assistant' && ['error', 'length'].includes(last.stopReason ?? '')) state.messages.pop();
         }
         state.active = true; state.agent = true; state.manualCompaction = false;
         state.cancelled = false; state.outcome = 'done'; state.runError = false;
         break;
       }
       case 'message_end':
-        if (state.agent) state.tail = [...state.tail.slice(-2), source.message];
+        if (state.agent) {
+          // Keep this run's redacted messages: background notices and assistant text
+          // do not change its latest tool call. Delivered user input starts a new decision.
+          if (source.message.role === 'user') state.messages = [];
+          state.messages.push(source.message);
+        }
         if (state.active && source.message.role === 'assistant') {
           if (source.message.stopReason === 'aborted') state.cancelled = true;
           else if (source.message.stopReason === 'error') { state.outcome = 'error'; state.runError = true; }
@@ -88,14 +93,14 @@ export class ActivityTracker {
         break;
       case 'compaction_start': {
         if (!state.active) {
-          state.run = record.seq; state.cancelled = false; state.outcome = 'done'; state.runError = false; state.tail = [];
+          state.run = record.seq; state.cancelled = false; state.outcome = 'done'; state.runError = false; state.messages = [];
         }
         state.active = true;
         // Automatic/pre-prompt compaction returns to prompt: its end is NOT completion.
         state.manualCompaction = !state.agent && (source.reason === undefined || source.reason === 'manual');
         if (source.reason === 'overflow') {
-          const last = state.tail.at(-1);
-          if (last?.role === 'assistant' && ['error', 'length'].includes(last.stopReason ?? '')) state.tail.pop();
+          const last = state.messages.at(-1);
+          if (last?.role === 'assistant' && ['error', 'length'].includes(last.stopReason ?? '')) state.messages.pop();
           state.runError = false; state.outcome = 'done';
         }
         break;
@@ -113,15 +118,15 @@ export class ActivityTracker {
         break;
       case 'remote_slot_exit':
         if (state.active) notices.push(notice('error', state.run));
-        state.active = false; state.agent = false; state.manualCompaction = false; state.tail = []; state.dialogs.clear();
+        state.active = false; state.agent = false; state.manualCompaction = false; state.messages = []; state.dialogs.clear();
         break;
       case 'agent_end': {
         // A sub-run boundary never completes a run, even when no retry is planned.
         if (state.active && source.stopReason === 'aborted') state.cancelled = true;
         if (state.active && source.stopReason === 'error') { state.outcome = 'error'; state.runError = true; }
         if (source.willRetry) {
-          const last = state.tail.at(-1);
-          if (last?.role === 'assistant' && ['error', 'length'].includes(last.stopReason ?? '')) state.tail.pop();
+          const last = state.messages.at(-1);
+          if (last?.role === 'assistant' && ['error', 'length'].includes(last.stopReason ?? '')) state.messages.pop();
         }
         break;
       }
