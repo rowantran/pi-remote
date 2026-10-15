@@ -172,6 +172,8 @@ export class PresentationHost {
       alias[`typebox${suffix}`] = require.resolve(`typebox${suffix}`);
       alias[`@sinclair/typebox${suffix}`] = alias[`typebox${suffix}`];
     }
+    // Adapters may live outside this checkout, for example beside the user's config file.
+    alias.jiti = fileURLToPath(import.meta.resolve('jiti'));
     const jiti = createJiti(import.meta.url, { alias, moduleCache: false });
     for (const path of paths) {
       const resolved = modulePath(path);

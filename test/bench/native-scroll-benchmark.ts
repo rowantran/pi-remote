@@ -3,7 +3,7 @@
  *
  * Run separately, alternating processes on the same machine:
  *   node --import tsx test/bench/native-scroll-benchmark.ts --snapshot /tmp/pi-scroll-session2.json --presentation vanilla
- *   node --import tsx test/bench/native-scroll-benchmark.ts --snapshot /tmp/pi-scroll-session2.json --presentation rowan
+ *   node --import tsx test/bench/native-scroll-benchmark.ts --snapshot /tmp/pi-scroll-session2.json --real /path/to/my-ui.ts
  * Add --theme-file ~/.pi/agent/themes/gruvbox-dark.json to BOTH runs to match
  * the remote benchmark's pinned gruvbox-dark theme. Default: built-in dark.
  * Add --width 120 --rows 45 for the narrower comparison, or --profile FILE
@@ -19,7 +19,7 @@
  * It never calls run()/prompt(), changes the real session, or contacts a provider.
  * All resource discovery is replaced by an explicit ResourceLoader; global Pi
  * config, auth, providers, MCP, background workers and executable extension suites
- * are not loaded. Rowan uses the unchanged example-configs/rowan-ui.ts visual adapter:
+ * are not loaded. --real <adapter-path> loads a user-owned Rowan visual adapter:
  * four original factories, codemode render-only functions, generic compact-tool
  * resolution, and persisted worked-for rendering (NOT the worked-for factory).
  * Normal default tools and compact-tools overrides stay registered and active so
@@ -47,13 +47,12 @@
  */
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { chmod, mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, open, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { Session as InspectorSession } from 'node:inspector';
 import { Socket } from 'node:net';
 import { cpus, homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import type { LoadExtensionsResult, ResourceLoader, SessionEntry } from '@earendil-works/pi-coding-agent';
 import type { RenderExperiment } from './render-experiments.js';
@@ -63,7 +62,8 @@ import { transcriptMessages } from '../../src/tui/view.js';
 
 const HELP = `Usage: node --import tsx test/bench/native-scroll-benchmark.ts [options]
   --snapshot FILE       Saved protocol Snapshot (default /tmp/pi-scroll-session2.json)
-  --presentation NAME   vanilla | rowan (default vanilla; use separate processes)
+  --presentation NAME   vanilla | rowan (default rowan with --real, otherwise vanilla)
+  --real <adapter-path> Required for rowan; trusted user-owned adapter, cwd-relative
   --history NAME        context (default, stock startup) | full (display diagnostic)
   --width NUMBER        Columns (default 140; minimum 20)
   --rows NUMBER         Rows (default 45; minimum 10)
@@ -76,7 +76,7 @@ const HELP = `Usage: node --import tsx test/bench/native-scroll-benchmark.ts [op
   --help                Show this help
 Warmup: 8 frames. Thinking shown. JSON output contains hashes/counts, not transcript.
 CPU/render time is not delivered FPS. Stock scroll scheduling has a 16ms throttle.
-Rowan requires the trusted local pi-extensions checkout used by example-configs/rowan-ui.ts.
+Rowan requires an explicit adapter path and its trusted local pi-extensions dependencies.
 CPU profiles contain source file paths/function names; treat them as private.
 See this file's header for safety, stock-history and presentation caveats.
 `;
@@ -161,16 +161,26 @@ async function profiler(path: string | undefined) {
 }
 
 async function main() {
-  const { values: args } = parseArgs({ options: {
+  const { values: args, positionals } = parseArgs({ allowPositionals: true, options: {
     snapshot: { type: 'string', default: '/tmp/pi-scroll-session2.json' },
-    presentation: { type: 'string', default: 'vanilla' },
+    presentation: { type: 'string' }, real: { type: 'boolean' },
     history: { type: 'string', default: 'context' },
     width: { type: 'string', default: '140' }, rows: { type: 'string', default: '45' },
     iterations: { type: 'string', default: '40' }, 'theme-file': { type: 'string' },
     profile: { type: 'string' }, experiment: { type: 'string', default: 'none' }, help: { type: 'boolean' },
   } });
   if (args.help) { process.stdout.write(HELP); return; }
-  if (!['vanilla', 'rowan'].includes(args.presentation)) throw new Error('Unknown presentation');
+  if ((args.real && (positionals.length !== 1 || !positionals[0])) || (!args.real && positionals.length)) {
+    throw new Error('--real requires one explicit adapter path: --real <adapter-path>');
+  }
+  const presentation = args.presentation ?? (args.real ? 'rowan' : 'vanilla');
+  if (!['vanilla', 'rowan'].includes(presentation)) throw new Error('Unknown presentation');
+  if (presentation === 'rowan' && !args.real) throw new Error('--presentation rowan requires --real <adapter-path>');
+  if (presentation === 'vanilla' && args.real) throw new Error('--real cannot be combined with --presentation vanilla');
+  const adapter = args.real ? resolve(positionals[0]) : undefined;
+  if (adapter && !await stat(adapter).then(info => info.isFile(), () => false)) {
+    throw new Error(`--real adapter path must name an existing file: ${adapter}`);
+  }
   if (!['context', 'full'].includes(args.history)) throw new Error('Unknown history');
   if (!['none', 'cache-footer', 'cache-settled-tools', 'cache-both', 'cache-document', 'cache-document-and-footer'].includes(args.experiment)) {
     throw new Error('Unknown experiment');
@@ -238,8 +248,7 @@ async function main() {
     const { loadExtensions } = await import(internalLoaderUrl.href) as {
       loadExtensions(paths: string[], cwd: string): Promise<LoadExtensionsResult>;
     };
-    const adapter = fileURLToPath(new URL('../../example-configs/rowan-ui.ts', import.meta.url));
-    const extensions = await loadExtensions(args.presentation === 'rowan' ? [adapter] : [], cwd);
+    const extensions = await loadExtensions(adapter ? [adapter] : [], cwd);
     if (extensions.errors.length) throw new Error('Explicit visual extension failed to load (contents withheld)');
     const resourceLoader: ResourceLoader = {
       getExtensions: () => extensions,
@@ -293,7 +302,7 @@ async function main() {
     tui.renderNow(); await nextTurn();
     const displayedRecords = displayedEntries.flatMap<unknown>(entry => entry.type === 'custom'
       || (entry.type === 'usage' && entry.kind === 'cache_warm') ? [entry] : pi.sessionEntryToContextMessages(entry));
-    if (args.presentation === 'rowan' && pi.AssistantMessageComponent.prototype.render === originalAssistantRender) {
+    if (presentation === 'rowan' && pi.AssistantMessageComponent.prototype.render === originalAssistantRender) {
       throw new Error('Rowan assistant background factory did not activate');
     }
     const builtinToolDefinitions = ['read', 'bash', 'edit', 'write', 'find', 'grep', 'ls'].map(name => {
@@ -304,7 +313,7 @@ async function main() {
         extensionRegistered: !!registered, usesRegisteredRenderCall: !!registered && definition?.renderCall === registered.renderCall,
         usesRegisteredRenderResult: !!registered && definition?.renderResult === registered.renderResult };
     });
-    if (args.presentation === 'rowan' && builtinToolDefinitions.some(definition => !definition.present
+    if (presentation === 'rowan' && builtinToolDefinitions.some(definition => !definition.present
       || definition.renderShell !== 'self' || !definition.usesRegisteredRenderCall || !definition.usesRegisteredRenderResult)) {
       throw new Error('Rowan compact builtin rendering definitions were excluded or replaced');
     }
@@ -347,12 +356,12 @@ async function main() {
     if (hash(JSON.stringify(sessionManager.getEntries())) !== beforeHistory) throw new Error('Scroll changed history entries');
     if (hash(await readFile(resolve(args.snapshot))) !== hash(snapshotText)) throw new Error('Input snapshot changed during benchmark');
     const factories = ['codex-footer.ts', 'prompt-caret.ts', 'assistant-background.ts', 'compact-tools.ts', 'codemode/render.ts'];
-    const files = args.presentation === 'rowan' ? await Promise.all(factories.map(async path => ({
+    const files = presentation === 'rowan' ? await Promise.all(factories.map(async path => ({
       path, sha256: hash(await readFile(join(extensionRoot, path))),
     }))) : [];
     phase = 'report';
     const report = {
-      benchmark: 'stock-InteractiveMode-native-scroll', presentation: args.presentation,
+      benchmark: 'stock-InteractiveMode-native-scroll', presentation,
       experiment: args.experiment, history: args.history, historyOverride: args.history === 'full',
       normalBehavior: args.experiment === 'none' && args.history === 'context', idleOnly: true,
       runtime: { node: process.version, pi: pi.VERSION, cpu: cpus()[0]?.model },
@@ -377,7 +386,7 @@ async function main() {
       safety: { realAgentSession: true, privateHistoryCopy: true, snapshotUnchanged: true, historyEntriesUnchanged: true,
         discoveredResources: false, networkAttempts, providerAttempts },
       presentationFiles: files,
-      presentationAdapterSha256: args.presentation === 'rowan' ? hash(await readFile(adapter)) : undefined,
+      presentationAdapterSha256: adapter ? hash(await readFile(adapter)) : undefined,
       presentationActivated: { assistantRenderPatched: pi.AssistantMessageComponent.prototype.render !== originalAssistantRender,
         toolRenderPatched: pi.ToolExecutionComponent.prototype.render !== originalToolRender },
       toolRegistration: 'normal-default-tools-and-explicit-extension-overrides',
@@ -396,7 +405,7 @@ async function main() {
         'Record selection can be matched, but stock suppression of system/hidden/custom records and notices can still cause rendered line/hash differences.',
         'Native startup header is suppressed; cwd/session-id/auth availability/status metadata are isolated and may differ from remote.',
         'No terminal emulator, SSH delivery, model requests, initial layout or streaming updates are measured.',
-        ...(args.presentation === 'rowan' ? ['Unchanged visual adapter includes render-only codemode, generic compact tools and persisted worked-for; no worked-for/execution/provider/MCP/background factory loaded.'] : []),
+        ...(presentation === 'rowan' ? ['Unchanged visual adapter includes render-only codemode, generic compact tools and persisted worked-for; no worked-for/execution/provider/MCP/background factory loaded.'] : []),
         ...(args.experiment !== 'none' ? ['Diagnostic idle-only experiment changes rendering/caching assumptions; not normal Pi or a production fix.'] : []),
       ],
       profile: args.profile ? { path: resolve(args.profile), measuredLoopOnly: true, private: true } : undefined,

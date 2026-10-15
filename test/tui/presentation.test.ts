@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -182,7 +182,7 @@ test('width caching keeps dynamic adapter renders live and contains later failur
 });
 
 test('errors stay local, notify once, and mutation APIs never execute', async () => {
-  const { host, notices } = setup(); await host.load([resolve(fixtures, 'errors.ts')]); await host.start();
+  const { host, notices, initial } = setup(); await host.load([resolve(fixtures, 'errors.ts')]); await host.start();
   for (let i = 0; i < 2; i++) {
     assert.equal(host.renderEntry({ customType: 'broken' }, { expanded: false }), undefined);
     assert.deepEqual(host.renderMessage({ customType: 'broken' }, { expanded: false })!.render(80), []);
@@ -193,8 +193,11 @@ test('errors stay local, notify once, and mutation APIs never execute', async ()
   assert.equal(host.workingMessage, 'survived');
   assert.equal(notices.filter(n => n.includes('renderer failed')).length, 2);
   assert.equal(notices.filter(n => n.includes('component failed')).length, 1);
-  for (const name of ['exec', 'send', 'provider', 'virtual', 'mcp', 'model', 'context-exec']) assert.equal(await host.command(name), true);
+  const before = structuredClone(initial);
+  for (const name of ['exec', 'send', 'append', 'provider', 'virtual', 'mcp', 'model', 'context-exec']) assert.equal(await host.command(name), true);
   assert.ok(notices.some(n => n.includes('pi.exec'))); assert.ok(notices.some(n => n.includes('ctx.executeTool')));
+  assert.ok(notices.some(n => /pi\.appendEntry.*unavailable/.test(n)));
+  assert.deepEqual(initial, before, 'Blocked writes cannot change remote history');
   await host.load([resolve(fixtures, 'missing.ts'), fixtures]);
   assert.ok(notices.some(n => n.includes('not a directory')));
   await host.shutdown();
@@ -210,6 +213,72 @@ async function withPresentationFixture(source: string, run: (path: string) => Pr
     await run(path);
   } finally { await rm(dir, { recursive: true }); }
 }
+
+test('out-of-tree adapters import host jiti and public display packages and load nested modules', async t => {
+  const dir = await mkdtemp(resolve(tmpdir(), 'presentation-external-'));
+  t.after(() => rm(dir, { recursive: true }));
+  for (const name of ['nested-adapter.ts', 'nested-renderer.ts']) {
+    await copyFile(resolve(fixtures, name), resolve(dir, name));
+  }
+  const { host, notices } = setup();
+  t.after(() => host.shutdown());
+  await host.load([resolve(dir, 'nested-adapter.ts')]); await host.start();
+  assert.deepEqual(notices, []);
+  assert.equal(host.footer!.render(80)[0].trimEnd(), 'nested adapter loaded');
+  assert.match(stripAnsi(host.renderMessage({ customType: 'fixture-notice', details: { id: 'nested' } },
+    { expanded: false, outputPad: 1 })!.render(80).join('\n')), /nested:false:1/);
+
+  await rm(resolve(dir, 'nested-renderer.ts'));
+  const missing = setup();
+  t.after(() => missing.host.shutdown());
+  await missing.host.load([resolve(dir, 'nested-adapter.ts')]); await missing.host.start();
+  assert.equal(missing.host.messageRenderer('fixture-notice'), undefined);
+  assert.equal(missing.host.footer, undefined);
+  assert.ok(missing.notices.some(message => /nested-renderer/.test(message)),
+    'A missing nested module must report its path, not silently use a fallback');
+});
+
+test('renderer-only modules render live and persisted custom notices with expansion and width guards', async () => {
+  initTheme('dark', false);
+  const { host, notices, tui } = setup();
+  await host.load([resolve(fixtures, 'nested-adapter.ts')]); await host.start();
+  const message = { role: 'custom', customType: 'fixture-notice', display: true, timestamp: 1700000000000,
+    content: 'RAW FALLBACK MUST NOT APPEAR', details: { id: 'notice' } };
+  const component = host.renderMessage(message, { expanded: false })!;
+  for (const width of [0, 1, 2, 8, 40, 80]) assert.ok(component.render(width).every(line => visibleWidth(line) <= width));
+  const initial = snapshot(); initial.entries = []; initial.leafId = null; initial.live.messages = [message];
+  const view = new RemoteView(initial);
+  const transcript = new Transcript(view, tui, () => host);
+  try {
+    const live = new Map<string, string[]>();
+    for (const persisted of [false, true]) {
+      if (persisted) {
+        const { role: _role, timestamp, ...stored } = message;
+        initial.live.messages = [];
+        initial.entries = [{ ...stored, type: 'custom_message', id: 'notice', parentId: null,
+          timestamp: new Date(timestamp).toISOString() }];
+        initial.leafId = 'notice'; view.replace(initial); host.update(view.snapshot); transcript.changed();
+      }
+      for (const expanded of [false, true]) {
+        transcript.expanded = expanded;
+        for (const width of [0, 1, 2, 8, 40, 80]) {
+          const lines = transcript.render(width);
+          assert.ok(lines.every(line => visibleWidth(line) <= width));
+          const output = stripAnsi(lines.join('\n'));
+          assert.doesNotMatch(output, /RAW FALLBACK|renderer not loaded/);
+          if (width === 80) {
+            assert.match(output, new RegExp(`notice:${expanded}:1`));
+            assert.equal(output.includes('fixture details'), expanded);
+          }
+          const key = `${expanded}:${width}`;
+          if (persisted) assert.deepEqual(lines, live.get(key));
+          else live.set(key, lines);
+        }
+      }
+    }
+    assert.deepEqual(notices, []);
+  } finally { transcript.reset(); await host.shutdown(); }
+});
 
 test('renderer revisions announce late registrations and replacements to cached transcripts', async () => {
   await withPresentationFixture(`

@@ -47,9 +47,11 @@ Every measured frame moved the viewport; transcript hashes remained unchanged. C
 
 ## Reproduction and limits
 
-Use `PI_REMOTE_RENDERER_REPO=/path/to/updated/pi-extensions` with the worktree-local `example-configs/rowan-ui.ts` adapter in both remote and native runners. Replay the same private snapshot with fixed theme, dimensions, dependencies and terminal environment. Keep history and profiles outside Git.
+Use `PI_REMOTE_RENDERER_REPO=/path/to/updated/pi-extensions` with your user-owned Rowan adapter outside both worktrees. Pass `--real /path/to/my-ui.ts` to both remote and native runners; this option requires an explicit path and has no repository default. The adapter must import public Pi display packages, not pi-remote source files. Replay the same private snapshot with fixed theme, dimensions, dependencies and terminal environment. Keep history and profiles outside Git.
 
-For CPU cost: `npm run test:scroll -- --snapshot FILE --ui-config NONEXISTENT_FILE --ui-extension ./example-configs/rowan-ui.ts --theme gruvbox-dark --scenario idle-scroll --iterations 60`.
+For CPU cost: `npm run test:scroll -- --real /path/to/my-ui.ts --snapshot FILE --ui-config NONEXISTENT_FILE --theme gruvbox-dark --scenario idle-scroll --iterations 60`.
+
+For native CPU cost: `npm run test:native-scroll -- --real /path/to/my-ui.ts --snapshot FILE --theme-file /path/to/gruvbox-dark.json --history full --iterations 60`.
 
 For scheduled writes, append `--scheduled-duration 2000 --render-interval 8` (or 16 for control). The default input interval is 4 ms. The script rejects runs that reach the transcript top, change transcript content, or overlap metadata refresh. Scheduled runs are idle-only; duration is limited to ten seconds.
 

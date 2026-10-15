@@ -2,8 +2,15 @@ import assert from 'node:assert/strict';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {fileURLToPath} from 'node:url';
+import {resolve} from 'node:path';
+import {stat} from 'node:fs/promises';
 import {connectCompatibleSsh} from '../../src/client/compat-client.js';
 import {shellQuote} from '../../src/protocol/shell.js';
+const args=process.argv.slice(2);
+assert.ok(args.length===2&&args[0]==='--real'&&args[1]&&!args[1].startsWith('-'),
+  'Usage: node --import tsx test/smoke/terminal-smoke.ts --real <adapter-path>; an explicit adapter path is required');
+const adapter=resolve(args[1]);
+assert.ok(await stat(adapter).then(info=>info.isFile(),()=>false),`Adapter path must name an existing file: ${adapter}`);
 const exec=promisify(execFile);
 const host=process.env.PI_REMOTE_TEST_HOST??'rowan-v2-dev';
 const remote=(command:string)=>exec('ssh',['-o','BatchMode=yes',host,command],{timeout:30_000});
@@ -21,7 +28,6 @@ async function until(matches:(screen:string)=>boolean){for(let i=0;i<120;i++){co
 try {
   const slot=await client.request('create',{cwd:root,args:['--session-dir',`${root}/history`]});slotId=slot.id;
   const cli=fileURLToPath(new URL('../../dist/cli/main.js',import.meta.url));
-  const adapter=fileURLToPath(new URL('../../example-configs/rowan-ui.ts',import.meta.url));
   const command=['node',cli,'attach','--host',host,'1','--state-dir',stateDir,'--ui-extension',adapter,'--ui-config','/tmp/pi-remote-no-ui-config.json','--theme','gruvbox-dark'].map(shellQuote).join(' ');
   await tmux('new-session','-d','-s',tmuxName,'-x','140','-y','45',`exec ${command}`);created=true;
   const initial=await until(s=>s.includes('›')&&s.includes('Enter steer'));

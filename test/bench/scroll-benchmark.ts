@@ -5,17 +5,17 @@
  * Capture once (read-only hello/list/snapshot; refuses to overwrite the private file):
  *   node --import tsx test/bench/scroll-benchmark.ts --capture /tmp/pi-scroll-snapshot.json \
  *     --host rowan-v2-dev --slot 2 --ui-config /tmp/pi-scroll-no-ui.json \
- *     --ui-extension ./example-configs/rowan-ui.ts
+ *     --real /path/to/my-ui.ts
  * Replay the SAME file, options, dependencies and local UI files in both worktrees:
  *   cp test/bench/scroll-benchmark.ts /tmp/pi-remote-scroll-diagnosis/test/bench/scroll-benchmark.ts
  *   cd /tmp/pi-remote-scroll-diagnosis
  *   node --import tsx test/bench/scroll-benchmark.ts --snapshot /tmp/pi-scroll-snapshot.json \
- *     --ui-config /tmp/pi-scroll-no-ui.json --ui-extension ./example-configs/rowan-ui.ts \
+ *     --ui-config /tmp/pi-scroll-no-ui.json --real /path/to/my-ui.ts \
  *     --theme gruvbox-dark --scenario idle-scroll --iterations 10 \
  *     > /tmp/pi-scroll-baseline-idle.json
  *   cd /Users/rowan/workplace/pi-remote-worktrees/scroll-performance
  *   node --import tsx test/bench/scroll-benchmark.ts --snapshot /tmp/pi-scroll-snapshot.json \
- *     --ui-config /tmp/pi-scroll-no-ui.json --ui-extension ./example-configs/rowan-ui.ts \
+ *     --ui-config /tmp/pi-scroll-no-ui.json --real /path/to/my-ui.ts \
  *     --theme gruvbox-dark --scenario idle-scroll --iterations 10 \
  *     > /tmp/pi-scroll-fixed-idle.json
  *
@@ -24,10 +24,10 @@
  * Repeat for metadata-update-scroll and assistant-delta-scroll. Separate processes
  * and 10 or 20 iterations avoid overlapping the normal 15-second metadata timer;
  * the timer is not disabled. Without --scenario, all three run in one process.
- * The no-UI config path above must not exist. Resolve the unchanged Rowan adapter
- * inside EACH worktree: its import aliases must point to that worktree's classes,
- * not a primary-checkout adapter selected by the default XDG config. The explicit
- * --ui-config overrides the default UI config, not connection defaults.
+ * The no-UI config path above must not exist. Use the same user-owned adapter
+ * outside both worktrees; import public Pi display packages, not pi-remote source.
+ * The host aliases those packages to its own classes. The explicit --ui-config
+ * overrides the default UI config, not connection defaults.
  * Default UI config: $XDG_CONFIG_HOME/pi-remote/config.json, falling back to
  * ~/.config/pi-remote/config.json when XDG_CONFIG_HOME is unset or not absolute.
  * Check equal transcript hashes/line counts and presentation.assistantRenderPatched=true.
@@ -45,7 +45,7 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { Session as InspectorSession } from 'node:inspector/promises';
-import { open, readFile, readdir, writeFile } from 'node:fs/promises';
+import { open, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { cpus } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -69,7 +69,8 @@ const HELP = `Usage: node --import tsx test/bench/scroll-benchmark.ts [options]
   --ui-config FILE     Override UI config only; bypass the default UI config
                        Default: $XDG_CONFIG_HOME/pi-remote/config.json, or
                        ~/.config/pi-remote/config.json if unset/not absolute
-  --ui-extension FILE  Add trusted local adapter (repeatable; deduped; cwd-relative)
+  --real <adapter-path> Load a trusted user-owned adapter (required path; cwd-relative)
+  --ui-extension FILE  Add another trusted local adapter (repeatable; deduped)
   --theme NAME         Optional fixed theme (otherwise normal UI theme selection)
   --width NUMBER       Terminal columns (default 140; minimum 20)
   --rows NUMBER        Terminal rows (default 45; minimum 10)
@@ -414,9 +415,9 @@ async function fileHash(path: string): Promise<string | null> {
 }
 
 async function main() {
-  const { values } = parseArgs({ options: {
+  const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     snapshot: { type: 'string' }, capture: { type: 'string' }, host: { type: 'string' }, slot: { type: 'string' },
-    'ui-config': { type: 'string' }, 'ui-extension': { type: 'string', multiple: true },
+    'ui-config': { type: 'string' }, 'ui-extension': { type: 'string', multiple: true }, real: { type: 'boolean' },
     theme: { type: 'string' }, width: { type: 'string', default: '140' },
     rows: { type: 'string', default: '45' }, iterations: { type: 'string', default: '40' },
     scenario: { type: 'string' }, profile: { type: 'string' },
@@ -425,6 +426,13 @@ async function main() {
     experiment: { type: 'string', default: 'none' }, help: { type: 'boolean' },
   } });
   if (values.help) { process.stdout.write(HELP); return; }
+  if ((values.real && (positionals.length !== 1 || !positionals[0])) || (!values.real && positionals.length)) {
+    throw new Error('--real requires one explicit adapter path: --real <adapter-path>');
+  }
+  const adapter = values.real ? resolve(positionals[0]) : undefined;
+  if (adapter && !await stat(adapter).then(info => info.isFile(), () => false)) {
+    throw new Error(`--real adapter path must name an existing file: ${adapter}`);
+  }
   if (Boolean(values.snapshot) === Boolean(values.capture)) throw new Error('Specify exactly one of --snapshot FILE or --capture FILE');
   if (values.capture && (!values.host || !values.slot)) throw new Error('--capture requires --host and --slot');
   if (values.snapshot && (values.host || values.slot)) throw new Error('--host and --slot are capture-only options; replay is offline');
@@ -445,7 +453,7 @@ async function main() {
     width: integer(values.width!, '--width', 20), rows: integer(values.rows!, '--rows', 10),
     iterations: integer(values.iterations!, '--iterations', 1),
     config: values['ui-config'] === undefined ? undefined : resolve(values['ui-config']),
-    extensions: values['ui-extension'] ?? [], theme: values.theme,
+    extensions: [...(adapter ? [adapter] : []), ...(values['ui-extension'] ?? [])], theme: values.theme,
     scenarios: values.scenario === undefined ? SCENARIOS : [values.scenario as Scenario],
   };
   if (options.scheduledDuration !== undefined && options.scheduledDuration > 10_000) throw new Error('--scheduled-duration must be <= 10000 ms to limit metadata-timer overlap');
@@ -483,7 +491,7 @@ async function main() {
         'Memory terminal counts bytes but does not model SSH or terminal emulator speed.',
         'Keep node, dependencies, options, terminal environment, theme and imported UI extension files unchanged between variants.',
         'Extension hashes cover configured entry files, not their imported dependencies.',
-        'Use a worktree-local adapter in each variant; compare transcript hashes and prototype-patch flags.',
+        'Use the same user-owned adapter outside both worktrees; compare transcript hashes and prototype-patch flags.',
         'Idle means no injected updates; captured live state is replayed unchanged.',
         'Synthetic deltas use FakeConnection only; no real session is modified.',
       ],
@@ -496,7 +504,7 @@ async function main() {
 // text. Known benchmark validation failures are safe, everything else is generic.
 main().catch(error => {
   const message = error instanceof Error ? error.message : '';
-  const safe = /^(Specify exactly|--(?:capture|host|width|rows|iterations|scenario|profile|experiment|render-interval|scheduled-duration|input-interval)|Invalid snapshot JSON|File must contain|Replay attempted|Extra asynchronous|Background metadata|No viewport movement|Scheduled scrolling changed the transcript)/.test(message);
+  const safe = /^(Specify exactly|--(?:real|capture|host|width|rows|iterations|scenario|profile|experiment|render-interval|scheduled-duration|input-interval)|Invalid snapshot JSON|File must contain|Replay attempted|Extra asynchronous|Background metadata|No viewport movement|Scheduled scrolling changed the transcript)/.test(message);
   process.stderr.write(`Scroll benchmark failed: ${safe ? message : 'check input paths, private capture destination, SSH, and trusted UI configuration (details withheld)'}\n`);
   process.exitCode = 1;
 });

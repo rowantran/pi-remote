@@ -39,33 +39,60 @@ iPhone → authenticated Tailscale connection → Tailscale Serve HTTPS
 Tests use a separate loopback proxy into the Unix socket, standing in for Tailscale Serve. This
 proxy lives in test code; there is no production flag to turn the application into a TCP server.
 
-## Build and run
+## Install and run
+
+The web server runs from the same installed release as the daemon, so the devbox needs no
+checkout, package install, or build. From your laptop checkout, install a release:
 
 ```sh
-npm ci --ignore-scripts
-npm run build
-pi-remote serve --help
+npm run deploy -- --wait
 ```
 
-Use an HTTPS origin belonging to this device's Tailscale DNS name, and your actual Tailscale login,
-not the tagged server's owner. The default web state directory is separate from daemon metadata.
-Do not run `deploy` or restart the daemon merely to start the web server.
+Then, once on the devbox, create `~/.config/systemd/user/pi-remote-web.service`. Use an HTTPS
+origin belonging to this device's Tailscale DNS name, and your actual Tailscale login, not the
+tagged server's owner. Replace `/usr/bin/node` with the output of `command -v node`.
 
-For example, from the checkout on the devbox (replace the hostname and login):
+```ini
+[Unit]
+Description=Pi Remote phone client (private Unix socket)
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node %h/.local/share/pi-remote/bin/pi-remote serve --origin https://devbox.your-tailnet.ts.net --allow-user you@example.com --web-state-dir %h/.pi-remote-web
+UMask=0077
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+# Pi sessions belong to the daemon. Stopping the web service must not stop them.
+KillMode=process
+
+[Install]
+WantedBy=default.target
+```
 
 ```sh
-WEB_STATE="$HOME/.pi-remote-web"
-node bin/pi-remote serve --origin https://devbox.your-tailnet.ts.net --allow-user you@example.com \
-  --web-state-dir "$WEB_STATE"
-# In a second terminal; use the same WEB_STATE. --bg persists the Serve configuration:
-tailscale serve --bg --https=443 "unix:$WEB_STATE/web.sock"
-node bin/pi-remote serve pair --web-state-dir "$WEB_STATE"
-node bin/pi-remote serve devices --web-state-dir "$WEB_STATE"
-node bin/pi-remote serve revoke DEVICE_ID --web-state-dir "$WEB_STATE"
+systemctl --user daemon-reload
+systemctl --user enable --now pi-remote-web.service
+loginctl enable-linger "$USER"   # keep the service running while you are logged out
+# --bg persists the Serve configuration; use the same state directory as the service.
+tailscale serve --bg --https=443 "unix:$HOME/.pi-remote-web/web.sock"
+PI=~/.local/share/pi-remote/bin/pi-remote
+$PI serve pair --web-state-dir ~/.pi-remote-web
+$PI serve devices --web-state-dir ~/.pi-remote-web
+$PI serve revoke DEVICE_ID --web-state-dir ~/.pi-remote-web
 ```
 
-Use a user service to keep `serve` running without a terminal. Pairing and revocation commands must
-use the same `--web-state-dir` as the service. Do not reset the whole Tailscale Serve configuration
+Every later `npm run deploy` restarts an active `pi-remote-web.service` onto the new release,
+even with `--no-restart`, which applies only to the daemon. The web service owns no Pi sessions:
+the restart reconnects phones and leaves sessions running. A `serve` process started by hand is
+not restarted; restart it after a deploy, because release cleanup can delete the release it runs
+from. The web server also works with an older running daemon, so you need not restart the daemon
+just to update or start the web server. For development, run the same commands with
+`node bin/pi-remote` from a checkout after `npm run build`.
+
+Pairing and revocation commands must use the same `--web-state-dir` as the service. Do not reset the whole Tailscale Serve configuration
 or change unrelated existing handlers. State directory ancestors must not be symlinks or writable
 by other users. If the default path fails because `~/.pi` is group-writable, use a dedicated
 `~/.pi-remote-web` directory as above; do not loosen the checks or change unrelated permissions.
@@ -96,19 +123,23 @@ Use the same schema as the terminal client:
 ```json
 {
   "theme": "gruvbox-light/gruvbox-dark",
-  "extensions": ["~/workplace/pi-remote/example-configs/rowan-ui.ts"],
+  "extensions": ["./my-ui.ts"],
   "bell": true
 }
 ```
 
 To use a different file, add `--ui-config /path/to/config.json` to the existing `serve` command.
 There is no upload protocol, sync command, or saved presentation JSON in web state. Copy the
-normal config with `scp`, manage it with dotfiles, or edit it on the devbox.
+normal config and your user-owned `my-ui.ts` with `scp`, manage them with dotfiles, or edit them
+on the devbox. Keep the adapter beside `config.json` on both machines; the same relative path
+then works for the laptop and phone. Deployment does not install adapters.
 
 Extension paths resolve on the devbox: `~/` uses its home directory, and relative paths use the
-config file's directory. A laptop-only absolute path such as `/Users/rowan/...` will not work on
-Linux. Extension files and their dependencies must already exist on the devbox. Update those
-checkouts separately; editing an extension only on the laptop does not update the phone.
+config file's directory. A laptop-only absolute path will not work on Linux. Extension files and
+their dependencies must already exist on the devbox. Adapters must not import pi-remote source
+files; use public Pi display packages and declare the small
+[`getRemoteWidget` type locally](../README.md#read-remote-widgets-in-a-local-adapter) if needed.
+Update display dependencies separately; editing an extension only on the laptop does not update the phone.
 The web client does not use `host` or `cwd` from the config to select another server or session.
 
 Themes and Pi display preferences (`hideThinkingBlock`, `doubleEscapeAction`, and the theme
@@ -249,8 +280,9 @@ into the Unix listener. It checks pairing, local painting, prompts, work while d
 reconnect/reload, and no prompt replay. It never accesses real sessions or model credentials.
 `npm run test:presentation` checks server-configured static/dynamic display adapters and light/dark page
 colors in Chromium and WebKit. After building, run
-`node --import tsx test/smoke/presentation-browser.ts --real` on a machine with the example
-adapter's display dependencies and gruvbox themes to check the real Rowan presentation.
+`node --import tsx test/smoke/presentation-browser.ts --real /path/to/my-ui.ts` on a machine with
+your trusted Rowan adapter's display dependencies and gruvbox themes to check its real presentation.
+The real-adapter smoke requires the explicit path; it has no repository default.
 `npm run test:push` injects real Chromium service-worker push events through the browser debugging
 protocol and checks displayed notification requests and offline-shell behavior. This is not external
 Web Push or APNs delivery.
