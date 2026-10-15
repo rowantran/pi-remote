@@ -7,9 +7,8 @@ type Hello = HelloResult;
 type Outcome = RestartDaemonResult;
 export interface RestartResult { before: Hello; after: Hello; reopened: SlotInfo[]; slots: SlotInfo[] }
 export interface RestartOptions {
+  /** Interrupt busy slots instead of waiting for them. */
   force?: boolean;
-  /** Retry while slots are busy instead of refusing. */
-  wait?: boolean;
   log?: (line: string) => void;
   pollMs?: number;
   reconnectTimeoutMs?: number;
@@ -21,7 +20,8 @@ export const releaseName = (release?: string) => release ? basename(release) : '
 
 /** Ask the daemon to exit so the installed release replaces it, then connect until a new
  * daemon answers. The daemon decides atomically whether every slot is ready; this client
- * only retries that question (--wait) and never stops a slot itself. */
+ * retries that question until it accepts and never stops a slot itself. A refusal locks
+ * nothing, so interrupting the wait leaves the old daemon running unchanged. */
 export async function restartDaemon(connect: () => Promise<RemoteConnection>, options: RestartOptions = {}): Promise<RestartResult> {
   const log = options.log ?? (() => {});
   const connection = await connect();
@@ -37,8 +37,7 @@ export async function restartDaemon(connect: () => Promise<RemoteConnection>, op
       }
       if (outcome.accepted) break;
       const reasons = outcome.blocked.map(({ slot, reason }) => `${label(slot)}: ${reason}`).join('; ') || outcome.reason || 'Daemon is not ready';
-      if (!options.wait) throw new Error(`Daemon not restarted. ${reasons}. Use --wait to restart when idle, or --force to interrupt busy slots.`);
-      if (reasons !== waiting) log(`Waiting: ${reasons}`);
+      if (reasons !== waiting) log(`Waiting: ${reasons}${waiting ? '' : '. Press Ctrl-C to stop waiting, or use --force to interrupt busy slots.'}`);
       waiting = reasons;
       await pause(options.pollMs ?? 2000);
     }

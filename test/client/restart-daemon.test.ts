@@ -24,12 +24,7 @@ const old = (outcomes: RecordValue[]) => (method: string, params: RecordValue) =
   throw new Error(`unexpected ${method}`);
 };
 
-test('refuses without --wait and names the busy slots', async () => {
-  const { connect } = daemons(old([{ accepted: false, blocked: [{ slot: slot('a', 2), reason: 'Remote Pi is busy.' }], reopen: [] }]));
-  await assert.rejects(restartDaemon(connect), /slot 2: Remote Pi is busy\..*--wait.*--force/);
-});
-
-test('--wait retries until the daemon accepts, then connects until a new daemon answers', async () => {
+test('waits by default until the daemon accepts, then connects until a new daemon answers', async () => {
   const busy = { accepted: false, blocked: [{ slot: slot('a', 2), reason: 'busy' }], reopen: [] };
   const lines: string[] = [];
   const { connect, calls } = daemons(
@@ -38,29 +33,34 @@ test('--wait retries until the daemon accepts, then connects until a new daemon 
     method => method === 'hello' ? { pid: 1 } : [],
     method => method === 'hello' ? { pid: 2, release: '/r/releases/new' } : [slot('a', 2), slot('b', 3)],
   );
-  const result = await restartDaemon(connect, { wait: true, pollMs: 1, log: line => lines.push(line) });
+  const result = await restartDaemon(connect, { pollMs: 1, log: line => lines.push(line) });
   assert.equal(result.before.pid, 1); assert.equal(result.after.pid, 2);
   assert.deepEqual(result.reopened.map(slot => slot.id), ['a']);
   assert.equal(calls.filter(call => call === 'restart_daemon').length, 3);
-  assert.equal(lines.filter(line => line.startsWith('Waiting')).length, 1, 'Repeated identical reasons are logged once');
+  assert.deepEqual(lines.filter(line => line.startsWith('Waiting')),
+    ['Waiting: slot 2: busy. Press Ctrl-C to stop waiting, or use --force to interrupt busy slots.'],
+    'Repeated identical reasons are logged once');
   assert.match(lines.at(-1)!, /Daemon 1 \(old\) is stopping; reopening slot 2/);
 });
 
-test('--wait retries daemon-level creation blockers before any live slot exists', async () => {
+test('waits for daemon-level creation blockers before any live slot exists, and logs each new reason once', async () => {
   const reason = 'Slot creation is in progress; wait for its allocated ID';
   const lines: string[] = [];
   const { connect, calls } = daemons(
     old([
       { accepted: false, blocked: [], reopen: [], reason },
       { accepted: false, blocked: [], reopen: [], reason },
+      { accepted: false, blocked: [{ slot: slot('created', 1), reason: 'busy' }], reopen: [] },
       { accepted: true, blocked: [], reopen: [slot('created', 1)] },
     ]),
     method => method === 'hello' ? { pid: 2 } : [slot('created', 1)],
   );
-  const result = await restartDaemon(connect, { wait: true, pollMs: 1, log: line => lines.push(line) });
-  assert.equal(calls.filter(call => call === 'restart_daemon').length, 3);
+  const result = await restartDaemon(connect, { pollMs: 1, log: line => lines.push(line) });
+  assert.equal(calls.filter(call => call === 'restart_daemon').length, 4);
   assert.deepEqual(result.reopened.map(slot => slot.id), ['created']);
-  assert.deepEqual(lines.filter(line => line.startsWith('Waiting')), [`Waiting: ${reason}`]);
+  assert.deepEqual(lines.filter(line => line.startsWith('Waiting')),
+    [`Waiting: ${reason}. Press Ctrl-C to stop waiting, or use --force to interrupt busy slots.`, 'Waiting: slot 1: busy'],
+    'The Ctrl-C hint appears only on the first waiting line');
 });
 
 test('explains the one-time manual step for daemons without restart_daemon', async () => {

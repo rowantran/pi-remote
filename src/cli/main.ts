@@ -22,10 +22,10 @@ Everyday commands:
   pi-remote ls [--host HOST] [--all] [--json]
   pi-remote attach [--host HOST] [SLOT]
   pi-remote kill [--host HOST] SLOT
-  pi-remote restart-daemon [--host HOST] [--wait | --force]
+  pi-remote restart-daemon [--host HOST] [--force]
     Restart the remote daemon on the installed release. Every running slot is
-    reopened from its session file with the same number, like /reload. Refuses
-    while a slot is busy; --wait retries until idle, --force interrupts.
+    reopened from its session file with the same number, like /reload. Waits
+    until no slot is busy; --force interrupts busy slots instead.
   pi-remote completion fish|zsh|bash
   pi-remote serve --origin HTTPS_URL --allow-user TAILSCALE_LOGIN [--ui-config PATH]
     Serve the browser client through a private Unix socket and Tailscale Serve.
@@ -52,7 +52,6 @@ Options:
   --local              No SSH; run against a daemon on this machine
   --json               Machine-readable list/create output
   --no-attach          Create a slot and print its ID without opening the TUI
-  --wait               restart-daemon: wait until no slot is busy
   --force              restart-daemon: interrupt busy slots
   --ui-extension PATH  Load a local presentation adapter (repeatable)
   --ui-config PATH     Alternate UI config (does not change host/cwd defaults)
@@ -225,8 +224,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   if (!local && !host) throw new Error(`No host. Use --host HOST, set PI_REMOTE_HOST, add {"host": "HOST"} to ${configPath()}, or use --local.`);
   const factory = () => options.flags.has('--local') ? connectCompatibleLocal(stateDir) : connectCompatibleSsh({ host: host!, remoteBin: options.values.get('--remote-bin'), stateDir });
   if (command === 'restart-daemon') {
-    if (options.flags.has('--wait') && options.flags.has('--force')) throw new Error('Use --wait or --force, not both.');
-    const result = await restartDaemon(factory, { force: options.flags.has('--force'), wait: options.flags.has('--wait'), log: line => console.error(line) });
+    const result = await restartDaemon(factory, { force: options.flags.has('--force'), log: line => console.error(line) });
     console.log(`Daemon restarted: ${result.before.pid} (${releaseName(result.before.release)}) -> ${result.after.pid} (${releaseName(result.after.release)})`);
     const active = numberSlots(result.slots).filter(slot => slot.status !== 'exited');
     console.log(formatSlotList(active, result.slots.length - active.length));

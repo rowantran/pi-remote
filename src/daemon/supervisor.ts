@@ -643,7 +643,7 @@ export class Supervisor {
     if (this.stopping) throw new Error('Daemon is shutting down');
     const live = () => [...this.slots.values()].filter(slot => slot.status !== 'exited' && slot.process);
     const creationReason = () => this.creatingRequests ? 'Slot creation is in progress; wait for its allocated ID' : undefined;
-    // Read fresh state without locking slots, so polling with --wait never rejects a prompt.
+    // Read fresh state without locking slots, so a waiting restart-daemon never rejects a prompt.
     const unsure = new Map<Slot, string>();
     await Promise.all(live().map(async slot => {
       if (creationReason() || this.transitionBlocker(slot)) return;
