@@ -69,7 +69,7 @@ export function activitySource(event: RecordValue): ActivitySource | undefined {
       const message: ActivityMessage = { role: raw.role };
       if (raw.role === 'assistant') {
         if (typeof raw.stopReason === 'string') message.stopReason = raw.stopReason;
-        // Preserve an empty content array: it is meaningful to the background-wait predicate.
+        // Keep tool-call order, but never forward text, thinking, or arguments.
         if (Array.isArray(raw.content)) message.content = raw.content.filter((block: any) => block?.type === 'toolCall'
           && typeof block.name === 'string' && typeof block.id === 'string').map((block: any) => ({ type: 'toolCall', name: block.name, id: block.id }));
       } else if (raw.role === 'toolResult') {
@@ -82,16 +82,23 @@ export function activitySource(event: RecordValue): ActivitySource | undefined {
   }
 }
 
-/** Call only at a completed-run checkpoint, with messages scoped to that run.
- * Works equally with complete TUI messages and the activity stream's redacted messages.
+/** At normal settlement, suppress completion only for a successful last background_wait.
+ * The caller scopes messages to the current run; a delivered user message starts a new
+ * decision within that run. Notices, reply text, and tool-result order do not matter.
+ * Accepts both complete TUI messages and the activity stream's redacted messages.
  */
 export function waitingOnBackground(messages: readonly RecordValue[] | readonly ActivityMessage[]): boolean {
-  const [call, result, reply] = messages.slice(-3);
-  if (call?.role !== 'assistant' || call.stopReason !== 'toolUse'
-    || result?.role !== 'toolResult' || result.toolName !== 'background_wait' || reply?.role !== 'assistant') return false;
-  const calls = Array.isArray(call.content) ? call.content.filter((block: RecordValue) => block.type === 'toolCall') : [];
-  return calls.length === 1 && calls[0].name === 'background_wait' && typeof calls[0].id === 'string' && calls[0].id.length > 0
-    && result.toolCallId === calls[0].id && result.isError === false
-    && reply.stopReason === 'stop' && Array.isArray(reply.content)
-    && !reply.content.some((block: RecordValue) => block.type === 'toolCall');
+  let lastCall: RecordValue | undefined;
+  let succeeded = false;
+  for (const message of messages) {
+    if (message.role === 'user') { lastCall = undefined; succeeded = false; }
+    if (message.role === 'assistant' && Array.isArray(message.content)) {
+      const call = message.content.findLast((block: RecordValue) => block.type === 'toolCall');
+      if (call) { lastCall = call; succeeded = false; }
+    }
+    if (lastCall && message.role === 'toolResult' && message.toolCallId === lastCall.id) {
+      succeeded = message.toolName === 'background_wait' && message.isError === false;
+    }
+  }
+  return lastCall?.name === 'background_wait' && typeof lastCall.id === 'string' && lastCall.id.length > 0 && succeeded;
 }

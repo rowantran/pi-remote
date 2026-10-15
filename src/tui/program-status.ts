@@ -3,7 +3,7 @@ import type { Terminal } from '@earendil-works/pi-tui';
 import type { RecordValue, Snapshot } from '../protocol/types.js';
 import { DIALOG_METHODS } from './view.js';
 import { messageKey } from '../protocol/live.js';
-import { waitingOnBackground } from '../protocol/notification-stream.js';
+import { activitySource, waitingOnBackground, type ActivityMessage } from '../protocol/notification-stream.js';
 export { waitingOnBackground } from '../protocol/notification-stream.js';
 
 const WAITING_MESSAGE = 'Waiting on background task';
@@ -41,6 +41,25 @@ function activityMessages(snapshot: Snapshot): RecordValue[] {
   for (const message of messages) merged.set(messageKey(message), message);
   return [...merged.values()];
 }
+/** Saved history has no run-start records. Recover only the latest completion
+ * segment, not a wait from an earlier run missed during a disconnect. In a busy
+ * snapshot, messages after a completed reply may already belong to a new run. */
+function latestCompletionMessages(messages: RecordValue[], busy = false): RecordValue[] {
+  const last = busy && messages.at(-1)?.role !== 'assistant' ? messages.length
+    : messages.findLastIndex(message => message.role === 'assistant');
+  const previous = messages.findLastIndex((message, index) => index < last && message.role === 'assistant'
+    && message.stopReason !== 'toolUse' && message.stopReason !== 'pending');
+  return messages.slice(previous + 1);
+}
+
+/** An observed run's checkpoint takes precedence over inferred history boundaries. */
+function messagesAfter(messages: RecordValue[], checkpoint: string | undefined): RecordValue[] {
+  if (checkpoint === undefined) return messages;
+  const index = messages.findLastIndex(message => message.role === 'assistant' && assistantIdentity(message) === checkpoint);
+  // If compaction removed the checkpoint, an old call is not proof of a new wait.
+  return index < 0 ? [] : messages.slice(index + 1);
+}
+
 function lastAssistant(snapshot: Snapshot): RecordValue | undefined {
   return activityMessages(snapshot).findLast(message => message.role === 'assistant');
 }
@@ -67,9 +86,11 @@ export class ProgramActivity {
   private settledDuringAbort = false;
   private recoveredCompletion = false;
   private runAssistant?: string;
+  private runHistoryKnown = true;
   /** Live busy changes are not completion; only agent_settled or an idle snapshot is. */
   private agentActive = false;
-  private runTail: RecordValue[] = [];
+  // Keep only lifecycle metadata, not tool output, text, or thinking.
+  private runMessages: ActivityMessage[] = [];
   private runError = false;
   private awaitingAgent = false;
   private exited = false;
@@ -80,16 +101,18 @@ export class ProgramActivity {
   reset(snapshot: Snapshot, recoverWaiting = false): void {
     this.operation++;
     this.agentActive = snapshot.live.busy;
-    this.runTail = []; this.runError = false;
+    this.runMessages = []; this.runError = false;
     this.awaitingAgent = false;
     this.exited = false;
     this.localAbort = false; this.settledDuringAbort = false; this.recoveredCompletion = false;
     this.sessionId = snapshot.state.sessionId;
     this.active = snapshot.live.busy || snapshot.live.compacting;
     this.outcome = { state: this.active ? 'done'
-      : recoverWaiting && snapshot.historyComplete !== false && waitingOnBackground(activityMessages(snapshot)) ? 'waiting' : 'idle' };
+      : recoverWaiting && snapshot.historyComplete !== false && messageOutcome(lastAssistant(snapshot))?.state === 'done'
+        && waitingOnBackground(latestCompletionMessages(activityMessages(snapshot))) ? 'waiting' : 'idle' };
     this.cancelled = false;
     this.runAssistant = assistantIdentity(lastAssistant(snapshot));
+    this.runHistoryKnown = snapshot.historyComplete !== false;
     this.dialogs = new Set(snapshot.ui.filter(record => DIALOG_METHODS.has(record.method)).map(record => record.id));
   }
 
@@ -98,8 +121,9 @@ export class ProgramActivity {
     switch (event.type) {
       case 'agent_start': case 'compaction_start':
         if (!this.active || (event.type === 'agent_start' && !this.agentActive)) {
-          this.runTail = []; this.runError = false;
+          this.runMessages = []; this.runError = false;
           this.runAssistant = assistantIdentity(lastAssistant(snapshot));
+          this.runHistoryKnown = snapshot.historyComplete !== false;
         }
         if (event.type === 'compaction_start' && event.reason === 'overflow') this.omitFailedReply();
         if (event.type === 'agent_start') this.agentActive = true;
@@ -115,7 +139,11 @@ export class ProgramActivity {
         this.outcome = { state: 'done' };
         break;
       case 'message_end': {
-        if (this.agentActive && event.message) this.runTail = [...this.runTail.slice(-2), event.message];
+        const source = activitySource(event);
+        if (this.agentActive && source?.type === 'message_end') {
+          if (source.message.role === 'user') this.runMessages = [];
+          this.runMessages.push(source.message);
+        }
         const outcome = messageOutcome(event.message);
         if (this.active && outcome) {
           this.outcome = outcome;
@@ -137,7 +165,7 @@ export class ProgramActivity {
         break;
       case 'auto_retry_end':
         if (this.active && event.success === false) {
-          this.runTail = [];
+          this.runMessages = [];
           this.outcome = event.finalError === 'Retry cancelled' ? { state: 'idle' } : { state: 'error', message: event.finalError };
         }
         break;
@@ -146,7 +174,7 @@ export class ProgramActivity {
         // Its following agent_start, not this end event, owns the eventual completion.
         if (event.aborted) this.outcome = { state: 'idle' };
         else if (event.errorMessage) this.outcome = { state: 'error', message: event.errorMessage };
-        if (event.aborted || event.errorMessage) this.runTail = [];
+        if (event.aborted || event.errorMessage) this.runMessages = [];
         break;
       case 'agent_settled':
         this.awaitingAgent = false;
@@ -154,7 +182,9 @@ export class ProgramActivity {
         if (event.aborted === true) {
           this.cancelled = true;
           this.outcome = { state: 'idle' };
-        } else if (this.agentActive && !this.runError && this.outcome.state === 'done' && waitingOnBackground(this.runTail)) {
+        } else if (event.error === true) {
+          this.outcome = { state: 'error', message: event.errorMessage ?? this.outcome.message };
+        } else if (this.agentActive && !this.runError && this.outcome.state === 'done' && waitingOnBackground(this.runMessages)) {
           this.outcome = { state: 'waiting' };
         }
         this.agentActive = false;
@@ -170,9 +200,9 @@ export class ProgramActivity {
   }
 
   private omitFailedReply(): void {
-    const last = this.runTail.at(-1);
+    const last = this.runMessages.at(-1);
     if (last?.role === 'assistant' && (last.stopReason === 'error' || last.stopReason === 'length')) {
-      this.runTail.pop();
+      this.runMessages.pop();
       this.runError = false;
     }
   }
@@ -215,6 +245,15 @@ export class ProgramActivity {
     if (options.snapshot && this.awaitingAgent && messageOutcome(last) && assistantIdentity(last) !== this.runAssistant) this.awaitingAgent = false;
     const busy = snapshot.live.busy || snapshot.live.compacting || this.awaitingAgent || this.agentActive;
     let settled = this.active && !busy;
+    if (options.snapshot && this.active && agentRun && snapshot.live.busy) {
+      // A reconnect can miss later tool calls or user input. Replace, rather than
+      // append to, the observed metadata so an earlier wait cannot silence them.
+      this.runMessages = this.runHistoryKnown && snapshot.historyComplete !== false
+        ? latestCompletionMessages(messagesAfter(messages, this.runAssistant), true).flatMap(message => {
+          const source = activitySource({ type: 'message_end', message });
+          return source?.type === 'message_end' ? [source.message] : [];
+        }) : [];
+    }
     if (snapshot.slot.status === 'exited') {
       if (this.outcome.state === 'waiting') this.outcome = { state: 'idle' };
       if (snapshot.slot.error) this.outcome = { state: 'error', message: snapshot.slot.error };
@@ -223,7 +262,9 @@ export class ProgramActivity {
     } else if (options.snapshot && !busy && this.outcome.state === 'waiting'
       && assistantIdentity(last) !== this.runAssistant && messageOutcome(last)) {
       // An idle checkpoint can recover a whole wake-up run missed while disconnected.
-      this.outcome = snapshot.historyComplete !== false && waitingOnBackground(messages) ? { state: 'waiting' } : messageOutcome(last)!;
+      const outcome = messageOutcome(last)!;
+      this.outcome = outcome.state === 'done' && this.runHistoryKnown && snapshot.historyComplete !== false
+        && waitingOnBackground(latestCompletionMessages(messagesAfter(messages, this.runAssistant))) ? { state: 'waiting' } : outcome;
       this.cancelled = this.outcome.state === 'idle';
       this.runAssistant = assistantIdentity(last);
       settled = true;
@@ -237,25 +278,26 @@ export class ProgramActivity {
         // Never mistake a previous run's saved error/abort for this run's outcome.
         this.outcome = snapshot.slot.status === 'exited' && snapshot.slot.error ? { state: 'error', message: snapshot.slot.error }
           : assistantIdentity(last) !== this.runAssistant ? messageOutcome(last) ?? this.outcome : this.outcome;
-        // Both assistants must be new to this operation. An old wait followed by an empty,
-        // partial, or standalone-compaction run must not suppress that run's completion.
-        if (agentRun && snapshot.historyComplete !== false && this.outcome.state === 'done' && waitingOnBackground(messages)
-          && assistantIdentity(messages.at(-3)) !== this.runAssistant && assistantIdentity(last) !== this.runAssistant) {
+        // Never reuse a tool call from before this operation's starting checkpoint.
+        if (agentRun && this.runHistoryKnown && !this.runError && snapshot.historyComplete !== false && this.outcome.state === 'done'
+          && waitingOnBackground(latestCompletionMessages(messagesAfter(messages, this.runAssistant)))) {
           this.outcome = { state: 'waiting' };
         }
         if (this.outcome.state === 'idle') this.cancelled = true;
       }
       this.active = false;
       this.runAssistant = assistantIdentity(lastAssistant(snapshot));
+      this.runHistoryKnown = snapshot.historyComplete !== false;
       if (this.localAbort) this.settledDuringAbort = true;
     } else if (!this.active && busy) {
       this.operation++;
       this.agentActive = snapshot.live.busy;
-      this.runTail = []; this.runError = false;
+      this.runMessages = []; this.runError = false;
       this.localAbort = false; this.settledDuringAbort = false; this.recoveredCompletion = false;
       this.active = true;
       this.cancelled = false;
       this.runAssistant = assistantIdentity(lastAssistant(snapshot));
+      this.runHistoryKnown = snapshot.historyComplete !== false;
       this.outcome = { state: 'done' };
     }
     let bells = 0;

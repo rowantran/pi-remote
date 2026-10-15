@@ -113,7 +113,9 @@ test('extension statuses are ordinary footer data and never imply waiting', asyn
   await flush();
 });
 
-test('waiting requires the exact three-message tail of the completed run', async t => {
+test('waiting follows the last successful tool call since the latest user message', async t => {
+  const waiting = new Set(['valid wait', 'parallel sibling before wait', 'call did not finish for tools',
+    'extra assistant step', 'injected custom', 'trailing custom', 'final error', 'final abort', 'partial run']);
   const cases: [string, (messages: RecordValue[]) => void][] = [
     ['valid wait', () => {}],
     ['parallel sibling before wait', messages => messages[0].content.unshift({ type: 'toolCall', id: 'other', name: 'bash' })],
@@ -148,16 +150,161 @@ test('waiting requires the exact three-message tail of the completed run', async
   for (const [name, mutate] of cases) await t.test(name, async t => {
     const { terminal, send } = launch(t);
     const messages = waitMessages(); mutate(messages);
-    assert.equal(waitingOnBackground(messages), name === 'valid wait');
+    assert.equal(waitingOnBackground(messages), waiting.has(name));
     send('agent_start');
     for (const message of messages) send('message_end', { message });
     send('agent_end', { messages });
     assert.equal(terminal.last?.state, 'working'); assert.notEqual(terminal.last?.message, WAITING_MESSAGE);
     assert.equal(terminal.bells, 0);
     send('agent_settled');
-    const state = name === 'valid wait' ? 'working' : name === 'final error' ? 'error' : name === 'final abort' ? 'idle' : 'done';
+    const state = name === 'final error' ? 'error' : name === 'final abort' ? 'idle' : waiting.has(name) ? 'working' : 'done';
     assert.equal(terminal.last?.state, state);
     assert.equal(terminal.bells, state === 'done' || state === 'error' ? 1 : 0);
+    await flush();
+  });
+});
+
+test('wait decisions survive notices and reply text on events, snapshots, and reconnects', async t => {
+  for (const source of ['events', 'snapshot', 'reconnect']) for (const input of ['none', 'steering', 'follow-up', 'wait-again']) {
+    await t.test(`${source}/${input}`, async t => {
+      const { terminal, connection, send, ui } = launch(t);
+      const [call, result, reply] = waitMessages();
+      const messages = [call,
+        { role: 'custom', timestamp: 4, customType: 'background', content: 'Background check-in' }, result,
+        ...Array.from({ length: 5 }, (_, i) => ({ role: 'custom', timestamp: 10 + i, customType: 'background', content: 'Still running' })),
+        reply];
+      if (input !== 'none') {
+        messages.push({ role: 'user', timestamp: 20, content: input });
+        if (input === 'wait-again') messages.push(...waitMessages(30));
+        else messages.push({ role: 'assistant', timestamp: 21, stopReason: 'stop', content: [{ type: 'text', text: 'Answer' }] });
+      }
+      send('agent_start');
+      if (source === 'events') {
+        for (const message of messages) {
+          if (message.role === 'user' && input === 'follow-up') send('agent_end');
+          send('message_end', { message });
+          if (message.role === 'user' && input === 'follow-up') send('agent_start');
+        }
+        send('agent_end', { messages }); send('agent_settled');
+      } else {
+        const idle = structuredClone(ui.view.snapshot); idle.seq += 10; idle.live.busy = false;
+        idle.live.messages.push(...messages);
+        if (source === 'reconnect') connection.reconnected?.(idle);
+        else { connection.current = () => idle; send('remote_refresh'); await flush(); }
+      }
+      const waiting = input === 'none' || input === 'wait-again';
+      assert.equal(terminal.last?.state, waiting ? 'working' : 'done');
+      assert.equal(terminal.bells, waiting ? 0 : 1);
+      await flush(); assert.equal(terminal.bells, waiting ? 0 : 1);
+    });
+  }
+});
+
+test('idle attach does not recover an old wait across a silent wake-up or user input', async t => {
+  for (const ending of ['notice', 'silent-wake-up', 'user-reply']) await t.test(ending, async t => {
+    const initial = snapshot(); initial.live.messages = waitMessages();
+    initial.live.messages.push({ role: 'custom', timestamp: 10, customType: 'background', content: 'Background completed' });
+    if (ending === 'user-reply') initial.live.messages.push({ role: 'user', timestamp: 11, content: 'A new question' });
+    if (ending !== 'notice') initial.live.messages.push({ role: 'assistant', timestamp: 12, stopReason: 'stop', content: [] });
+    const { terminal } = launch(t, initial);
+    assert.equal(terminal.last?.state, ending === 'notice' ? 'working' : 'idle');
+    assert.equal(terminal.bells, 0);
+  });
+});
+
+test('saved waits cannot cross failed completions or hide an error or cancellation', async t => {
+  for (const stopReason of ['stop', 'length', 'error', 'aborted']) await t.test(stopReason, async t => {
+    const initial = snapshot(); initial.live.messages = waitMessages();
+    initial.live.messages.at(-1)!.stopReason = stopReason;
+    initial.live.messages.push({ role: 'custom', timestamp: 10, content: 'Wake-up' },
+      { role: 'assistant', timestamp: 11, stopReason: 'stop', content: [] });
+    const { terminal } = launch(t, initial);
+    assert.equal(terminal.last?.state, 'idle'); assert.equal(terminal.bells, 0);
+  });
+  for (const stopReason of ['error', 'aborted']) for (const mode of ['attach', 'missed wake-up']) {
+    await t.test(`${mode}/${stopReason}`, async t => {
+      const messages = waitMessages(30); messages.at(-1)!.stopReason = stopReason;
+      const initial = snapshot(); initial.live.messages = mode === 'attach' ? messages : waitMessages();
+      const { terminal, connection, ui } = launch(t, initial);
+      if (mode === 'attach') {
+        assert.equal(terminal.last?.state, 'idle'); assert.equal(terminal.bells, 0);
+      } else {
+        const idle = structuredClone(ui.view.snapshot); idle.seq += 10; idle.live.messages.push(...messages);
+        connection.reconnected?.(idle); connection.reconnected?.(idle);
+        assert.equal(terminal.last?.state, stopReason === 'error' ? 'error' : 'idle');
+        assert.equal(terminal.bells, stopReason === 'error' ? 1 : 0);
+      }
+    });
+  }
+});
+
+test('busy snapshots replace wait metadata missed during a disconnect', async t => {
+  for (const missed of ['later tool', 'user', 'new wait', 'incomplete history']) await t.test(missed, async t => {
+    const { terminal, connection, send, wait, ui } = launch(t);
+    send('agent_start'); wait();
+    const busy = structuredClone(ui.view.snapshot); busy.seq += 10;
+    if (missed === 'later tool') busy.live.messages.push(
+      { role: 'assistant', timestamp: 20, stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'later', name: 'read' }] },
+      { role: 'toolResult', timestamp: 21, toolName: 'read', toolCallId: 'later', isError: false, content: [] });
+    if (missed === 'user') busy.live.messages.push({ role: 'user', timestamp: 20, content: 'New question' });
+    if (missed === 'new wait') busy.live.messages.push(...waitMessages(30));
+    if (missed === 'incomplete history') busy.historyComplete = false;
+    connection.reconnected?.(busy);
+    // These direct events follow the new authoritative sequence, not launch's old counter.
+    let seq = busy.seq;
+    connection.listener?.({ type: 'event', slotId: 'slot', seq: ++seq, event: { type: 'message_end',
+      message: { role: 'assistant', timestamp: 50, stopReason: 'stop', content: [] } } });
+    connection.listener?.({ type: 'event', slotId: 'slot', seq: ++seq, event: { type: 'agent_settled' } });
+    assert.equal(terminal.last?.state, missed === 'new wait' ? 'working' : 'done');
+    assert.equal(terminal.bells, missed === 'new wait' ? 0 : 1);
+    await flush(); assert.equal(terminal.bells, missed === 'new wait' ? 0 : 1);
+  });
+});
+
+test('snapshots covering several runs cannot reuse a missed wait for a later no-tool wake-up', async t => {
+  for (const mode of ['observed run', 'already waiting', 'busy reconnect']) await t.test(mode, async t => {
+    const { terminal, connection, send, wait, ui } = launch(t);
+    send('agent_start');
+    if (mode === 'already waiting') { wait(); send('agent_settled'); await flush(); }
+    const cut = structuredClone(ui.view.snapshot); cut.seq += 20;
+    cut.live.messages.push(...waitMessages(5000), { role: 'custom', timestamp: 5010, content: 'Wake-up' });
+    cut.live.busy = mode === 'busy reconnect';
+    if (mode !== 'busy reconnect') cut.live.messages.push({ role: 'assistant', timestamp: 5020, stopReason: 'stop', content: [] });
+    connection.reconnected?.(cut);
+    if (mode === 'busy reconnect') {
+      connection.listener?.({ type: 'event', slotId: 'slot', seq: cut.seq + 1, event: { type: 'message_end',
+        message: { role: 'assistant', timestamp: 5020, stopReason: 'stop', content: [] } } });
+      connection.listener?.({ type: 'event', slotId: 'slot', seq: cut.seq + 2, event: { type: 'agent_settled' } });
+    }
+    assert.equal(terminal.last?.state, 'done'); assert.equal(terminal.bells, 1);
+    const repeat = structuredClone(ui.view.snapshot); repeat.seq += 10; repeat.live.busy = false;
+    connection.reconnected?.(repeat); connection.reconnected?.(repeat);
+    assert.equal(terminal.bells, 1); await flush(); assert.equal(terminal.bells, 1);
+  });
+});
+
+test('unknown or removed starting checkpoints cannot recover an old wait from history', async t => {
+  for (const checkpoint of ['unknown', 'compacted']) await t.test(checkpoint, async t => {
+    const initial = snapshot(true); initial.historyComplete = checkpoint === 'unknown' ? false : true;
+    if (checkpoint === 'compacted') initial.live.messages.push({ role: 'assistant', timestamp: 1, stopReason: 'stop', content: [] });
+    const { terminal, connection } = launch(t, initial);
+    const idle = snapshot(false, 20); idle.historyComplete = true;
+    idle.live.messages = waitMessages(30);
+    connection.reconnected?.(idle); connection.reconnected?.(idle);
+    assert.equal(terminal.last?.state, 'done'); assert.equal(terminal.bells, 1);
+  });
+});
+
+test('a successful last wait needs no final reply and ignores sibling result order', async t => {
+  for (const reverseResults of [false, true]) await t.test(String(reverseResults), async t => {
+    const { terminal, send } = launch(t);
+    const [call, result] = waitMessages();
+    call.content.unshift({ type: 'toolCall', id: 'other', name: 'bash', arguments: {} });
+    const other = { role: 'toolResult', timestamp: 10, toolCallId: 'other', toolName: 'bash', isError: false, content: [] };
+    send('agent_start');
+    for (const message of [call, ...(reverseResults ? [result, other] : [other, result])]) send('message_end', { message });
+    send('agent_settled');
+    assert.equal(terminal.last?.state, 'working'); assert.equal(terminal.bells, 0);
     await flush();
   });
 });
@@ -220,8 +367,8 @@ test('errors override waiting; successful retry recovers; abort signals settle i
       send('message_end', { message: { role: 'assistant', timestamp: 2, content: [], stopReason: 'stop' } });
     }
     send('agent_settled');
-    assert.equal(terminal.last?.state, kind === 'error' ? 'error' : kind === 'retry-success' ? 'done' : 'idle');
-    assert.equal(terminal.bells, kind === 'error' || kind === 'retry-success' ? 1 : 0);
+    assert.equal(terminal.last?.state, kind === 'error' ? 'error' : kind === 'retry-success' ? 'working' : 'idle');
+    assert.equal(terminal.bells, kind === 'error' ? 1 : 0);
     await flush();
   });
 });
@@ -526,15 +673,16 @@ test('agent_end messages and incomplete checkpoints do not supply a completed li
 });
 
 test('current-run error and cancellation override an otherwise valid wait tail', async t => {
-  for (const ending of ['retry-error', 'retry-cancelled', 'agent-end-error', 'aborted', 'local-abort']) await t.test(ending, async t => {
+  for (const ending of ['retry-error', 'retry-cancelled', 'agent-end-error', 'settled-error', 'aborted', 'local-abort']) await t.test(ending, async t => {
     const { terminal, send, wait, ui } = launch(t);
     send('agent_start'); wait();
     if (ending === 'retry-error' || ending === 'retry-cancelled') send('auto_retry_end', { success: false, finalError: ending === 'retry-error' ? 'Failure' : 'Retry cancelled' });
     if (ending === 'agent-end-error') send('agent_end', { messages: [{ role: 'assistant', timestamp: 5000, stopReason: 'error', errorMessage: 'Failure', content: [] }] });
     if (ending === 'local-abort') await (ui as any).rpc({ type: 'abort' });
-    send('agent_settled', { aborted: ending === 'aborted' });
-    assert.equal(terminal.last?.state, ending === 'retry-error' || ending === 'agent-end-error' ? 'error' : 'idle');
-    assert.equal(terminal.bells, ending === 'retry-error' || ending === 'agent-end-error' ? 1 : 0);
+    send('agent_settled', { aborted: ending === 'aborted', error: ending === 'settled-error' });
+    const error = ['retry-error', 'agent-end-error', 'settled-error'].includes(ending);
+    assert.equal(terminal.last?.state, error ? 'error' : 'idle');
+    assert.equal(terminal.bells, error ? 1 : 0);
     await flush();
   });
 });
