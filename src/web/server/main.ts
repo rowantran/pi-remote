@@ -80,7 +80,7 @@ export async function serveMain(args: string[]): Promise<void> {
   try {
     // Acquire the exclusive socket before generating keys; a second service instance must
     // never replace the VAPID keys used by an already-running instance.
-    push = await PushService.open({ stateDir, origin: server.origin, devices: server.devices, allowedLogins });
+    push = await PushService.open({ stateDir, origin: server.origin, devices: server.devices, tabs: server.tabs, allowedLogins });
     monitor = await startActivityMonitor({
       connect: async () => {
         const socket = await ensureDaemon(flags.get('--state-dir'));
