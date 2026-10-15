@@ -14,6 +14,7 @@ import { defaultBrowserConfig, type BrowserConfig } from './browser-config.js';
 import { DEVICE_COOKIE, DEVICE_FILE, DeviceStore, deviceCookie, deviceToken, type Device } from './devices.js';
 import { listenPrivate, privateDirectory } from './private-state.js';
 import { ServerPresentation } from './presentation.js';
+import { TabError, TabStore, handleTabsApi } from './tabs.js';
 import { checkTailscale } from './tailscale.js';
 
 export const MAX_WEB_BYTES = MAX_FRAME_BYTES;
@@ -26,6 +27,8 @@ export function defaultStaticDir(moduleUrl = import.meta.url): string {
 interface WebServerContext {
   readonly origin: string;
   readonly devices: DeviceStore;
+  /** Per-device open sessions; push notifications follow these. */
+  readonly tabs: TabStore;
 }
 export interface AuthenticatedContext extends WebServerContext { device: Device; login: string }
 export interface WebServerOptions {
@@ -137,6 +140,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   const socketPath = resolve(options.socketPath ?? join(stateDir, 'web.sock'));
   const devices = new DeviceStore(stateDir, options.now);
   await devices.list(); // validate existing state before serving anything
+  const tabs = await TabStore.open(stateDir, devices);
   const presentation = new ServerPresentation({ uiConfig: options.uiConfig });
   async function readPresentation() {
     try { return await presentation.read(); }
@@ -180,7 +184,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       peer.ws.once('close', () => clearTimeout(timer));
     }
   }
-  const context: WebServerContext = { origin: origin.origin, devices };
+  const context: WebServerContext = { origin: origin.origin, devices, tabs };
   const getDevice = (request: IncomingMessage, login: string) => devices.authenticate(deviceToken(header(request, 'cookie')), login);
   const authenticatedContext = (device: Device, login: string): AuthenticatedContext => ({ ...context, device, login });
 
@@ -250,8 +254,11 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
           response.setHeader('Content-Type', 'text/javascript; charset=utf-8');
           response.setHeader('Content-Length', Buffer.byteLength(current.bundle));
           response.end(current.bundle);
+        } else if (path === '/api/tabs' || path.startsWith('/api/tabs/')) {
+          if (!await handleTabsApi(tabs, request, response, device.id, readJsonBody)) throw new HttpError(404, 'Not found');
         } else if (path === '/api/logout' && request.method === 'POST') {
           await devices.revoke(device.id);
+          await tabs.forget(device.id);
           closeDeviceConnections(device.id);
           response.setHeader('Set-Cookie', `${DEVICE_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0`);
           json(response, 200, { authenticated: false });
@@ -262,7 +269,8 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       else {
         // Never reflect request bodies, codes, tokens, daemon diagnostics, or internal paths.
         response.setHeader('Connection', 'close');
-        json(response, error instanceof HttpError ? error.status : 500, { error: error instanceof HttpError ? error.message : 'Web server request failed' });
+        const known = error instanceof HttpError || error instanceof TabError;
+        json(response, known ? error.status : 500, { error: known ? error.message : 'Web server request failed' });
       }
     }
   }
@@ -383,6 +391,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
         wss.close();
         await new Promise<void>(accept => server.close(() => accept()));
         await cleanupSocket();
+        await tabs.flush();
       })();
       return stopped;
     },

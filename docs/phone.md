@@ -134,7 +134,7 @@ installed app. Do not paste pairing codes into shared logs or commit them.
 ## Code layout
 
 - `src/web/client/`: browser app, native input, offline cache, and browser compatibility shims.
-- `src/web/server/`: private HTTP/WebSocket listener, device pairing, push, and config delivery.
+- `src/web/server/`: private HTTP/WebSocket listener, device pairing, open-session tabs, push, and config delivery.
 - `src/web/build/`: app bundler and isolated presentation-build worker.
 - `src/web/shared/`: web-only worker result types, bounded source-file helpers, and browser-safe module-name normalization. The browser imports only the normalizer; the Node-only file helpers remain server/build code.
 
@@ -206,6 +206,26 @@ browser-side extension load failure also shows a warning and uses the normal dis
 
 ## Phone controls
 
+### Sessions and tabs
+
+The sessions you are interested in on this device appear as **tabs** below the header. Opening a
+session from **Sessions** (or from a notification) adds it as a tab; tap a tab to switch to it. The
+app shows one tab's transcript at a time. Tap **×** to close a tab. This only removes it from this
+device: the session keeps running, and you can open it again from **Sessions**. Tabs whose session
+no longer exists close automatically; a stopped session's tab stays until you close it.
+
+**Notifications follow tabs.** Each device gets notifications only for the sessions open as its tabs.
+Tabs are stored per paired device in private `tabs.json` on the devbox (at most 24 per device), so
+they survive reloads and apply while the app is closed. **Unpair this device** removes its tabs. A
+device paired before tabs existed reopens its last session, which becomes its first tab.
+
+To start a session from the phone, open **Sessions**, enter a directory on the devbox under **New
+session**, and tap **Start session**. This is the same as `pi-remote new --cwd DIRECTORY`: the
+daemon resolves `~` and checks the directory. The field suggests recent directories, directories of
+running sessions, and devbox directory completions. The new session opens as the active tab. The
+request is sent once; if the app cannot confirm the result, refresh the list before trying again
+rather than risk a duplicate session.
+
 The message bar works like a chat app. It is a one-line bar at the bottom of the screen. Tap it to
 open the iOS keyboard; the bar moves up and stays directly above the keyboard. It grows to a few lines
 as you type. The bar is an ordinary native text field, not the terminal's hidden input, so iOS owns
@@ -238,7 +258,7 @@ a device's authorization cannot erase information it already downloaded or copie
 On iOS 16.4 or later:
 
 1. Connect Tailscale, open the HTTPS origin in Safari, and use **Share → Add to Home Screen**.
-2. Open the installed app, pair that installation, and select a session.
+2. Open the installed app, pair that installation, and open a session (it becomes a tab).
 3. In the app menu, tap **Enable notifications** and accept the iOS permission prompt.
 4. Tap **Send test notification**, then verify a real notification with the app backgrounded.
 
@@ -252,7 +272,8 @@ and [WebKit's iPhone guide](https://webkit.org/blog/13878/web-push-for-web-apps-
 
 A lightweight server-side activity monitor observes all slots without attaching transcript clients
 or keeping side slots alive. It sends notifications for completed runs, new blocking questions, and
-busy process exits. Retries and automatic compaction belong to the same run. Aborted runs and
+busy process exits, to each subscribed device that has the session open as a tab. Closing a tab also
+cancels pending retries for that session's notifications. **Send test notification** ignores tabs. Retries and automatic compaction belong to the same run. Aborted runs and
 intentional background waits do not notify. Existing idle state and old questions do not ring at
 startup. Notifications include only a session label and outcome, not transcript text or tool output.
 Session names can still be sensitive on a Lock Screen; configure iOS previews accordingly.

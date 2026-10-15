@@ -16,11 +16,12 @@
 </head>
 <body>
   <header>
-    <button id="slots-button" aria-label="Choose session">Sessions</button>
+    <button id="slots-button" aria-label="Open or start a session">Sessions</button>
     <span id="session-name">Pi Remote</span>
     <span id="status" role="status">Connecting…</span>
     <button id="menu-button" aria-label="More actions">⋯</button>
   </header>
+  <nav id="tabs" aria-label="Open sessions" hidden></nav>
   <p id="notice" role="alert" hidden></p>
   <main id="terminal" aria-label="Session transcript"></main>
   <div id="completions" aria-label="Suggestions" hidden></div>
@@ -48,7 +49,15 @@
   </dialog>
   <dialog id="slots-dialog">
     <h1>Sessions</h1>
+    <p>Open sessions appear as tabs. You get notifications only for open tabs.</p>
     <div id="slot-list"></div>
+    <form id="new-session-form">
+      <h2>New session</h2>
+      <label>Directory on the devbox<input id="new-session-cwd" name="cwd" list="new-session-dirs" required maxlength="4096" placeholder="~/project" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="go"></label>
+      <datalist id="new-session-dirs"></datalist>
+      <p id="new-session-error" role="alert"></p>
+      <button type="submit" id="create-session">Start session</button>
+    </form>
     <button id="refresh-slots">Refresh</button>
     <button id="close-slots">Close</button>
   </dialog>

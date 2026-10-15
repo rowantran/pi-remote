@@ -13,6 +13,7 @@ import { DeviceStore, DEVICE_COOKIE, deviceToken } from '../../src/web/server/de
 import { serveMain } from '../../src/web/server/main.js';
 import { MAX_API_BYTES, MAX_WEB_BYTES, defaultStaticDir, startWebServer, type WebServerOptions } from '../../src/web/server/server.js';
 import { assertNoFunnel } from '../../src/web/server/tailscale.js';
+import { MAX_TABS, TabStore } from '../../src/web/server/tabs.js';
 
 const ORIGIN = 'https://phone.example.ts.net';
 const LOGIN = 'rowan@isara.io';
@@ -233,6 +234,42 @@ test('own logout revokes a device and clears its secure cookie', async t => {
   assert.equal(result.status, 200);
   assert.match(result.headers['set-cookie']![0], /Secure; HttpOnly; SameSite=Strict; Max-Age=0/);
   assert.equal((await f.request('/api/status', { headers: { Cookie: p.cookie } })).json.authenticated, false);
+});
+
+test('open session tabs are per device, persistent, bounded, and removed by logout without touching the daemon', async t => {
+  const f = await fixture(t);
+  const phone = await f.pair('Phone'), tablet = await f.pair('Tablet');
+  const ids = Array.from({ length: MAX_TABS + 1 }, (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`);
+  const tab = (cookie: string, action: 'open' | 'close', slotId: unknown) =>
+    f.request(`/api/tabs/${action}`, { method: 'POST', headers: { Cookie: cookie, Origin: ORIGIN }, body: { slotId } });
+  const list = async (cookie: string) => (await f.request('/api/tabs', { headers: { Cookie: cookie } })).json.slotIds;
+  assert.equal((await f.request('/api/tabs')).status, 401);
+  assert.equal((await f.request('/api/tabs/open', { method: 'POST', headers: { Cookie: phone.cookie }, body: { slotId: ids[0] } })).status, 403, 'mutations need the exact Origin');
+  assert.equal((await tab(phone.cookie, 'open', '../not-a-slot')).status, 400);
+  assert.deepEqual((await tab(phone.cookie, 'open', ids[0].toUpperCase())).json.slotIds, [ids[0]]);
+  assert.deepEqual((await tab(phone.cookie, 'open', ids[1])).json.slotIds, [ids[0], ids[1]]);
+  assert.deepEqual((await tab(phone.cookie, 'open', ids[0])).json.slotIds, [ids[0], ids[1]], 'opening an open tab keeps its position');
+  assert.deepEqual(await list(tablet.cookie), []);
+  assert.deepEqual((await tab(phone.cookie, 'close', ids[0])).json.slotIds, [ids[1]]);
+  for (const id of ids.slice(1, MAX_TABS + 1)) assert.equal((await tab(tablet.cookie, 'open', id)).status, 200);
+  assert.equal((await tab(tablet.cookie, 'open', ids[0])).status, 409);
+  assert.equal((await lstat(join(f.stateDir, 'tabs.json'))).mode & 0o7777, 0o600);
+  assert.equal(f.opens(), 0, 'tabs are web state only; they never create, attach, or stop a session');
+
+  await f.server.close();
+  const restarted = await TabStore.open(f.stateDir, f.server.devices);
+  assert.deepEqual(restarted.list(phone.device.id), [ids[1]]);
+  assert.equal(restarted.list(tablet.device.id).length, MAX_TABS);
+});
+
+test('logout forgets the device tabs', async t => {
+  const f = await fixture(t);
+  const p = await f.pair();
+  const slotId = '79e35412-572b-4f77-a04f-a93f12e18c92';
+  await f.request('/api/tabs/open', { method: 'POST', headers: { Cookie: p.cookie, Origin: ORIGIN }, body: { slotId } });
+  assert.equal(f.server.tabs.has(p.device.id, slotId), true);
+  await f.request('/api/logout', { method: 'POST', headers: { Cookie: p.cookie, Origin: ORIGIN } });
+  assert.equal(f.server.tabs.has(p.device.id, slotId), false);
 });
 
 test('cookie parser rejects duplicate, encoded, quoted, malformed, and oversized tokens', () => {

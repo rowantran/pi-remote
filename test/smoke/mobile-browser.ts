@@ -46,10 +46,10 @@ let daemonGate: { entered: ReturnType<typeof deferred>; release: ReturnType<type
 const deliveries = new EventEmitter();
 interface CapturedPush { endpoint: string; payload: Record<string, unknown> }
 const sent: CapturedPush[] = [];
-function pushed(endpoint: string, kind: string, after = sent.length): Promise<CapturedPush> {
+function pushed(endpoint: string, kind: string, after = sent.length, slotId?: string): Promise<CapturedPush> {
   return new Promise((resolve, reject) => {
     const check = () => {
-      const found = sent.slice(after).find(value => value.endpoint === endpoint && value.payload.kind === kind);
+      const found = sent.slice(after).find(value => value.endpoint === endpoint && value.payload.kind === kind && (slotId === undefined || value.payload.slotId === slotId));
       if (found) { clearTimeout(timer); deliveries.off('sent', check); resolve(found); }
     };
     const timer = setTimeout(() => { deliveries.off('sent', check); reject(new Error(`No automatic ${kind} push from daemon activity`)); }, 15_000);
@@ -128,7 +128,7 @@ try {
     }, checkTailscale: async () => {},
     handleApi: (request, response, context) => push?.handleApi(request, response, context) ?? false,
     staticDir: fileURLToPath(new URL('../../dist/web/', import.meta.url)) });
-  push = await PushService.open({ stateDir: webState, origin: proxy.origin, devices: web.devices, allowedLogins: ['rowan@example.test'],
+  push = await PushService.open({ stateDir: webState, origin: proxy.origin, devices: web.devices, tabs: web.tabs, allowedLogins: ['rowan@example.test'],
     send: async (subscription, payload) => {
       sent.push({ endpoint: subscription.endpoint, payload: JSON.parse(String(payload)) }); deliveries.emit('sent');
       return { statusCode: 201, body: '', headers: {} };
@@ -200,6 +200,46 @@ try {
         assert.equal(typeof delivery.payload.id, 'string');
         assert.doesNotMatch(JSON.stringify(delivery.payload), /History row|Native second line|Native answer|Completed while|Remote update|answer:|\/tmp\/|credentials|transcript|prompt/);
       };
+
+      // Opening a session makes it a tab. A session started from the phone becomes the active
+      // tab and notifies this device; after its tab closes, it no longer does, while it keeps running.
+      const activeTab = () => page.locator('#tabs .tab.active').getAttribute('data-slot');
+      assert.deepEqual(await page.locator('#tabs .tab').evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.slot)), [slot.id]);
+      assert.equal(await activeTab(), slot.id);
+      await page.locator('#slots-button').click();
+      await page.locator('#new-session-cwd').fill(dir);
+      await page.locator('#create-session').click();
+      await page.waitForFunction(original => document.querySelectorAll('#tabs .tab').length === 2
+        && document.querySelector<HTMLElement>('#tabs .tab.active')?.dataset.slot !== original
+        && document.querySelector('#status')?.textContent === 'Connected', slot.id);
+      const created = (await activeTab())!;
+      assert.equal((await control.request('list')).find(item => item.id === created)?.cwd, dir);
+      const watcherSocket = await connect();
+      const watcher = new Connection(watcherSocket, watcherSocket, () => watcherSocket.destroy());
+      // A listener from the start: Connection would otherwise replay buffered (stale) events to the first one.
+      watcher.onEvent(() => {});
+      try {
+        await handshake(watcher); await watcher.request('attach', { slotId: created });
+        const createdPush = pushed(endpoint, 'done', sent.length, created);
+        await watcher.request('rpc', { slotId: created, command: { type: 'prompt', message: 'Phone-created session work' } });
+        assert.equal((await createdPush).payload.slotId, created);
+        await page.locator(`#tabs .tab[data-slot="${created}"] .tab-close`).click();
+        await page.waitForFunction(original => document.querySelectorAll('#tabs .tab').length === 1
+          && document.querySelector<HTMLElement>('#tabs .tab.active')?.dataset.slot === original
+          && document.querySelector('#status')?.textContent === 'Connected', slot.id);
+        const mark = sent.length;
+        const closedSettled = event(watcher, value => value.event.type === 'agent_settled');
+        await watcher.request('rpc', { slotId: created, command: { type: 'prompt', message: 'Closed tab work' } });
+        await closedSettled;
+        // Bells are delivered in order: once the open tab's bell arrives, a closed-tab bell would have too.
+        const openSettled = event(control, value => value.event.type === 'agent_settled');
+        const openPush = pushed(endpoint, 'done', mark, slot.id);
+        await control.request('rpc', { slotId: slot.id, command: { type: 'prompt', message: 'Open tab work' } });
+        await openSettled; await openPush;
+        assert.equal(sent.slice(mark).some(value => value.payload.slotId === created), false, 'a closed tab does not notify');
+        assert.equal((await control.request('list')).find(item => item.id === created)?.status, 'running', 'closing a tab keeps the session running');
+      } finally { watcher.close(); }
+      await control.request('kill', { slotId: created });
 
       const prompt = page.locator('#prompt');
       assert.equal(await prompt.getAttribute('autocorrect'), 'on');
@@ -313,11 +353,12 @@ try {
       await page.waitForFunction(() => document.querySelector('#status')?.textContent === 'Connected');
       await page.locator('.xterm-rows').getByText(`${backgroundMessage} complete`, { exact: false }).first().waitFor();
       const persisted = await cached(page, slot.id, `${backgroundMessage} complete`);
-      assert.equal(persisted.length, 1);
-      assert.equal(persisted[0].slotId, slot.id);
-      assert.equal(typeof persisted[0].savedAt, 'number');
-      assert.equal(persisted[0].snapshot.historyComplete, true);
-      assert.equal(persisted[0].snapshot.ui.some((record: any) => ['input', 'editor', 'confirm', 'select', 'set_editor_text'].includes(record.method)), false);
+      // The phone-created tab was viewed too, so it has its own snapshot record.
+      assert.deepEqual(persisted.map(record => record.slotId).sort(), [slot.id, created].sort());
+      const saved = persisted.find(record => record.slotId === slot.id);
+      assert.equal(typeof saved.savedAt, 'number');
+      assert.equal(saved.snapshot.historyComplete, true);
+      assert.equal(saved.snapshot.ui.some((record: any) => ['input', 'editor', 'confirm', 'select', 'set_editor_text'].includes(record.method)), false);
       const unsent = `Unsent native draft ${browserType.name()}`;
       const reconnectDraft = `${unsent} edited while reconnecting`;
       const offlineDraft = `${unsent} edited while offline`;
@@ -417,7 +458,7 @@ try {
       const unsubscribed = await page.request.post(`${proxy.origin}/api/push/unsubscribe`, { headers: { Origin: proxy.origin }, data: {} });
       assert.equal(unsubscribed.status(), 200);
       assert.deepEqual(errors, []);
-      console.log(`${browserType.name()}: pairing, compact composer, keyboard-raised bar, native multiline/IME input, Stop, jump-to-latest, touch scroll, completion, native dialog, automatic done/blocked push online and offline, IndexedDB persistence, gated saved reconnect, worker-backed offline reload, editable drafts, authoritative replacement, no replay, 403 cache clearing passed`);
+      console.log(`${browserType.name()}: pairing, tabs, web-created session, tab-scoped push, compact composer, keyboard-raised bar, native multiline/IME input, Stop, jump-to-latest, touch scroll, completion, native dialog, automatic done/blocked push online and offline, IndexedDB persistence, gated saved reconnect, worker-backed offline reload, editable drafts, authoritative replacement, no replay, 403 cache clearing passed`);
     } catch (error) {
       await page.screenshot({ path: join(dir, `${browserType.name()}-failure.png`) }).catch(() => {});
       console.error(`${browserType.name()} failed; screenshots: ${dir}; status: ${await page.locator('#status').textContent().catch(() => 'unavailable')}`);

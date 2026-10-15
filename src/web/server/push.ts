@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import webpush from 'web-push';
 import type { DeviceStore } from './devices.js';
+import type { TabStore } from './tabs.js';
 import { privateDirectory, privateFile, readPrivateJson } from './private-state.js';
 import { readJsonBody, type AuthenticatedContext } from './server.js';
 import type { SlotInfo } from '../../protocol/types.js';
@@ -15,6 +16,8 @@ interface State { version: 1; keys: { publicKey: string; privateKey: string }; s
 type Sender = typeof webpush.sendNotification;
 export interface PushOptions {
   stateDir: string; origin: string; devices: DeviceStore; allowedLogins: readonly string[];
+  /** A session's notifications go only to devices that have it open as a tab. */
+  tabs: Pick<TabStore, 'has'>;
   /** Tests replace only delivery, never production endpoint validation. */
   send?: Sender;
   delay?: (ms: number) => Promise<void>;
@@ -141,7 +144,8 @@ export class PushService {
       // A single device's failed push must not prevent delivery to the next device.
       for (const item of [...this.state.subscriptions]) {
         if (this.closed) break;
-        try { await this.deliver(item.deviceId, item.subscription, payload); }
+        if (!this.options.tabs.has(item.deviceId, notice.slot.id)) continue;
+        try { await this.deliver(item.deviceId, item.subscription, payload, notice.slot.id); }
         catch { this.error = 'Push delivery failed; check notification settings and outbound HTTPS.'; }
       }
       await this.save();
@@ -149,10 +153,13 @@ export class PushService {
     this.deliveries = job.catch(() => { this.error = 'Push delivery failed; check private state permissions and outbound HTTPS.'; }).finally(() => { this.queued--; });
     return this.deliveries;
   }
-  private async deliver(deviceId: string, subscription: Subscription, payload: unknown): Promise<boolean> {
+  /** `tabSlot` is set for session bells: closing that tab cancels pending retries. Explicit
+   * test notifications omit it. */
+  private async deliver(deviceId: string, subscription: Subscription, payload: unknown, tabSlot?: string): Promise<boolean> {
     const active = async () => {
       const device = await this.options.devices.get(deviceId);
       return !this.closed && !!device && this.options.allowedLogins.includes(device.login)
+        && (tabSlot === undefined || this.options.tabs.has(deviceId, tabSlot))
         && this.state.subscriptions.some(item => item.deviceId === deviceId && item.subscription.endpoint === subscription.endpoint
           && item.subscription.keys.auth === subscription.keys.auth && item.subscription.keys.p256dh === subscription.keys.p256dh);
     };

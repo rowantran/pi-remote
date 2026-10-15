@@ -48,7 +48,7 @@ export class Notifications {
       : !this.state.subscribed ? 'Notifications are off. No Apple Developer account is needed.'
       : this.state.monitor === 'unsupported' ? 'Notifications are registered. Update/restart the devbox daemon to enable session bells.'
       : this.state.monitor !== 'active' ? 'Notifications are registered. The devbox activity monitor is reconnecting.'
-      : this.state.warning ?? 'Notifications are on for session completions and new blocking questions, including when this app is closed.';
+      : this.state.warning ?? 'Notifications are on for completions and new questions in your open tabs, including when this app is closed.';
   }
   private async subscribe(): Promise<void> {
     if (!this.registration || !this.state || this.pending || !this.supported()) return;
