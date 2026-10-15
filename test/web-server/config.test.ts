@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { loadConfig } from '../../src/config/client.js';
+import { readPresentationConfig } from '../../src/config/presentation.js';
 import { defaultBrowserConfig, MAX_THEME_BYTES } from '../../src/web/server/browser-config.js';
 
 test('browser config exposes only safe settings, pinned themes, bounded custom themes, and virtual client settings', async t => {
@@ -39,7 +41,7 @@ test('browser config exposes only safe settings, pinned themes, bounded custom t
   assert.doesNotMatch(JSON.stringify(config), /DO_NOT_EXPORT|DO_NOT_OVERRIDE|private\/plugin|private-host|private\/project/);
 });
 
-test('explicit config and Pi directory override use normal files but expose only canonical display files', async t => {
+test('normal web deployment config and explicit Pi directory overrides expose only canonical display files', async t => {
   const home = await mkdtemp('/tmp/pi-web-config-path-');
   t.after(() => rm(home, { recursive: true, force: true }));
   const agent = join(home, 'agent-elsewhere');
@@ -47,14 +49,25 @@ test('explicit config and Pi directory override use normal files but expose only
   const uiConfig = join(home, 'phone-config.json');
   await mkdir(join(agent, 'themes'), { recursive: true });
   await mkdir(join(xdg, 'pi-remote'), { recursive: true });
-  await writeFile(join(xdg, 'pi-remote', 'config.json'), JSON.stringify({ theme: 'dark', bell: true }));
+  const normalPath = join(xdg, 'pi-remote', 'config.json');
+  const normalSettings = {
+    theme: 'dark', bell: true,
+    web: { allowUsers: ['PRIVATE_LOGIN@example.com'], origin: 'https://private-web.example.ts.net' },
+  };
+  await writeFile(normalPath, JSON.stringify(normalSettings));
+  assert.deepEqual(loadConfig(normalPath), normalSettings);
   await writeFile(uiConfig, JSON.stringify({ theme: 'custom/light', bell: false, host: 'PRIVATE_HOST', extensions: ['/PRIVATE_EXTENSION'] }));
   await writeFile(join(agent, 'settings.json'), JSON.stringify({ hideThinkingBlock: true, apiKey: 'PRIVATE_KEY' }));
   await writeFile(join(agent, 'themes', 'custom.json'), JSON.stringify({ name: 'custom', colors: { text: '#123456' } }));
   const env = { XDG_CONFIG_HOME: xdg, PI_CODING_AGENT_DIR: '~/agent-elsewhere' };
+  const presentation = await readPresentationConfig(undefined, [], { home, env });
+  assert.deepEqual(presentation, { extensions: [], theme: 'dark', bell: true });
   const normal = await defaultBrowserConfig({ home, env });
   const virtualConfig = join(home, '.config', 'pi-remote', 'config.json');
   assert.deepEqual(JSON.parse(normal.files[virtualConfig]), { theme: 'dark', bell: true });
+  assert.doesNotMatch(JSON.stringify(normal), /PRIVATE_LOGIN|private-web|allowUsers|origin/);
+  const fromPresentation = await defaultBrowserConfig({ home, env, config: presentation });
+  assert.deepEqual(fromPresentation, normal);
   const explicit = await defaultBrowserConfig({ home, env, uiConfig });
   assert.deepEqual(JSON.parse(explicit.files[virtualConfig]), { theme: 'custom/light', bell: false });
   assert.deepEqual(JSON.parse(explicit.files[join(home, '.pi', 'agent', 'settings.json')]), { hideThinkingBlock: true });

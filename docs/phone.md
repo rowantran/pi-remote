@@ -41,56 +41,83 @@ proxy lives in test code; there is no production flag to turn the application in
 
 ## Install and run
 
-The web server runs from the same installed release as the daemon, so the devbox needs no
-checkout, package install, or build. From your laptop checkout, install a release:
+The web server uses the same installed release as the daemon. The devbox needs no checkout or
+build, and you do not need to write a systemd unit. Add this to the normal `config.json` on the
+machine you deploy from:
+
+```json
+{
+  "host": "devbox",
+  "web": {
+    "allowUsers": ["you@example.com"]
+  }
+}
+```
+
+Use your exact Tailscale login, not the tagged devbox's owner. The list must be nonempty and
+cannot contain wildcards. Deployment discovers the target devbox's HTTPS origin from its own
+Tailscale DNS name. To use a fixed origin or non-default HTTPS port, set
+`"origin": "https://devbox.your-tailnet.ts.net:8443"` inside `web` (no trailing slash).
+
+From your laptop checkout:
 
 ```sh
 npm run deploy -- --wait
 ```
 
-Then, once on the devbox, create `~/.config/systemd/user/pi-remote-web.service`. Use an HTTPS
-origin belonging to this device's Tailscale DNS name, and your actual Tailscale login, not the
-tagged server's owner. Replace `/usr/bin/node` with the output of `command -v node`.
+The remote host needs systemd 246 or later and Tailscale 1.50 or later.
+When `web` is present, deploy writes/updates `pi-remote-web.service` in the remote user's
+systemd configuration directory, reloads systemd, enables the unit, and starts/restarts it.
+Its command names the installed release directly so old-release cleanup can identify running
+code. It uses the remote Node executable, an absolute-only copy of the remote PATH, and
+`~/.pi-remote-web` for private state. Systemd waits for the server's readiness notification before
+reporting success; a startup failure fails the deploy rather than silently leaving the app down.
 
-```ini
-[Unit]
-Description=Pi Remote phone client (private Unix socket)
-StartLimitIntervalSec=60
-StartLimitBurst=3
+The web service owns no Pi sessions: restarting it only reconnects phones. It is managed even
+with `--no-restart`, which skips only the daemon restart. Setup errors fail the deploy and skip
+old-release cleanup and the later daemon restart; the new release remains installed. Missing or
+inaccessible systemd/Tailscale prerequisites produce an error, rather than silently omitting
+configured web service setup.
 
-[Service]
-Type=simple
-ExecStart=/usr/bin/node %h/.local/share/pi-remote/bin/pi-remote serve --origin https://devbox.your-tailnet.ts.net --allow-user you@example.com --web-state-dir %h/.pi-remote-web
-UMask=0077
-Restart=on-failure
-RestartSec=5
-TimeoutStopSec=30
-# Pi sessions belong to the daemon. Stopping the web service must not stop them.
-KillMode=process
+Without `web`, deploy does not install, enable, restart, stop, or remove a web service. To stop
+using an already enabled service, first run `systemctl --user disable --now pi-remote-web.service`
+on the devbox, then remove `web` from your config. Deploy owns the generated unit; use systemd
+drop-ins for local customization instead of editing it. There is no skip flag.
 
-[Install]
-WantedBy=default.target
-```
+If an older hand-written unit runs through the unversioned `bin/pi-remote` link, add `web` before
+further deploys or stop/disable that unit first. Otherwise cleanup cannot identify its running
+release from the command line and may eventually delete it. A configured deploy replaces that
+unit with the release-pinned command while keeping private web state.
+
+The `web` settings apply to every deploy target, including an explicit `HOST` argument. If you
+set `web.origin`, make sure it belongs to that target; discovery is safer when using several hosts.
+
+### One-time private routing and pairing
+
+Deploy checks existing Tailscale Serve routing and user-service linger status and prints setup
+commands if needed. It never changes routes, enables Funnel, enables linger, or pairs a phone.
+If systemd's user manager is unavailable, log into the devbox and enable linger before retrying.
+On the devbox, use the port from your origin (443 by default):
 
 ```sh
-systemctl --user daemon-reload
-systemctl --user enable --now pi-remote-web.service
-loginctl enable-linger "$USER"   # keep the service running while you are logged out
-# --bg persists the Serve configuration; use the same state directory as the service.
+loginctl enable-linger "$USER"   # may require administrator approval; keeps the service after logout
+# Review existing handlers first; do not replace an unrelated / route.
+tailscale serve status
 tailscale serve --bg --https=443 "unix:$HOME/.pi-remote-web/web.sock"
 PI=~/.local/share/pi-remote/bin/pi-remote
-$PI serve pair --web-state-dir ~/.pi-remote-web
-$PI serve devices --web-state-dir ~/.pi-remote-web
-$PI serve revoke DEVICE_ID --web-state-dir ~/.pi-remote-web
+"$PI" serve pair --web-state-dir ~/.pi-remote-web
+"$PI" serve devices --web-state-dir ~/.pi-remote-web
+"$PI" serve revoke DEVICE_ID --web-state-dir ~/.pi-remote-web
 ```
 
-Every later `npm run deploy` restarts an active `pi-remote-web.service` onto the new release,
-even with `--no-restart`, which applies only to the daemon. The web service owns no Pi sessions:
-the restart reconnects phones and leaves sessions running. A `serve` process started by hand is
-not restarted; restart it after a deploy, because release cleanup can delete the release it runs
-from. The web server also works with an older running daemon, so you need not restart the daemon
-just to update or start the web server. For development, run the same commands with
-`node bin/pi-remote` from a checkout after `npm run build`.
+Keep existing private web state when migrating from a checkout-based service: the generated unit
+uses the same `~/.pi-remote-web` directory, preserving device pairing and push keys. Configs and
+adapters remain user-owned files; deployment sends only the web service settings, not your
+presentation code or the rest of your config. The web server also works with an older daemon
+(notification support still requires an upgraded daemon).
+
+For development, `node bin/pi-remote serve --origin HTTPS_ORIGIN --allow-user LOGIN` still works
+from a checkout after `npm run build`. Manually launched servers are not managed by deploy.
 
 Pairing and revocation commands must use the same `--web-state-dir` as the service. Do not reset the whole Tailscale Serve configuration
 or change unrelated existing handlers. State directory ancestors must not be symlinks or writable

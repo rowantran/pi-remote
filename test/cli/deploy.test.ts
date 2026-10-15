@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { join } from 'node:path';
+import type { ClientConfig } from '../../src/config/client.js';
 import {
   ARCHIVE_FILES, HELP, REMOTE_INSTALL_SCRIPT, main, parseDeployArgs,
   type DeployDependencies, type RunOptions,
@@ -17,16 +18,18 @@ function fixture(options: {
   host?: string;
   failures?: Stage[];
   localCleanupFails?: boolean;
+  config?: ClientConfig;
 } = {}) {
   const calls: Call[] = [];
   const removed: string[] = [];
   const logs: string[] = [], warnings: string[] = [];
-  let defaults = 0, temps = 0;
+  let defaults = 0, configs = 0, temps = 0;
   const root = '/checkout with spaces', tempDir = '/temporary archive directory';
   const deps: DeployDependencies = {
     root,
     now: () => new Date('2026-10-08T15:30:00.123Z'),
-    defaultHost: async () => { defaults++; return options.host ?? 'default-box'; },
+    loadConfig: () => { configs++; return options.config ?? {}; },
+    defaultHost: async config => { defaults++; return config.host ?? options.host ?? 'default-box'; },
     makeTempDir: async () => { temps++; return tempDir; },
     removeTempDir: async path => {
       removed.push(path);
@@ -47,7 +50,7 @@ function fixture(options: {
     },
   };
   return { deps, calls, removed, logs, warnings, root, tempDir,
-    get defaults() { return defaults; }, get temps() { return temps; } };
+    get defaults() { return defaults; }, get configs() { return configs; }, get temps() { return temps; } };
 }
 
 const stages = (f: ReturnType<typeof fixture>) => f.calls.map(call => call.stage);
@@ -70,6 +73,7 @@ test('deploy --help has no configuration, process, or filesystem side effects', 
   assert.deepEqual(f.logs, [HELP]);
   assert.deepEqual(f.calls, []);
   assert.equal(f.defaults, 0);
+  assert.equal(f.configs, 0);
   assert.equal(f.temps, 0);
   assert.deepEqual(f.removed, []);
 });
@@ -78,7 +82,8 @@ test('deploy builds, explicitly archives the lockfile, installs, restarts, and c
   const f = fixture();
   await main(['user@dev-box'], f.deps);
   assert.deepEqual(stages(f), ['revision', 'status', 'build', 'archive', 'mktemp', 'copy', 'install', 'restart', 'cleanup']);
-  assert.equal(f.defaults, 0, 'An explicit host must not read the default configuration');
+  assert.equal(f.defaults, 0, 'An explicit host bypasses the default host resolver');
+  assert.equal(f.configs, 1, 'Web settings still come from one local config snapshot');
   assert.ok(f.calls.every(call => call.options.cwd === f.root));
   assert.deepEqual(f.calls[2].args, ['run', 'build']);
   const archive = join(f.tempDir, 'release.tar.gz');
@@ -95,6 +100,29 @@ test('deploy builds, explicitly archives the lockfile, installs, restarts, and c
   assert.deepEqual(f.removed, [f.tempDir]);
   assert.deepEqual(f.warnings, []);
   assert.match(f.logs[0], /Installed release 20261008T153000Z-9f6e91e on user@dev-box/);
+});
+
+test('deploy passes only configured web settings to the remote install, including with --no-restart', async () => {
+  const web = { allowUsers: ['rowan@example.test'], origin: 'https://devbox.tail.example' };
+  const f = fixture({ config: { host: 'configured-box', web, extensions: ['./private-ui.ts'], cwd: '/private/work' } });
+  await main(['explicit-box', '--no-restart'], f.deps);
+  assert.equal(f.configs, 1);
+  assert.equal(f.defaults, 0);
+  const install = f.calls.find(call => call.stage === 'install')!;
+  assert.equal(install.args[2], 'explicit-box');
+  const encoded = install.args.at(-1)!;
+  assert.match(encoded, /^[A-Za-z0-9+/=]+$/);
+  assert.deepEqual(JSON.parse(Buffer.from(encoded, 'base64').toString('utf8')), web);
+  assert.ok(!stages(f).includes('restart'), 'Only the daemon restart is skipped');
+});
+
+test('deploy uses the same config snapshot for the default host and web settings', async () => {
+  const f = fixture({ config: { host: 'snapshot-box', web: { allowUsers: ['rowan@example.test'] } } });
+  await main(['--wait'], f.deps);
+  assert.equal(f.configs, 1);
+  const install = f.calls.find(call => call.stage === 'install')!;
+  assert.equal(install.args[2], 'snapshot-box');
+  assert.deepEqual(JSON.parse(Buffer.from(install.args.at(-1)!, 'base64').toString('utf8')), { allowUsers: ['rowan@example.test'] });
 });
 
 test('deploy uses the shared default host and marks dirty releases', async () => {
@@ -139,7 +167,7 @@ test('deploy rejects missing and unsafe hosts before any process runs', async ()
 
 test('deploy preserves configuration errors without starting a build', async () => {
   const f = fixture();
-  f.deps.defaultHost = () => { throw new Error('Invalid JSON in client configuration'); };
+  f.deps.loadConfig = () => { throw new Error('Invalid JSON in client configuration'); };
   await assert.rejects(main([], f.deps), /Invalid JSON/);
   assert.deepEqual(f.calls, []);
 });
