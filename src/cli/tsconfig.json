@@ -23,6 +23,9 @@
     },
     {
       "path": "../tui"
+    },
+    {
+      "path": "../web/server"
     }
   ]
 }

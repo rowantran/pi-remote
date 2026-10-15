@@ -528,6 +528,10 @@ cli ──→ daemon ──→ protocol
     ├─→ tui    ──→ protocol
     │       └────→ config
     └────────────→ config
+
+cli ──→ web/server ──→ daemon, client, protocol, config, web/shared
+        web/build ──→ tui, protocol, web/shared
+        web/shared   (no project dependencies)
 ```
 
 The daemon owns remote Pi processes. The client owns connections and reconnection,
@@ -541,6 +545,7 @@ owns local-connection startup and the legacy filesystem fallback.
 - `src/protocol/remote-session.ts`, `paths.ts`: session environment contract and socket locations.
 - `src/config/client.ts`, `presentation.ts`: shared local config parsing, XDG paths, and presentation-path resolution. This module has no dependency on protocol or application runtime projects.
 - `src/protocol/notification-stream.ts`: the read-only daemon event contract used by background notifications, not the attached TUI transcript stream.
+- `src/web/shared/`: web-only module-name normalization, presentation worker result types, and bounded source reading/hashing. This project has no project dependencies; Node-only file helpers are separate from the browser-safe normalizer.
 - `src/daemon/supervisor.ts`, `pi-process.ts`, `side-sessions.ts`: slots, snapshots, dialogs, Pi RPC child ownership, persistence, and side-session storage.
 - `src/daemon/launch.ts`, `bridge.ts`, `files.ts`: private daemon startup, socket/stdin bridging, and remote filesystem requests.
 - `src/client/connection.ts`, `reconnect.ts`, `compat-client.ts`: SSH transport, correlation, snapshot-based reconnect without mutation replay, and legacy read-only fallback.

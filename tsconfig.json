@@ -17,6 +17,15 @@
       "path": "./src/tui"
     },
     {
+      "path": "./src/web/shared"
+    },
+    {
+      "path": "./src/web/server"
+    },
+    {
+      "path": "./src/web/build"
+    },
+    {
       "path": "./src/cli"
     }
   ]
