@@ -82,7 +82,7 @@ Choose a cheap naming model in the remote `~/.pi/agent/extensions/auto-session-n
 
 ### Configuration
 
-The local client reads `$XDG_CONFIG_HOME/pi-remote/config.json`. If `XDG_CONFIG_HOME` is unset or not an absolute path, it reads `~/.config/pi-remote/config.json`. This optional file holds connection defaults and local UI settings. All six keys are optional:
+The local client reads `$XDG_CONFIG_HOME/pi-remote/config.json`. If `XDG_CONFIG_HOME` is unset or not an absolute path, it reads `~/.config/pi-remote/config.json`. This optional file holds connection defaults and local UI settings. All settings are optional:
 
 ```json
 {
@@ -91,7 +91,8 @@ The local client reads `$XDG_CONFIG_HOME/pi-remote/config.json`. If `XDG_CONFIG_
   "extensions": ["./my-ui.ts"],
   "theme": "dark",
   "bell": true,
-  "sideSplit": "auto"
+  "sideSplit": "auto",
+  "web": { "allowUsers": ["you@example.com"] }
 }
 ```
 
@@ -100,6 +101,8 @@ Keep your own trusted adapter at `my-ui.ts` beside `config.json`. The relative p
 The host comes from the first of these that is set: `--host`, the `PI_REMOTE_HOST` environment variable, then the config file. `--local` ignores all three.
 
 `cwd` is the default remote working directory for `pi-remote new`. It comes from the first of these that is set: `--cwd`, the `PI_REMOTE_CWD` environment variable, then the config file. With a default, `pi-remote new` needs no `--cwd`. The value is a path on the remote host: `~` means the remote home, and the remote daemon checks that the directory exists. The default applies to every host, including one selected with `--host`. `--local` ignores it, so `new --local` still needs `--cwd`. `--session` completion also uses this default as its base when `--cwd` is not given.
+
+`web` opts deployments into automatic installation and updates of the phone's systemd user service. It requires exact `allowUsers` Tailscale logins and accepts an optional HTTPS `origin`; otherwise the origin is discovered on the devbox. Omit `web` to leave systemd alone. See [phone setup](docs/phone.md#install-and-run). Deployment does not upload your UI config or adapter files.
 
 `extensions` is an allowlist of trusted local adapter files. `theme` selects the local theme, `bell` enables or disables the terminal bell, and `sideSplit` selects `auto`, `right`, `down`, `left`, or `up`. Relative extension paths resolve beside the config file that supplies them; `~/` means local home. Invalid JSON, unknown keys, or invalid values cause an error, so a typo does not go unnoticed.
 
@@ -433,7 +436,7 @@ The client runs `ssh HOST ~/.local/share/pi-remote/bin/pi-remote bridge`, so tha
 
 1. Builds `dist/` locally, including the phone app, and copies it with `package.json`, the lockfile, `bin/` and `completions/` to a new release directory, named after the UTC time and git commit (`-dirty` with uncommitted changes).
 2. Runs `npm ci --omit=dev --ignore-scripts` there and checks that the release starts.
-3. Switches `bin/pi-remote` to the new release in one atomic rename. If the [phone web service](docs/phone.md#install-and-run) `pi-remote-web.service` is active, restarts it onto the new release. This only reconnects phones; it runs even with `--no-restart`.
+3. Switches `bin/pi-remote` to the new release in one atomic rename. When the deploying machine's config contains `web`, installs/updates, enables, and starts/restarts [the phone web service](docs/phone.md#install-and-run) on that release. It discovers the target's Tailscale origin unless configured explicitly, preserves private web state, and prints any missing routing/linger setup commands without changing them. Web setup failures skip old-release cleanup. This only reconnects phones and runs even with `--no-restart`. Without `web`, it leaves systemd untouched.
 4. Deletes old releases. It keeps the new release, the previous one, and any release a running process uses. A release never changes after install, because a running daemon loads modules from its own release.
 5. Runs `pi-remote restart-daemon`. If a slot is busy, the new release stays installed and the old daemon keeps running; run `pi-remote restart-daemon --wait` later. `npm run deploy -- --wait` waits instead; `npm run deploy -- --no-restart` skips this step.
 

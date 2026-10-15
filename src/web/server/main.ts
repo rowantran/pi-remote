@@ -1,3 +1,5 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { join, resolve } from 'node:path';
 import { DeviceStore } from './devices.js';
 import { privateDirectory } from './private-state.js';
@@ -31,6 +33,9 @@ never reclaimed automatically.`;
 
 /** The existing CLI dispatches here with the arguments after `serve`. */
 export async function serveMain(args: string[]): Promise<void> {
+  // Never leak the systemd notification endpoint to the daemon, Pi, or extension workers.
+  const notifySocket = process.env.NOTIFY_SOCKET;
+  delete process.env.NOTIFY_SOCKET;
   if (args.includes('--help') || args.includes('-h')) { process.stdout.write(HELP + '\n'); return; }
   const positional: string[] = [];
   const flags = new Map<string, string>();
@@ -71,7 +76,7 @@ export async function serveMain(args: string[]): Promise<void> {
     uiConfig: flags.get('--ui-config'),
     handleApi: (request, response, context) => push?.handleApi(request, response, context) ?? false,
   });
-  let monitor: Awaited<ReturnType<typeof startActivityMonitor>>;
+  let monitor: Awaited<ReturnType<typeof startActivityMonitor>> | undefined;
   try {
     // Acquire the exclusive socket before generating keys; a second service instance must
     // never replace the VAPID keys used by an already-running instance.
@@ -86,16 +91,31 @@ export async function serveMain(args: string[]): Promise<void> {
       onBell: notice => push!.notify(notice),
       onStatus: status => push!.setMonitorStatus(status),
     });
-  } catch (error) { await server.close(); await push?.close(); throw error; }
-  process.stdout.write(`Web listener: ${server.socketPath}\nOrigin: ${server.origin}\n`);
-  await new Promise<void>((accept, reject) => {
+  } catch (error) { await monitor?.close(); await server.close(); await push?.close(); throw error; }
+  let stop!: () => void;
+  const stopped = new Promise<void>((accept, reject) => {
     let stopping = false;
-    const stop = () => {
+    stop = () => {
       if (stopping) return;
       stopping = true;
       process.off('SIGINT', stop); process.off('SIGTERM', stop);
-      void (async () => { await monitor.close(); await server.close(); await push!.close(); })().then(accept, reject);
+      void (async () => { await monitor?.close(); await server.close(); await push!.close(); })().then(accept, reject);
     };
     process.on('SIGINT', stop); process.on('SIGTERM', stop);
   });
+  // A stop can arrive while the notifier is running; observe its rejection until awaited below.
+  void stopped.catch(() => {});
+  try {
+    // Register shutdown handlers before READY makes the service eligible for an immediate stop.
+    // The helper runs in this service's cgroup (NotifyAccess=all); no readiness polling is needed.
+    if (notifySocket) await promisify(execFile)('systemd-notify', ['--ready'], {
+      timeout: 10_000, env: { ...process.env, NOTIFY_SOCKET: notifySocket },
+    });
+    process.stdout.write(`Web listener: ${server.socketPath}\nOrigin: ${server.origin}\n`);
+    await stopped;
+  } catch (error) {
+    stop();
+    await stopped;
+    throw error;
+  }
 }

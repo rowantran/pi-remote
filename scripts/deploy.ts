@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { ClientConfig } from '../src/config/client.js';
 
 export const HELP = `Usage: npm run deploy -- [HOST] [--wait | --no-restart]
 
@@ -12,8 +13,9 @@ HOST defaults to PI_REMOTE_HOST, then the client configuration file.
   --no-restart  Install without restarting the daemon.
   -h, --help    Show this help without building or connecting.
 
-An active pi-remote-web.service user service always restarts onto the new release.
-It owns no Pi sessions, so the restart only reconnects phone clients.
+When config.json contains web settings, deploy installs/enables pi-remote-web.service
+and restarts it onto the new release, even with --no-restart. Without web settings,
+it does not manage a web service. Tailscale routing and device pairing remain manual.
 `;
 
 export interface DeployOptions {
@@ -73,7 +75,7 @@ export const runProcess: ProcessRunner = (command, args, options) => new Promise
 
 /** SSH runs this on Linux. Only validated temporary paths and release names are passed as arguments. */
 export const REMOTE_INSTALL_SCRIPT = `set -euo pipefail
-archive=$1 name=$2
+archive=$1 name=$2 web_config=\${3:--}
 [[ "$archive" =~ ^/tmp/pi-remote-deploy\\.[a-zA-Z0-9]+$ ]] || { printf 'Invalid archive path\\n' >&2; exit 1; }
 [[ "$name" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9a-f]+(-dirty)?$ ]] || { printf 'Invalid release name %s\\n' "$name" >&2; exit 1; }
 base="$HOME/.local/share/pi-remote"
@@ -104,15 +106,14 @@ previous=$(readlink -f -- "$base/bin/pi-remote" || true)
 ln -s "$release/bin/pi-remote" "$base/bin/.pi-remote-$name"
 mv -Tf "$base/bin/.pi-remote-$name" "$base/bin/pi-remote"
 switched=1
-# The phone web service owns no Pi sessions, so restart it at once. Doing this before
-# cleanup moves it off an old release that cleanup could otherwise delete under it.
-web=pi-remote-web.service
-if command -v systemctl >/dev/null 2>&1 && systemctl --user --quiet is-active "$web" 2>/dev/null; then
-  systemctl --user restart "$web" || {
-    printf 'Release %s is installed, but %s did not restart; see journalctl --user -u %s\n' "$name" "$web" "$web" >&2
+# Web management is opt-in. Only the validated, base64-encoded web settings cross SSH.
+# Start the configured service before cleanup can remove an older release.
+if [[ "$web_config" != - ]]; then
+  [[ "$web_config" =~ ^[A-Za-z0-9+/=]+$ ]] || { printf 'Invalid web settings encoding\\n' >&2; exit 1; }
+  node dist/cli/web-service.js "$web_config" || {
+    printf 'Release %s is installed, but web service setup failed; release cleanup skipped\\n' "$name" >&2
     exit 1
   }
-  printf 'Restarted %s on release %s\n' "$web" "$name"
 fi
 # Preserve current, previous, and every release referenced by a running process.
 # If ps fails, set -e stops cleanup rather than deleting potentially live code.
@@ -130,7 +131,8 @@ export const ARCHIVE_FILES = ['package.json', 'package-lock.json', 'dist', 'bin'
 export interface DeployDependencies {
   run: ProcessRunner;
   root: string;
-  defaultHost: () => string | undefined | Promise<string | undefined>;
+  loadConfig: () => ClientConfig | Promise<ClientConfig>;
+  defaultHost: (config: ClientConfig) => string | undefined | Promise<string | undefined>;
   now: () => Date;
   makeTempDir: () => Promise<string>;
   removeTempDir: (path: string) => Promise<void>;
@@ -141,8 +143,10 @@ export interface DeployDependencies {
 const dependencies: DeployDependencies = {
   run: runProcess,
   root: fileURLToPath(new URL('../', import.meta.url)),
-  // Load only when needed: imports and --help must not read user configuration.
-  defaultHost: async () => (await import('../src/cli/config.js')).defaultHost(),
+  // A single snapshot supplies both the default host and optional web settings.
+  // Imports and --help do not read user configuration.
+  loadConfig: async () => (await import('../src/config/client.js')).loadConfig(),
+  defaultHost: async config => (await import('../src/cli/config.js')).defaultHost(process.env, () => config),
   now: () => new Date(),
   makeTempDir: () => mkdtemp(join(tmpdir(), 'pi-remote-deploy-')),
   removeTempDir: path => rm(path, { recursive: true, force: true }),
@@ -155,7 +159,8 @@ export async function main(args = process.argv.slice(2), overrides: Partial<Depl
   const deps = { ...dependencies, ...overrides };
   const options = parseDeployArgs(args);
   if (options.help) { deps.log(HELP); return; }
-  const host = options.host ?? await deps.defaultHost();
+  const config = await deps.loadConfig();
+  const host = options.host ?? await deps.defaultHost(config);
   // SSH aliases, DNS names, and optional user@host. Reject options and remote-shell syntax.
   if (!host || !/^[a-zA-Z0-9_][a-zA-Z0-9_.@-]*$/.test(host)) {
     throw new Error('Give an SSH host alias, or set a default host (see README "Configuration").');
@@ -181,7 +186,8 @@ export async function main(args = process.argv.slice(2), overrides: Partial<Depl
     if (!/^\/tmp\/pi-remote-deploy\.[a-zA-Z0-9]+$/.test(remotePath)) throw new Error('Unexpected remote temporary path.');
     remoteArchive = remotePath;
     await run('scp', ['-q', '-o', 'BatchMode=yes', archive, `${host}:${remoteArchive}`]);
-    await run('ssh', ['-o', 'BatchMode=yes', host, 'bash', '-s', '--', remoteArchive, release], { input: REMOTE_INSTALL_SCRIPT });
+    const web = config.web ? [Buffer.from(JSON.stringify(config.web)).toString('base64')] : [];
+    await run('ssh', ['-o', 'BatchMode=yes', host, 'bash', '-s', '--', remoteArchive, release, ...web], { input: REMOTE_INSTALL_SCRIPT });
     deps.log(`Installed release ${release} on ${host}.`);
     if (options.restart === 'none') {
       deps.log('Daemon not restarted (--no-restart). Run pi-remote restart-daemon when ready.');
