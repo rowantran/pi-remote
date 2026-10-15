@@ -4,8 +4,8 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { MAX_PRESENTATION_BUNDLE_BYTES, ServerPresentation, presentationHash } from '../../src/web-server/presentation.js';
-import { MAX_PRESENTATION_SOURCE_BYTES } from '../../src/web-server/presentation-files.js';
+import { MAX_PRESENTATION_BUNDLE_BYTES, ServerPresentation, presentationHash } from '../../src/web/server/presentation.js';
+import { MAX_PRESENTATION_SOURCE_BYTES } from '../../src/protocol/presentation-files.js';
 
 async function fixture(t: TestContext) {
   const home = await mkdtemp(join(tmpdir(), 'pi-presentation-provider-'));

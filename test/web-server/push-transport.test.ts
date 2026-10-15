@@ -5,7 +5,7 @@ import https, { type RequestOptions } from 'node:https';
 import { PassThrough, Writable } from 'node:stream';
 import test from 'node:test';
 import webpush from 'web-push';
-import { validateSubscription } from '../../src/web-server/push.js';
+import { validateSubscription } from '../../src/web/server/push.js';
 
 test('real Web Push transport uses the validated canonical endpoint, never a null hostname or localhost', async t => {
   const requests: RequestOptions[] = [];

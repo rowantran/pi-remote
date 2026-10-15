@@ -22,7 +22,7 @@
       "path": "../tui"
     },
     {
-      "path": "../web-server"
+      "path": "../web/server"
     }
   ]
 }

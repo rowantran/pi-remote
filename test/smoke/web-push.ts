@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
-import { buildWeb } from '../../scripts/build-web.js';
+import { buildWeb } from '../../src/web/build/app.js';
 
 const dir = await mkdtemp(join(tmpdir(), 'remote-push-browser-'));
 const outdir = join(dir, 'web'), entry = join(dir, 'entry.ts');

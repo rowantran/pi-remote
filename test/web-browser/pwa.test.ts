@@ -5,13 +5,13 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import test from 'node:test';
-import { buildWeb } from '../../scripts/build-web.js';
+import { buildWeb } from '../../src/web/build/app.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const origin = 'https://remote.example';
 const slotId = '24c18191-7909-42ab-aefc-14e16adcf33c';
 const shell = ['/', '/app.js', '/app.css', '/xterm.css', '/icon.svg', '/icon-192.png', '/icon-512.png', '/manifest.webmanifest'];
-const worker = await readFile(join(root, 'src/web/sw.js'), 'utf8');
+const worker = await readFile(join(root, 'src/web/client/sw.js'), 'utf8');
 const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 
 function harness() {
@@ -210,13 +210,13 @@ test('closed windows fall back to opening the trusted route and forged notificat
 });
 
 test('the standalone manifest and opaque PNG icons have fixed same-origin install paths', async () => {
-  const manifest = JSON.parse(await readFile(join(root, 'src/web/manifest.webmanifest'), 'utf8'));
+  const manifest = JSON.parse(await readFile(join(root, 'src/web/client/manifest.webmanifest'), 'utf8'));
   assert.equal(manifest.id, '/'); assert.equal(manifest.start_url, '/'); assert.equal(manifest.scope, '/');
   assert.equal(manifest.display, 'standalone'); assert.equal(manifest.name, 'Pi Remote');
   for (const size of [192, 512]) {
     const icon = manifest.icons.find((entry: any) => entry.sizes === `${size}x${size}`);
     assert.equal(icon.src, `/icon-${size}.png`); assert.equal(icon.type, 'image/png');
-    const png = await readFile(join(root, 'src/web', `icon-${size}.png`));
+    const png = await readFile(join(root, 'src/web/client', `icon-${size}.png`));
     assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
     assert.equal(png.readUInt32BE(16), size); assert.equal(png.readUInt32BE(20), size);
     assert.equal(png[25], 2, 'Apple touch icons use opaque RGB PNGs');
@@ -231,7 +231,7 @@ test('browser builds copy PWA assets and embed a deterministic content version t
     const sw = await readFile(join(outdir, 'sw.js'), 'utf8'); assert.ok(!sw.includes('__BUILD_ID__'));
     const id = /const BUILD_ID = '([a-f0-9]{64})'/.exec(sw)?.[1]; assert.ok(id);
     for (const file of ['manifest.webmanifest', 'icon-192.png', 'icon-512.png']) {
-      assert.deepEqual(await readFile(join(outdir, file)), await readFile(join(root, 'src/web', file)));
+      assert.deepEqual(await readFile(join(outdir, file)), await readFile(join(root, 'src/web/client', file)));
     }
     return id;
   };

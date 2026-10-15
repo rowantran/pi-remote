@@ -7,7 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { chromium, webkit } from 'playwright';
-import { buildWeb } from '../../scripts/build-web.js';
+import { buildWeb } from '../../src/web/build/app.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const source = (path: string) => JSON.stringify(join(root, path));
@@ -16,15 +16,15 @@ const source = (path: string) => JSON.stringify(join(root, path));
 const browserProbe = `
 import { bootCheck } from './boot.ts';
 import { RemoteTui } from ${source('src/tui/tui.ts')};
-import { XtermTerminal } from ${source('src/web/terminal.ts')};
-import { configureVirtualFiles, BUILTIN_THEME_DIR } from ${source('src/web/shims/vfs.ts')};
+import { XtermTerminal } from ${source('src/web/client/terminal.ts')};
+import { configureVirtualFiles, BUILTIN_THEME_DIR } from ${source('src/web/client/shims/vfs.ts')};
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { createJiti } from 'jiti';
 import { stripTerminalSequences } from '@earendil-works/pi-tui';
-import { createBashToolDefinition } from ${source('src/web/shims/pi-coding-agent.ts')};
+import { createBashToolDefinition } from ${source('src/web/client/shims/pi-coding-agent.ts')};
 const check = (value, message) => { if (!value) throw new Error(message); };
 const rejects = async (fn, code) => {
   try { await fn(); } catch (error) { check(error.code === code, String(error)); return; }
@@ -157,7 +157,7 @@ test('browser bundle renders RemoteTui offline in Chromium and WebKit without ru
   assert.doesNotMatch(inputs, /pi-agent-core|pi-ai\/dist\/(?:auth|api|providers)|photon\.js|cross-spawn/);
   assert.doesNotMatch(inputs, /core\/tools\/(?:bash|powershell|read|write|edit|grep|find|ls)\.js/);
   for (const name of ['index.html', 'style.css', 'icon.svg', 'xterm.css']) {
-    if (name === 'xterm.css' || existsSync(join(root, 'src/web', name))) assert.ok(existsSync(join(outdir, name)), `${name} was not copied`);
+    if (name === 'xterm.css' || existsSync(join(root, 'src/web/client', name))) assert.ok(existsSync(join(outdir, name)), `${name} was not copied`);
   }
   const server = createServer(async (req, res) => {
     if (req.url === '/') {

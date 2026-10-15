@@ -5,10 +5,11 @@ import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import type { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { configPath } from '../protocol/config.js';
-import { readPresentationConfig } from '../protocol/presentation-config.js';
+import { configPath } from '../../protocol/config.js';
+import type { PresentationBundle } from '../../protocol/presentation-bundle.js';
+import { readPresentationConfig } from '../../protocol/presentation-config.js';
 import { defaultBrowserConfig, type BrowserConfig } from './browser-config.js';
-import { MAX_PRESENTATION_CONFIG_BYTES, presentationSourcesHash, readPresentationFile } from './presentation-files.js';
+import { MAX_PRESENTATION_CONFIG_BYTES, presentationSourcesHash, readPresentationFile } from '../../protocol/presentation-files.js';
 
 export const MAX_PRESENTATION_BUNDLE_BYTES = 8 * 1024 * 1024;
 const BUILD_TIMEOUT_MS = 30_000;
@@ -17,24 +18,14 @@ const MAX_WORKER_LOG_BYTES = 64 * 1024;
 const MAX_EXTENSIONS = 32;
 
 export function presentationHash(bundle: string): string { return createHash('sha256').update(bundle).digest('hex'); }
-export interface PresentationBundle {
-  bundle: string;
-  extensions: string[];
-  /** Absolute files observed through nested Jiti loaders, not guessed from source text. */
-  tracedModules: string[];
-  traceHome: string;
-  /** Absolute source files from esbuild, including static imports of traced dynamic modules. */
-  dependencies: string[];
-  /** Digest of the bytes actually consumed by the build, not a later filesystem read. */
-  sourceSignature: string;
-}
+
 export interface ServerPresentationOptions { uiConfig?: string; home?: string; env?: NodeJS.ProcessEnv }
 export interface ServerPresentationResult { config: BrowserConfig; bundle?: string }
 interface Cache { selection: string; signature: string; output: PresentationBundle }
 
 /** Trace trusted, same-user code only in a bounded, short-lived process, never in the listener. */
 async function buildPresentation(extensions: string[], env: NodeJS.ProcessEnv): Promise<PresentationBundle> {
-  const compiled = fileURLToPath(new URL('../cli/presentation-worker.js', import.meta.url));
+  const compiled = fileURLToPath(new URL('../build/presentation-worker.js', import.meta.url));
   const worker = existsSync(compiled) ? compiled : compiled.replace(/\.js$/, '.ts');
   // Do not copy execArgv: a listener/test runner can have --test, --inspect, or unrelated loaders.
   const args = [...(worker.endsWith('.ts') ? ['--import', import.meta.resolve('tsx')] : []), '--max-old-space-size=256', worker];

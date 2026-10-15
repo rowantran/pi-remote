@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
-import { readPrivateJson } from '../../src/web-server/private-state.js';
+import { readPrivateJson } from '../../src/web/server/private-state.js';
 
 // Device/push state still uses this reader after presentation uploads are removed.
 // Preserve its independent byte-limit and fragmented-read contract.

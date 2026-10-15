@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { snapshotForCache, ReadOnlyConnection } from '../../src/web/cache.js';
+import { snapshotForCache, ReadOnlyConnection } from '../../src/web/client/cache.js';
 import type { Snapshot } from '../../src/protocol/types.js';
 
 test('cached display strips stale questions, queued prompts, and running work without changing the live view', () => {

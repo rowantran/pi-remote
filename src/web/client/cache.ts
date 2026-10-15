@@ -1,7 +1,7 @@
-import type { RemoteConnection, Snapshot } from '../protocol/types.js';
-import type { DaemonMethod, MethodResult, RequestArgs } from '../protocol/methods.js';
-import { filterSnapshot } from '../protocol/transcript-filter.js';
-import { emptyLive } from '../protocol/live.js';
+import type { RemoteConnection, Snapshot } from '../../protocol/types.js';
+import type { DaemonMethod, MethodResult, RequestArgs } from '../../protocol/methods.js';
+import { filterSnapshot } from '../../protocol/transcript-filter.js';
+import { emptyLive } from '../../protocol/live.js';
 
 const DATABASE = 'pi-remote-transcripts';
 const STORE = 'snapshots';

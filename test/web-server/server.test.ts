@@ -9,10 +9,10 @@ import test, { type TestContext } from 'node:test';
 import { WebSocket } from 'ws';
 import { readJsonl, writeJsonl } from '../../src/protocol/jsonl.js';
 import { PI_VERSION, PROTOCOL_VERSION } from '../../src/protocol/types.js';
-import { DeviceStore, DEVICE_COOKIE, deviceToken } from '../../src/web-server/devices.js';
-import { serveMain } from '../../src/web-server/main.js';
-import { MAX_API_BYTES, MAX_WEB_BYTES, defaultStaticDir, startWebServer, type WebServerOptions } from '../../src/web-server/server.js';
-import { assertNoFunnel } from '../../src/web-server/tailscale.js';
+import { DeviceStore, DEVICE_COOKIE, deviceToken } from '../../src/web/server/devices.js';
+import { serveMain } from '../../src/web/server/main.js';
+import { MAX_API_BYTES, MAX_WEB_BYTES, defaultStaticDir, startWebServer, type WebServerOptions } from '../../src/web/server/server.js';
+import { assertNoFunnel } from '../../src/web/server/tailscale.js';
 
 const ORIGIN = 'https://phone.example.ts.net';
 const LOGIN = 'rowan@isara.io';
@@ -352,8 +352,8 @@ test('Funnel inspection includes foreground configs and rejects malformed/ambigu
 });
 
 test('source/release static bundle paths both point at dist/web, not src/web', () => {
-  assert.equal(defaultStaticDir('file:///checkout/src/web-server/server.ts'), '/checkout/dist/web/');
-  assert.equal(defaultStaticDir('file:///release/dist/web-server/server.js'), '/release/dist/web/');
+  assert.equal(defaultStaticDir('file:///checkout/src/web/server/server.ts'), '/checkout/dist/web/');
+  assert.equal(defaultStaticDir('file:///release/dist/web/server/server.js'), '/release/dist/web/');
 });
 
 test('CLI pair/list/revoke commands share private state and print a code only for explicit pairing', async t => {

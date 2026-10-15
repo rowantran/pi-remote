@@ -14,7 +14,10 @@
       "path": "./src/tui"
     },
     {
-      "path": "./src/web-server"
+      "path": "./src/web/server"
+    },
+    {
+      "path": "./src/web/build"
     },
     {
       "path": "./src/cli"

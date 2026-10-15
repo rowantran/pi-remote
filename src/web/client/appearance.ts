@@ -1,5 +1,5 @@
 import { colorToHex, parseColor } from '@earendil-works/pi-tui';
-import { resolveThemeSelection } from '../tui/local-theme.js';
+import { resolveThemeSelection } from '../../tui/local-theme.js';
 import { BUILTIN_THEME_DIR, readVirtualFile, virtualHome } from './shims/vfs.js';
 
 export type BrowserColorScheme = 'light' | 'dark';

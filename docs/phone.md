@@ -77,6 +77,15 @@ isolate the installed app's browser storage from the Safari tab. Generate a pair
 same devbox and with the same web state directory as the running service, then enter it in the
 installed app. Do not paste pairing codes into shared logs or commit them.
 
+## Code layout
+
+- `src/web/client/`: browser app, native input, offline cache, and browser compatibility shims.
+- `src/web/server/`: private HTTP/WebSocket listener, device pairing, push, and config delivery.
+- `src/web/build/`: app bundler and isolated presentation-build worker.
+
+The built browser assets remain in `dist/web/`. The server and builder have separate TypeScript
+projects: the listener cannot import TUI/build code, and the browser cannot import server/build code.
+
 ## Use a normal pi-remote config
 
 The web client reads a normal pi-remote `config.json` **on the devbox**. The default is

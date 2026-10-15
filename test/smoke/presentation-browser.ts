@@ -10,8 +10,8 @@ import { chromium, devices, webkit, type Page } from 'playwright';
 import { Connection, handshake } from '../../src/client/connection.js';
 import { Supervisor } from '../../src/daemon/supervisor.js';
 import { socketPath } from '../../src/protocol/paths.js';
-import { ServerPresentation } from '../../src/web-server/presentation.js';
-import { startWebServer } from '../../src/web-server/server.js';
+import { ServerPresentation } from '../../src/web/server/presentation.js';
+import { startWebServer } from '../../src/web/server/server.js';
 import { testProxy } from '../web-browser/proxy.js';
 
 /** Browser → test-only TLS proxy → private web socket → fixture daemon. No live Pi,

@@ -6,7 +6,7 @@ import { Connection } from '../../src/client/connection.js';
 import { ACTIVITY_CAPABILITY, activitySource, waitingOnBackground, type ActivitySnapshot } from '../../src/protocol/activity.js';
 import { readJsonl } from '../../src/protocol/jsonl.js';
 import { PI_VERSION, PROTOCOL_VERSION, type RecordValue, type RemoteEvent, type SlotInfo } from '../../src/protocol/types.js';
-import { ActivityTracker, startActivityMonitor, type ActivityNotice, type ActivityMonitorStatus } from '../../src/web-server/activity-monitor.js';
+import { ActivityTracker, startActivityMonitor, type ActivityNotice, type ActivityMonitorStatus } from '../../src/web/server/activity-monitor.js';
 
 const slot: SlotInfo = { id: 'slot', number: 1, cwd: '/remote', createdAt: '2026-01-01', pid: 123, status: 'running', clients: 0 };
 const seed = (options: Partial<ActivitySnapshot> = {}): ActivitySnapshot => ({ slot, seq: 10, sessionId: 'session', busy: false, compacting: false, dialogs: [], ...options });

@@ -6,16 +6,16 @@ import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createJiti, type Jiti, type JitiOptions, type TransformOptions } from 'jiti';
 import * as tui from '@earendil-works/pi-tui';
-import { PresentationHost, type PresentationFactory } from '../tui/presentation.js';
-import type { Snapshot } from '../protocol/types.js';
+import { PresentationHost, type PresentationFactory } from '../../tui/presentation.js';
+import type { Snapshot } from '../../protocol/types.js';
 import { TRACE_LOADER_KEY, type PresentationTraceLoader } from './presentation-trace-jiti.js';
 import type { BuildFailure, Loader, Message, Plugin } from 'esbuild';
-import { MAX_PRESENTATION_SOURCE_BYTES, MAX_PRESENTATION_SOURCE_FILES, MAX_PRESENTATION_SOURCE_TOTAL_BYTES, presentationSnapshotsHash, presentationSourceSnapshot, readPresentationFile, readPresentationFileSync, type PresentationSourceSnapshot } from '../web-server/presentation-files.js';
+import { MAX_PRESENTATION_SOURCE_BYTES, MAX_PRESENTATION_SOURCE_FILES, MAX_PRESENTATION_SOURCE_TOTAL_BYTES, presentationSnapshotsHash, presentationSourceSnapshot, readPresentationFile, readPresentationFileSync, type PresentationSourceSnapshot } from '../../protocol/presentation-files.js';
 
-import type { PresentationBundle } from '../web-server/presentation.js';
+import type { PresentationBundle } from '../../protocol/presentation-bundle.js';
 
 export interface BundlePresentationOptions { home?: string; minify?: boolean }
-export type { PresentationBundle } from '../web-server/presentation.js';
+export type { PresentationBundle } from '../../protocol/presentation-bundle.js';
 const require = createRequire(import.meta.url);
 const builtins = new Set(builtinModules.map(name => name.replace(/^node:/, '')));
 const canonical = (name: string) => name.replace(/^@mariozechner\//, '@earendil-works/').replace(/^node:/, '');

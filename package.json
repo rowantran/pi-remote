@@ -12,7 +12,7 @@
     "build": "npm run clean && tsc -b && npm run build:web",
     "build:web": "node --import tsx scripts/build-web.ts",
     "deploy": "node --import tsx scripts/deploy.ts",
-    "check": "tsc -b && tsc -p test/tsconfig.json --noEmit && tsc -p scripts/tsconfig.json --noEmit && tsc -p src/web/tsconfig.json --noEmit",
+    "check": "tsc -b && tsc -p test/tsconfig.json --noEmit && tsc -p scripts/tsconfig.json --noEmit && tsc -p src/web/client/tsconfig.json --noEmit",
     "test": "node --import tsx --test 'test/**/*.test.ts'",
     "test:mobile": "npm run build && node --import tsx test/smoke/mobile-browser.ts",
     "test:presentation": "npm run build && node --import tsx test/smoke/presentation-browser.ts",

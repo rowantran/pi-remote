@@ -1,9 +1,9 @@
 import { setTimeout as delay } from 'node:timers/promises';
-import type { Connection } from '../client/connection.js';
+import type { Connection } from '../../client/connection.js';
 import { ACTIVITY_CAPABILITY, ACTIVITY_DIALOG_METHODS, activitySlot, waitingOnBackground,
-  type ActivityMessage, type ActivitySnapshot, type RemoteActivity } from '../protocol/activity.js';
-import { MAX_QUEUED_BYTES } from '../protocol/jsonl.js';
-import { PI_VERSION, PROTOCOL_VERSION, type RemoteEvent, type SlotInfo } from '../protocol/types.js';
+  type ActivityMessage, type ActivitySnapshot, type RemoteActivity } from '../../protocol/activity.js';
+import { MAX_QUEUED_BYTES } from '../../protocol/jsonl.js';
+import { PI_VERSION, PROTOCOL_VERSION, type RemoteEvent, type SlotInfo } from '../../protocol/types.js';
 
 export interface ActivityNotice { id: string; slot: SlotInfo; kind: 'done' | 'blocked' | 'error'; method?: string }
 export type ActivityMonitorStatus = 'active' | 'unsupported' | 'disconnected';

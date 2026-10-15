@@ -1,7 +1,7 @@
 import './shims/globals.js';
-import { RemoteTui } from '../tui/tui.js';
-import { ReconnectingConnection } from '../client/reconnect.js';
-import type { SlotInfo } from '../protocol/types.js';
+import { RemoteTui } from '../../tui/tui.js';
+import { ReconnectingConnection } from '../../client/reconnect.js';
+import type { SlotInfo } from '../../protocol/types.js';
 import { configureVirtualFiles } from './shims/vfs.js';
 import { browserPresentationOptions, browserTerminalTheme, loadBrowserPresentation, presentationWarning, type BrowserPresentationConfig } from './presentation.js';
 import { WebSocketConnection } from './connection.js';

@@ -7,8 +7,8 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { chromium, webkit } from 'playwright';
-import { bundlePresentation, presentationTraceKey } from '../src/cli/presentation-bundle.js';
-import { buildWeb } from '../scripts/build-web.js';
+import { bundlePresentation, presentationTraceKey } from '../src/web/build/presentation-bundle.js';
+import { buildWeb } from '../src/web/build/app.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const source = (path: string) => JSON.stringify(join(root, path));
@@ -141,10 +141,10 @@ test('presentation trace and browser bundle preserve static/nested dynamic impor
 
   const probe = join(output, 'probe.ts');
   await writeFile(probe, `
-    import { installPresentationRegistry } from ${source('src/web/presentation.ts')};
+    import { installPresentationRegistry } from ${source('src/web/client/presentation.ts')};
     import { PresentationHost } from ${source('src/tui/presentation.ts')};
-    import { configureVirtualFiles } from ${source('src/web/shims/vfs.ts')};
-    import { presentationRegistry } from ${source('src/web/shims/globals.ts')};
+    import { configureVirtualFiles } from ${source('src/web/client/shims/vfs.ts')};
+    import { presentationRegistry } from ${source('src/web/client/shims/globals.ts')};
     import { Text, stripTerminalSequences } from ${source('node_modules/@earendil-works/pi-tui/dist/index.js')};
     import { Theme, initTheme, getMarkdownTheme, CustomEntryComponent } from '@earendil-works/pi-coding-agent';
     const check = (value, message) => { if (!value) throw new Error(message); };

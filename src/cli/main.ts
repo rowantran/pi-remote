@@ -195,7 +195,7 @@ export function shouldReconnect(command: string, flags: ReadonlySet<string>, std
 export async function main(args = process.argv.slice(2)): Promise<void> {
   // Separate parser: serve is local-only and deliberately has no TCP bind option.
   if (args[0] === 'serve') {
-    const { serveMain } = await import('../web-server/main.js');
+    const { serveMain } = await import('../web/server/main.js');
     await serveMain(args.slice(1)); return;
   }
   const first = args[0] ?? 'help';

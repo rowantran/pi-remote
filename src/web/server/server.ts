@@ -6,10 +6,10 @@ import { join, resolve } from 'node:path';
 import type { Socket } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
-import { Connection, handshake } from '../client/connection.js';
-import { ensureDaemon } from '../daemon/launch.js';
-import { MAX_FRAME_BYTES } from '../protocol/jsonl.js';
-import type { DaemonMethod } from '../protocol/methods.js';
+import { Connection, handshake } from '../../client/connection.js';
+import { ensureDaemon } from '../../daemon/launch.js';
+import { MAX_FRAME_BYTES } from '../../protocol/jsonl.js';
+import type { DaemonMethod } from '../../protocol/methods.js';
 import { defaultBrowserConfig, type BrowserConfig } from './browser-config.js';
 import { DEVICE_COOKIE, DEVICE_FILE, DeviceStore, deviceCookie, deviceToken, type Device } from './devices.js';
 import { listenPrivate, privateDirectory } from './private-state.js';
@@ -20,8 +20,8 @@ export const MAX_WEB_BYTES = MAX_FRAME_BYTES;
 export const MAX_API_BYTES = 16 * 1024;
 export function defaultWebStateDir(): string { return join(homedir(), '.pi', 'remote', 'web'); }
 export function defaultStaticDir(moduleUrl = import.meta.url): string {
-  // src/web-server/*.ts in a checkout; dist/web-server/*.js in a deployed release.
-  return fileURLToPath(new URL(moduleUrl.endsWith('.ts') ? '../../dist/web/' : '../web/', moduleUrl));
+  // src/web/server/*.ts in a checkout; dist/web/server/*.js in a deployed release.
+  return fileURLToPath(new URL(moduleUrl.endsWith('.ts') ? '../../../dist/web/' : '../', moduleUrl));
 }
 export interface WebServerContext {
   readonly origin: string;

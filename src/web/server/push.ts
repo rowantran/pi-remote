@@ -7,7 +7,7 @@ import webpush from 'web-push';
 import type { DeviceStore } from './devices.js';
 import { privateDirectory, privateFile, readPrivateJson } from './private-state.js';
 import { readJsonBody, type AuthenticatedContext } from './server.js';
-import type { SlotInfo } from '../protocol/types.js';
+import type { SlotInfo } from '../../protocol/types.js';
 
 export interface BellNotice { id: string; slot: SlotInfo; kind: 'done' | 'blocked' | 'error' }
 interface Subscription { endpoint: string; expirationTime?: number | null; keys: { p256dh: string; auth: string } }

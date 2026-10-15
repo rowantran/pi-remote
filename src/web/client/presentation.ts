@@ -15,9 +15,9 @@ import * as perfHooks from 'node:perf_hooks';
 import * as jiti from './shims/jiti.js';
 import { presentationRegistry } from './shims/globals.js';
 import type { VirtualFiles } from './shims/vfs.js';
-import { readPresentationConfig, type PresentationFactoryEntry } from '../tui/presentation.js';
-import { readPiDoubleEscapeAction, readPiHideThinkingBlock, readPiThemeSetting } from '../tui/local-theme.js';
-import type { TuiOptions } from '../tui/tui.js';
+import { readPresentationConfig, type PresentationFactoryEntry } from '../../tui/presentation.js';
+import { readPiDoubleEscapeAction, readPiHideThinkingBlock, readPiThemeSetting } from '../../tui/local-theme.js';
+import type { TuiOptions } from '../../tui/tui.js';
 import { applyBrowserAppearance, readBrowserAppearance } from './appearance.js';
 
 export interface BrowserPresentationConfig extends VirtualFiles { presentation?: { hash: string }; presentationError?: string }

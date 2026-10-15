@@ -3,7 +3,7 @@ import { request as httpRequest, type IncomingHttpHeaders } from 'node:http';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
-import { startWebServer } from '../../src/web-server/server.js';
+import { startWebServer } from '../../src/web/server/server.js';
 
 const ORIGIN = 'https://presentation.example.ts.net';
 const LOGIN = 'rowan@example.com';

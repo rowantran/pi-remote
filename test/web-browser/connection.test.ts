@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { WebSocketConnection } from '../../src/web/connection.js';
+import { WebSocketConnection } from '../../src/web/client/connection.js';
 
 /** Browser WebSocket boundary double; expected records are independent daemon envelopes. */
 class BrowserSocket extends EventTarget {

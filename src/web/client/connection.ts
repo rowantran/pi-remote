@@ -1,5 +1,5 @@
-import { PI_VERSION, PROTOCOL_VERSION, type RemoteConnection, type RemoteEvent, type Result } from '../protocol/types.js';
-import type { DaemonMethod, MethodResult, RequestArgs } from '../protocol/methods.js';
+import { PI_VERSION, PROTOCOL_VERSION, type RemoteConnection, type RemoteEvent, type Result } from '../../protocol/types.js';
+import type { DaemonMethod, MethodResult, RequestArgs } from '../../protocol/methods.js';
 
 const MAX_BYTES = 64 * 1024 * 1024;
 const bytes = (value: string) => new TextEncoder().encode(value).byteLength;

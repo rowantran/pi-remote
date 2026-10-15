@@ -3,7 +3,7 @@ import { open, opendir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { configPath } from '../protocol/config.js';
+import { configPath } from '../../protocol/config.js';
 
 export interface PresentationMetadata { hash: string; bundleBytes: number; extensions: string[] }
 export interface BrowserConfig { home: string; files: Record<string, string>; presentation?: PresentationMetadata; presentationError?: string }

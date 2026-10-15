@@ -3,8 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { defaultBrowserConfig, MAX_THEME_BYTES } from '../../src/web-server/browser-config.js';
-import { startWebServer } from '../../src/web-server/server.js';
+import { defaultBrowserConfig, MAX_THEME_BYTES } from '../../src/web/server/browser-config.js';
+import { startWebServer } from '../../src/web/server/server.js';
 import { request as httpRequest } from 'node:http';
 
 const ORIGIN = 'https://phone.example.ts.net';

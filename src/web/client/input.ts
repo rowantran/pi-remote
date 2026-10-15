@@ -1,6 +1,6 @@
-import { RemoteAutocompleteProvider } from '../tui/editor-completion.js';
-import type { RemoteTui, TuiOptions } from '../tui/tui.js';
-import type { RecordValue, RemoteConnection } from '../protocol/types.js';
+import { RemoteAutocompleteProvider } from '../../tui/editor-completion.js';
+import type { RemoteTui, TuiOptions } from '../../tui/tui.js';
+import type { RecordValue, RemoteConnection } from '../../protocol/types.js';
 import type { SelectItem } from '@earendil-works/pi-tui';
 
 const commands = ['help', 'model', 'thinking', 'new', 'fork', 'tree', 'resume', 'session', 'copy', 'name', 'compact', 'export', 'reload', 'quit'];

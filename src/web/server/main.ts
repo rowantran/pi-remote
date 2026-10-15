@@ -4,8 +4,8 @@ import { privateDirectory } from './private-state.js';
 import { defaultWebStateDir, startWebServer } from './server.js';
 import { PushService } from './push.js';
 import { startActivityMonitor } from './activity-monitor.js';
-import { Connection, handshake } from '../client/connection.js';
-import { ensureDaemon } from '../daemon/launch.js';
+import { Connection, handshake } from '../../client/connection.js';
+import { ensureDaemon } from '../../daemon/launch.js';
 
 export { startWebServer, defaultWebStateDir, defaultStaticDir, readJsonBody } from './server.js';
 export type { WebServerOptions, WebServerHandle, WebServerContext, AuthenticatedContext } from './server.js';

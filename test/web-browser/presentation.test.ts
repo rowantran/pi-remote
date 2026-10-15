@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { chromium, webkit, devices } from 'playwright';
-import { buildWeb } from '../../scripts/build-web.js';
+import { buildWeb } from '../../src/web/build/app.js';
 
 const root = resolve(import.meta.dirname, '../..');
 const source = (path: string) => JSON.stringify(join(root, path));
@@ -30,12 +30,12 @@ export const factories = [{ path: '/laptop/adapter.ts', factory: async pi => {
 `;
 const probe = `
 import { RemoteTui } from ${source('src/tui/tui.ts')};
-import { XtermTerminal } from ${source('src/web/terminal.ts')};
-import { configureVirtualFiles, readVirtualFile, BUILTIN_THEME_DIR } from ${source('src/web/shims/vfs.ts')};
-import { loadBrowserPresentation, browserPresentationOptions, browserTerminalTheme } from ${source('src/web/presentation.ts')};
-import { readBrowserAppearance, themeCssColor } from ${source('src/web/appearance.ts')};
-import { presentationRegistry, browserModuleResolve } from ${source('src/web/shims/globals.ts')};
-import { createJiti } from ${source('src/web/shims/jiti.ts')};
+import { XtermTerminal } from ${source('src/web/client/terminal.ts')};
+import { configureVirtualFiles, readVirtualFile, BUILTIN_THEME_DIR } from ${source('src/web/client/shims/vfs.ts')};
+import { loadBrowserPresentation, browserPresentationOptions, browserTerminalTheme } from ${source('src/web/client/presentation.ts')};
+import { readBrowserAppearance, themeCssColor } from ${source('src/web/client/appearance.ts')};
+import { presentationRegistry, browserModuleResolve } from ${source('src/web/client/shims/globals.ts')};
+import { createJiti } from ${source('src/web/client/shims/jiti.ts')};
 import { existsSync } from 'node:fs';
 import { stripTerminalSequences } from ${source('node_modules/@earendil-works/pi-tui/dist/index.js')};
 const check = (value, message) => { if (!value) throw new Error(message); };

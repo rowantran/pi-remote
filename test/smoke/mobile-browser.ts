@@ -10,9 +10,9 @@ import { Supervisor } from '../../src/daemon/supervisor.js';
 import { Connection, handshake } from '../../src/client/connection.js';
 import { socketPath } from '../../src/protocol/paths.js';
 import type { RemoteEvent } from '../../src/protocol/types.js';
-import { startWebServer } from '../../src/web-server/server.js';
-import { PushService } from '../../src/web-server/push.js';
-import { startActivityMonitor, type ActivityMonitor } from '../../src/web-server/activity-monitor.js';
+import { startWebServer } from '../../src/web/server/server.js';
+import { PushService } from '../../src/web/server/push.js';
+import { startActivityMonitor, type ActivityMonitor } from '../../src/web/server/activity-monitor.js';
 import { testProxy } from '../web-browser/proxy.js';
 
 /** Real browser → TLS test proxy → web Unix socket → isolated daemon → deterministic Pi child.

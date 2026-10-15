@@ -5,9 +5,9 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import test from 'node:test';
-import { DeviceStore, type Device } from '../../src/web-server/devices.js';
-import { PushService, validateSubscription, type BellNotice } from '../../src/web-server/push.js';
-import type { AuthenticatedContext } from '../../src/web-server/server.js';
+import { DeviceStore, type Device } from '../../src/web/server/devices.js';
+import { PushService, validateSubscription, type BellNotice } from '../../src/web/server/push.js';
+import type { AuthenticatedContext } from '../../src/web/server/server.js';
 
 const origin = 'https://devbox.example.test';
 const allowedLogins = ['rowan@example.test'];
