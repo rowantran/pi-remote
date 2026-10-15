@@ -11,6 +11,9 @@ HOST defaults to PI_REMOTE_HOST, then the client configuration file.
   --wait        Wait for idle slots before restarting the daemon.
   --no-restart  Install without restarting the daemon.
   -h, --help    Show this help without building or connecting.
+
+An active pi-remote-web.service user service always restarts onto the new release.
+It owns no Pi sessions, so the restart only reconnects phone clients.
 `;
 
 export interface DeployOptions {
@@ -101,6 +104,16 @@ previous=$(readlink -f -- "$base/bin/pi-remote" || true)
 ln -s "$release/bin/pi-remote" "$base/bin/.pi-remote-$name"
 mv -Tf "$base/bin/.pi-remote-$name" "$base/bin/pi-remote"
 switched=1
+# The phone web service owns no Pi sessions, so restart it at once. Doing this before
+# cleanup moves it off an old release that cleanup could otherwise delete under it.
+web=pi-remote-web.service
+if command -v systemctl >/dev/null 2>&1 && systemctl --user --quiet is-active "$web" 2>/dev/null; then
+  systemctl --user restart "$web" || {
+    printf 'Release %s is installed, but %s did not restart; see journalctl --user -u %s\n' "$name" "$web" "$web" >&2
+    exit 1
+  }
+  printf 'Restarted %s on release %s\n' "$web" "$name"
+fi
 # Preserve current, previous, and every release referenced by a running process.
 # If ps fails, set -e stops cleanup rather than deleting potentially live code.
 process_args=$(ps -eo args=)
@@ -112,7 +125,7 @@ for dir in "$base"/releases/*; do
 done
 `;
 
-export const ARCHIVE_FILES = ['package.json', 'package-lock.json', 'dist', 'bin', 'completions', 'example-configs'];
+export const ARCHIVE_FILES = ['package.json', 'package-lock.json', 'dist', 'bin', 'completions'];
 
 export interface DeployDependencies {
   run: ProcessRunner;

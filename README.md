@@ -88,14 +88,14 @@ The local client reads `$XDG_CONFIG_HOME/pi-remote/config.json`. If `XDG_CONFIG_
 {
   "host": "devbox",
   "cwd": "~/workplace/project",
-  "extensions": ["/absolute/path/to/pi-remote/example-configs/rowan-ui.ts"],
+  "extensions": ["./my-ui.ts"],
   "theme": "dark",
   "bell": true,
   "sideSplit": "auto"
 }
 ```
 
-Replace the extension path with your checkout's absolute path, and load only adapters you trust. [`example-configs/rowan-ui.ts`](example-configs/rowan-ui.ts) is a user-specific adapter, not a portable default; see [local presentation](#opt-in-explicitly) before enabling it. Omit `extensions` to use the built-in display, unless you select adapters with `--ui-extension`.
+Keep your own trusted adapter at `my-ui.ts` beside `config.json`. The relative path works on both the laptop and devbox when each has those files. Adapters are user-owned files, not part of the pi-remote release; manage them with your dotfiles or copy them separately. See [local presentation](#opt-in-explicitly) before enabling one. Omit `extensions` to use the built-in display, unless you select adapters with `--ui-extension`.
 
 The host comes from the first of these that is set: `--host`, the `PI_REMOTE_HOST` environment variable, then the config file. `--local` ignores all three.
 
@@ -109,7 +109,7 @@ The host comes from the first of these that is set: `--host`, the `PI_REMOTE_HOS
 
 The old default path `~/.pi/remote-client.json` is no longer read. There is no fallback, detection, or warning. UI settings must be in the XDG config or a file explicitly selected with `--ui-config`.
 
-To migrate, merge your old UI keys into the XDG config, keeping any existing connection defaults, then remove the old file. Preserve absolute extension paths, or adjust relative paths for the new config directory. Each relative path is resolved beside its originating file, so copying it unchanged from `~/.pi/remote-client.json` to `~/.config/pi-remote/config.json` can select a different file. If your allowlist still points into the checkout's old `examples/` directory, update it to `example-configs/`; the directory was renamed to distinguish adapter examples from JSON client configuration.
+To migrate, merge your old UI keys into the XDG config, keeping any existing connection defaults, then remove the old file. Preserve absolute extension paths, or adjust relative paths for the new config directory. Each relative path is resolved beside its originating file, so copying it unchanged from `~/.pi/remote-client.json` to `~/.config/pi-remote/config.json` can select a different file. If your allowlist points into the checkout's old `examples/` or `example-configs/` directory, move your adapter beside `config.json` and select it with a relative path such as `./my-ui.ts`.
 
 ### Shell completion (fish, zsh, bash)
 
@@ -296,7 +296,7 @@ The local client can separately load trusted presentation adapters for tool call
 
 ### Opt in explicitly
 
-Use repeatable `--ui-extension PATH` flags, or add an explicit `extensions` allowlist to your **local** `$XDG_CONFIG_HOME/pi-remote/config.json` (default `~/.config/pi-remote/config.json`). See the [unified config example](#configuration) and [migration instructions](#removed-ui-configuration-path).
+Keep your trusted adapter beside your **local** `$XDG_CONFIG_HOME/pi-remote/config.json` (default `~/.config/pi-remote/config.json`) and add `"extensions": ["./my-ui.ts"]`. Keep the same layout on the devbox for the phone client. Each machine needs its own copy of the adapter and its display dependencies; deployment does not install them. You can also use repeatable `--ui-extension PATH` flags. See the [unified config example](#configuration) and [migration instructions](#removed-ui-configuration-path).
 
 `--ui-config PATH` selects another file for UI settings only and replaces the default UI config, without overriding connection defaults. Config-relative extension paths resolve beside their originating file; command-line paths resolve from the local working directory. `~/` means local home here. CLI extension paths are added to the config allowlist and deduplicated. Only exact files are selected: the client does **not** automatically load local Pi extension directories, project resources, or packages. Explicit adapters can still import other modules.
 
@@ -307,36 +307,45 @@ pi-remote attach 1 --ui-config ./remote-ui.json --no-reconnect
 
 `--theme NAME` overrides the config theme. Without either, the client uses the `theme` setting from local `~/.pi/agent/settings.json`, then `system`. Available themes include `system`, `dark`, `light`, and JSON themes from local `~/.pi/agent/themes/` (or `$PI_CODING_AGENT_DIR/themes/`). A `LIGHT/DARK` pair, such as `light/dark` or `gruvbox-light/gruvbox-dark`, selects the member for the local terminal, like Pi. The client asks the terminal for its background color (OSC 11) at startup, then falls back to the terminal's light/dark report and `COLORFGBG`, then dark. Pairs also follow live light/dark switches from terminals that send mode 2031 reports. A single theme name, such as `gruvbox-dark`, is always used as given, even in a light terminal. Use `/theme NAME` to change the current client and `/reload-ui` to reread its selected adapters/config. Neither command changes remote settings or restarts Pi; theme files are not watched automatically.
 
-[`example-configs/rowan-ui.ts`](example-configs/rowan-ui.ts) is a trusted TypeScript presentation adapter, not a JSON client configuration file. It is a **user-specific selective adapter**, not a portable default. It expects Rowan's extension repository locally at `~/.pi/agent/git/github.com/rowantran/pi-extensions`, or at `$PI_REMOTE_RENDERER_REPO`. It loads the original footer, caret, assistant-background, and compact-tool factories unchanged, selects the existing codemode renderers and the display-only `background/render.ts` message and `background/widget.ts` active-task renderers, and runs the full original `worked-for.ts` factory.
+Adapters outside the checkout must not import pi-remote source files. Import public display APIs and types from `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` instead. The presentation host resolves these packages, and `jiti`, to its installed copies. Keep any extra display modules available on each machine and select only visual factories, not providers, workers, or tool executors. Missing or incompatible imports produce a load warning.
 
-Worked-for uses a narrow local facade: its expected `worked-for` append is suppressed (other entry types throw), its model-context hook is not registered, and its normal display hooks, entry renderer, and Markdown transformer use the presentation host unchanged. Remote Pi alone persists timing entries; local settle events never write or forward them. Other extensions still cannot call `appendEntry` locally. The original timer updates the local working message and stops on settle, detach, and UI reload. The factory also patches native Pi's private `CustomEntryComponent` spacing, but this client's Transcript renders custom entries directly, so that patch does not establish native custom-entry spacing parity. Missing or incompatible original modules produce a load warning, not a handwritten fallback.
-
-The adapter avoids the provider, background-worker, MCP, Slack, and codemode execution factories. Background completion/check-in messages use the same compact header, five output lines, and hidden-line count as normal Pi. Active background tasks use the same bordered box as native Pi, coloured with the **local** theme and fitted to the local terminal width. Full result content remains available to the remote agent and the background output tool. Update the local pi-extensions checkout to a version that includes `worked-for.ts`, `background/render.ts`, and `background/widget.ts` before using this adapter. Review its imports and adapt paths before selecting it with `--ui-extension ./example-configs/rowan-ui.ts` or your config allowlist.
-
-The remote pi-extensions checkout also needs RPC widget support: its `background.ts` sends plain task lines once per second while work runs, and clears the widget when no tasks remain. Without a local adapter those lines are still readable. After updating remote extensions, start a new slot; existing Pi processes do not reload them. After updating the local adapter, use `/reload-ui` or reattach.
+Use `/reload-ui` or reattach after updating a laptop adapter. Reload the phone after updating the devbox copy. Changes to remote Pi extension factories require a new slot or `/reload`; changing a presentation adapter does not reload remote extensions.
 
 ### Read remote widgets in a local adapter
 
 `ctx.ui.getRemoteWidget(key)` is a **pi-remote-only** read API, not a stock Pi method. It returns an immutable object with `key`, `lines`, and `placement`, or `undefined` for an absent, cleared, empty, or malformed widget. The lines have terminal escape codes removed. Embedded newlines become separate rows, and tabs become spaces, so each string is safe to return as one component row. Reading sends no requests, runs no tools, and cannot change remote state.
 
-Call the getter from `render()` to read the current state after each remote update or reconnect. A local widget with the same key replaces the plain remote display, but the getter still reads the remote lines. Return `[]` when the remote widget is absent. If the local component fails, the client removes it and shows the plain remote copy; `/reload-ui` can restore the local renderer. For typed adapters, `PresentationUIContext` is exported from `src/tui/presentation.ts`:
+Call the getter from `render()` to read the current state after each remote update or reconnect. A local widget with the same key replaces the plain remote display, but the getter still reads the remote lines. Return `[]` when the remote widget is absent. If the local component fails, the client removes it and shows the plain remote copy; `/reload-ui` can restore the local renderer. Declare the small read API locally in your `my-ui.ts`; no pi-remote source import is needed:
 
 ```ts
-pi.on('session_start', (_event, ctx) => {
-  const ui = ctx.ui as PresentationUIContext;
-  if (typeof ui.getRemoteWidget !== 'function') return; // Stock Pi has no such method.
-  ui.setWidget('my-widget', () => ({
-    invalidate() {},
-    render(width) {
-      const remote = ui.getRemoteWidget('my-widget');
-      return remote ? remote.lines.map(line =>
-        truncateToWidth(ui.theme.fg('accent', line), width)) : [];
-    },
-  }), { placement: 'belowEditor' });
-});
+import type { ExtensionAPI, ExtensionUIContext } from '@earendil-works/pi-coding-agent';
+import { truncateToWidth } from '@earendil-works/pi-tui';
+
+type RemoteWidgetUI = ExtensionUIContext & {
+  getRemoteWidget(key: string): {
+    readonly key: string;
+    readonly lines: readonly string[];
+    readonly placement: 'aboveEditor' | 'belowEditor';
+  } | undefined;
+};
+
+export default function myUi(pi: ExtensionAPI) {
+  pi.on('session_start', (_event, ctx) => {
+    const ui = ctx.ui as RemoteWidgetUI;
+    if (typeof ui.getRemoteWidget !== 'function') return; // Stock Pi has no such method.
+    ui.setWidget('my-widget', () => ({
+      invalidate() {},
+      render(width) {
+        const remote = ui.getRemoteWidget('my-widget');
+        return remote ? remote.lines.map(line =>
+          truncateToWidth(ui.theme.fg('accent', line), width)) : [];
+      },
+    }), { placement: 'belowEditor' });
+  });
+}
 ```
 
-Use the local theme for colour and the supplied width for layout. Choose the same placement as the remote widget. `example-configs/rowan-ui.ts` uses this API to render active background tasks without loading the background worker factory.
+Use the local theme for colour and the supplied width for layout. Choose the same placement as the remote widget. This lets a local adapter render remote task status without loading the worker factory.
 
 ### Trust boundary
 
@@ -422,9 +431,9 @@ The client runs `ssh HOST ~/.local/share/pi-remote/bin/pi-remote bridge`, so tha
 
 `npm run deploy -- [HOST]` (default host: `PI_REMOTE_HOST`, then the config file) does this:
 
-1. Builds `dist/` locally and copies it with `package.json`, the lockfile, `bin/`, `completions/` and `example-configs/` to a new release directory, named after the UTC time and git commit (`-dirty` with uncommitted changes).
+1. Builds `dist/` locally, including the phone app, and copies it with `package.json`, the lockfile, `bin/` and `completions/` to a new release directory, named after the UTC time and git commit (`-dirty` with uncommitted changes).
 2. Runs `npm ci --omit=dev --ignore-scripts` there and checks that the release starts.
-3. Switches `bin/pi-remote` to the new release in one atomic rename.
+3. Switches `bin/pi-remote` to the new release in one atomic rename. If the [phone web service](docs/phone.md#install-and-run) `pi-remote-web.service` is active, restarts it onto the new release. This only reconnects phones; it runs even with `--no-restart`.
 4. Deletes old releases. It keeps the new release, the previous one, and any release a running process uses. A release never changes after install, because a running daemon loads modules from its own release.
 5. Runs `pi-remote restart-daemon`. If a slot is busy, the new release stays installed and the old daemon keeps running; run `pi-remote restart-daemon --wait` later. `npm run deploy -- --wait` waits instead; `npm run deploy -- --no-restart` skips this step.
 
@@ -477,7 +486,7 @@ PI_REMOTE_TEST_HOST=devbox node --import tsx test/smoke/remote-features-smoke.ts
 
 # Test actual local terminal input/reconnect in an isolated tmux server.
 # Requires tmux and the user-specific Rowan presentation adapter dependencies.
-PI_REMOTE_TEST_HOST=devbox node --import tsx test/smoke/terminal-smoke.ts
+PI_REMOTE_TEST_HOST=devbox node --import tsx test/smoke/terminal-smoke.ts --real /path/to/my-ui.ts
 ```
 
 The remote smoke tests use separate `/tmp/pi-remote-{smoke,features,terminal}.*` state directories, start only their own slots, and stop those slots and their daemons afterward. The terminal test uses the separate `pi-remote-test` tmux server. It leaves test files/logs for inspection. It does not change global Pi settings or credentials.
@@ -501,13 +510,13 @@ npm run test:scroll -- --snapshot /tmp/pi-scroll.json \
 
 Capture uses only read-only slot/history queries. The new snapshot file is private (`0600`); it contains conversation and tool output, so do not commit or share it. Replay uses a memory terminal and reports frame/render timings and output hashes, not transcript text. Streaming and metadata events are simulated locally; they never change the real slot.
 
-For before/after comparisons, use the same snapshot, dimensions, theme and adapter code in both worktrees. Select a worktree-local adapter with `--ui-extension` and an absent `--ui-config` path, rather than a config that points at the other checkout. Compare the reported transcript hashes and renderer-patch flags. Run each scenario separately (`idle-scroll`, `metadata-update-scroll`, `assistant-delta-scroll`) and alternate baseline/fixed runs. Startup is excluded; normal renderer timers remain active. See [`test/bench/scroll-benchmark.ts`](test/bench/scroll-benchmark.ts) for complete commands and limitations.
+For before/after comparisons, use the same snapshot, dimensions, theme and adapter code in both worktrees. To benchmark a real adapter, pass `--real /path/to/my-ui.ts` and an absent `--ui-config` path to bypass configured adapters. Use the same user-owned adapter outside both worktrees; no adapter path is built into the runner. Compare the reported transcript hashes and renderer-patch flags. Run each scenario separately (`idle-scroll`, `metadata-update-scroll`, `assistant-delta-scroll`) and alternate baseline/fixed runs. Startup is excluded; normal renderer timers remain active. See [`test/bench/scroll-benchmark.ts`](test/bench/scroll-benchmark.ts) for complete commands and limitations.
 
 Compare the actual stock Pi terminal UI using a real, isolated SDK session:
 
 ```sh
 npm run test:native-scroll -- --snapshot /tmp/pi-scroll.json --presentation vanilla
-npm run test:native-scroll -- --snapshot /tmp/pi-scroll.json --presentation rowan
+npm run test:native-scroll -- --snapshot /tmp/pi-scroll.json --real /path/to/my-ui.ts
 ```
 
 Native startup selects compaction-aware history. Use `--history full` for a diagnostic full-history comparison, or [`test/bench/context-scroll-snapshot.ts`](test/bench/context-scroll-snapshot.ts) to select the same compacted entries for remote replay while retaining all entries for footer totals. Pin the same theme in both runners (`--theme-file` for native, `--theme` for remote). Optional `--profile FILE` captures only measured frames; profiling runs should be separate from timing comparisons. The explicit idle-only `--experiment` modes test potential cache savings and are **not production behavior**. CPU frame cost is not delivered FPS. pi-remote uses a local 8 ms minimum interval between normal frame starts; focused keyboard input stays immediate. Stock native Pi still uses its 16 ms throttle. Add `--render-interval 16 --scheduled-duration 2000` to an idle replay for a scheduler control, or use `--render-interval 8` for the current default. The scheduled measurement counts moving frames written to a memory terminal, not frames displayed by a terminal emulator. See [the original investigation](test/bench/scroll-performance.md) and [production fixes](test/bench/render-budget.md) for measurements and limitations.
@@ -566,7 +575,8 @@ owns local-connection startup and the legacy filesystem fallback.
 - `src/cli/main.ts`, `connections.ts`, `completion.ts`: commands, connection wiring, and shell completion.
 - `src/cli/config.ts`: connection-default wrappers for `host` and `cwd`, using the shared config schema and path.
 - `bin/pi-remote`, `src/protocol/node-entry.ts`: source/compiled launch selection and child-process module arguments.
-- `example-configs/rowan-ui.ts`: selective, user-specific presentation adapter.
+
+Presentation adapters are user-owned files beside `config.json` (for example `my-ui.ts`), not repository source or deployed release files.
 
 Project references enforce these dependencies: a layer cannot import another
 layer's source unless it declares that project as a reference. `npm run build`

@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { homedir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium, devices, webkit, type Page } from 'playwright';
 import { Connection, handshake } from '../../src/client/connection.js';
@@ -16,10 +16,16 @@ import { testProxy } from '../web-browser/proxy.js';
 
 /** Browser → test-only TLS proxy → private web socket → fixture daemon. No live Pi,
  * providers, credentials, service changes, or model calls. Run after building dist/web.
- * --real selects the trusted rowan-ui adapter and local gruvbox themes instead of
- * the deterministic adapter. It still uses only the isolated fixture daemon. */
-const real = process.argv.slice(2).includes('--real');
-assert.ok(process.argv.slice(2).every(arg => arg === '--real'), 'Only --real is supported');
+ * --real <adapter-path> selects a trusted user-owned Rowan adapter and local
+ * gruvbox themes instead of the deterministic adapter. It still uses only the
+ * isolated fixture daemon. */
+const args = process.argv.slice(2);
+const real = args[0] === '--real';
+assert.ok(args.length === 0 || (real && args.length === 2 && args[1] && !args[1].startsWith('-')),
+  'Usage: node --import tsx test/smoke/presentation-browser.ts [--real <adapter-path>]; --real requires an explicit adapter path');
+const adapter = real ? resolve(args[1]) : undefined;
+if (adapter) assert.ok(await stat(adapter).then(info => info.isFile(), () => false),
+  `Adapter path must name an existing file: ${adapter}`);
 const dir = await mkdtemp('/tmp/pi-presentation-smoke-');
 const sourceDir = await mkdtemp(join(homedir(), '.pi-phone-presentation-'));
 const browserHome = homedir();
@@ -209,7 +215,7 @@ try {
   // Write the normal config after the listener starts: no upload or restart.
   if (real) {
     await writeFile(uiConfig, JSON.stringify({ theme: 'gruvbox-light/gruvbox-dark', bell: false,
-      extensions: [fileURLToPath(new URL('../../example-configs/rowan-ui.ts', import.meta.url))] }));
+      extensions: [adapter] }));
   } else await fixturePresentation();
   const presentation = await new ServerPresentation({ uiConfig }).read();
   assert.ok(presentation.bundle);

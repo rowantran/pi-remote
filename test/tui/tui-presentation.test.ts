@@ -1,12 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AssistantMessageComponent, ToolExecutionComponent } from '@earendil-works/pi-coding-agent';
-import { stripTerminalSequences, visibleWidth, type Terminal } from '@earendil-works/pi-tui';
+import { stripTerminalSequences, type Terminal } from '@earendil-works/pi-tui';
 import { RemoteTui } from '../../src/tui/tui.js';
 import { createPresentationTheme, PresentationHost } from '../../src/tui/presentation.js';
 import { loadLocalTheme, resolveThemeSelection, terminalAppearance } from '../../src/tui/local-theme.js';
@@ -586,45 +584,82 @@ test('opt-in custom editors are trusted input controllers, not a security sandbo
   assert.equal(prompts[0].params?.command.message, 'trusted synthetic input');
 });
 
-const repo = process.env.PI_REMOTE_RENDERER_REPO ?? '/Users/rowan/.pi/agent/git/github.com/rowantran/pi-extensions';
-test('actual Rowan adapter renders virtual footer, caret, compact tools, codemode and worked-for locally', {
-  skip: !['codex-footer.ts', 'background/widget.ts'].every(file => existsSync(resolve(repo, file))),
-}, async t => {
-  const initial = snapshot();
-  initial.live.messages = [{ role: 'assistant', timestamp: 1, provider: 'provider', model: 'physical', stopReason: 'stop', usage: { cost: { total: 0.25 } }, content: [
-    { type: 'toolCall', id: 'read1', name: 'read', arguments: { path: '/remote/a.ts' } },
-    { type: 'toolCall', id: 'code1', name: 'codemode', arguments: { code: '// Verify nested work\ntext("ok")' } },
-  ] },
-  { role: 'toolResult', timestamp: 2, toolCallId: 'read1', toolName: 'read', content: [{ type: 'text', text: 'first\nsecond' }] },
-  { role: 'toolResult', timestamp: 3, toolCallId: 'code1', toolName: 'codemode', content: [
-    { type: 'text', text: 'Script completed\nWall time 0.5 seconds\nOutput:\n' }, { type: 'text', text: 'all verified' },
-  ], details: { calls: [{ id: 'nested1', name: 'read', args: '{"path":"/remote/nested.ts"}', status: 'ok' }] } }];
-  initial.entries = [{ type: 'custom', id: 'worked', parentId: null, customType: 'worked-for', data: { elapsedSeconds: 75 } }]; initial.leafId = 'worked';
-  const adapter = fileURLToPath(new URL('../../example-configs/rowan-ui.ts', import.meta.url));
-  const assistantRender = AssistantMessageComponent.prototype.render;
-  const toolRender = ToolExecutionComponent.prototype.render;
-  const { ui, terminal, connection, submit } = await launch(t, initial, [adapter]);
-  assert.ok(ui.presentation?.footer, (ui as any).transcript.notices.join('\n'));
-  assert.notEqual(AssistantMessageComponent.prototype.render, assistantRender);
-  assert.notEqual(ToolExecutionComponent.prototype.render, toolRender);
-  assert.equal(ui.presentation!.transformMarkdown('_Worked for 1m 15s_', {
-    messageType: 'assistant', isStreaming: false, availableWidth: 140,
-  }), '');
-  const footer = stripTerminalSequences(ui.presentation!.footer!.render(140).join('\n'));
-  assert.match(footer, /physical high/); assert.match(footer, /73% left/); assert.match(footer, /remote-git/);
-  ui.editor.setText('draft'); assert.match(stripTerminalSequences(ui.editor.render(140).join('\n')), /› draft/);
-  const render = (width = 140) => stripTerminalSequences((ui as any).transcript.render(width).join('\n'));
-  const output = render();
-  assert.match(output, /Worked for 1m 15s/); assert.match(output, /Read 2 lines/); assert.match(output, /all verified/);
-  assert.match(output, /nested.ts/); assert.equal((output.match(/Codemode/g) ?? []).length, 1);
-  assert.doesNotMatch(output, /✓ codemode|✓ read/);
-  const requests = connection.requests.length;
-  await submit('/tool-call'); assert.match(render(), /text\("ok"\)/);
-  assert.equal(connection.requests.length, requests);
-  terminal.input('\x1bo'); await flush();
-  for (const width of [1, 8, 40, 140]) {
-    (ui as any).transcript.invalidate();
-    assert.ok((ui as any).transcript.render(width).every((line: string) => visibleWidth(line) <= width));
-  }
-  assert.ok(!('execute' in ui.presentation!.tools.get('read')!));
+test('presentation tickers and native spinners settle repeatedly and retire on reload, reconnect and detach', async t => {
+  for (const action of ['reload', 'reconnect', 'detach']) await t.test(action, async t => {
+    t.mock.timers.enable({ apis: ['setInterval'] });
+    const active = new Set<ReturnType<typeof setInterval>>();
+    const set = globalThis.setInterval, clear = globalThis.clearInterval;
+    t.mock.method(globalThis, 'setInterval', (...args: Parameters<typeof setInterval>) => {
+      const timer = set(...args); active.add(timer); return timer;
+    });
+    t.mock.method(globalThis, 'clearInterval', (timer: ReturnType<typeof setInterval>) => { active.delete(timer); clear(timer); });
+    const fixture = fileURLToPath(new URL('../fixtures/presentation/working-lifecycle.ts', import.meta.url));
+    const { ui, connection, terminal } = await launch(t, snapshot(), [fixture]);
+    const write = t.mock.method(terminal, 'write');
+    const screen = () => { ui.tui.renderNow(); return stripTerminalSequences(ui.tui.getScreenLines().join('\n')); };
+    const metadata = [...active][0];
+    assert.equal(active.size, 1, 'Only the metadata poll runs while idle');
+    // Settled events refresh the read-only snapshot. Return the current state, not a stale fixture.
+    const handler = connection.handler;
+    connection.handler = (method, params) => method === 'snapshot' ? structuredClone(ui.view.snapshot) : handler(method, params);
+    let seq = 0;
+    const emit = async (type: string) => {
+      connection.listener!({ type: 'event', slotId: 'slot', seq: ++seq, event: { type } }); await flush();
+    };
+    try {
+      for (let run = 0; run < 3; run++) {
+        await emit('agent_start');
+        assert.equal(active.size, 3, 'Presentation ticker, native spinner, metadata poll');
+        const spinner = (ui as any).working;
+        const first = screen();
+        assert.match(first, /Fixture tick 0/);
+        t.mock.timers.tick(80); await flush();
+        assert.notEqual(screen(), first, 'The native spinner animates between ticker updates');
+        t.mock.timers.tick(1920); await flush();
+        assert.match(screen(), /Fixture tick 2/);
+        assert.equal((ui as any).working, spinner, 'Message updates do not reset the native spinner');
+        await emit('agent_start');
+        assert.equal(active.size, 3);
+        assert.match(screen(), /Fixture tick 2/);
+        await emit('agent_settled');
+        assert.equal(active.size, 1);
+        assert.doesNotMatch(screen(), /Fixture tick/);
+      }
+      await emit('agent_start');
+      const retired = ui.presentation!;
+      const oldTimers = [...active].filter(timer => timer !== metadata);
+      const entries = structuredClone(ui.view.snapshot.entries);
+      if (action === 'reload') {
+        ui.setDraft('/reload-ui'); await ui.submitDraft('steer'); await flush();
+        assert.notEqual(ui.presentation, retired);
+        assert.equal(active.size, 3);
+        assert.ok(oldTimers.every(timer => !active.has(timer)));
+        assert.match(screen(), /Fixture tick 0/);
+        // A retired host must not invoke hooks that could create another ticker.
+        await retired.dispatch({ type: 'agent_start' });
+        assert.equal(active.size, 3);
+      }
+      if (action === 'reconnect') {
+        const idle = structuredClone(ui.view.snapshot); idle.seq = ++seq; idle.live.busy = false;
+        connection.reconnected!(idle); await flush();
+        assert.equal(active.size, 1);
+        assert.ok(oldTimers.every(timer => !active.has(timer)));
+        const busy = structuredClone(idle); busy.seq = ++seq; busy.live.busy = true;
+        connection.reconnected!(busy); await flush();
+        assert.equal(active.size, 3);
+        assert.match(screen(), /Fixture tick 0/);
+      }
+      assert.equal(ui.view.snapshot.live.busy, true);
+      ui.detach(); await flush();
+      assert.equal(active.size, 0);
+      const writes = write.mock.callCount();
+      t.mock.timers.tick(5000); await flush();
+      assert.equal(write.mock.callCount(), writes, 'Retired timers cannot write to the terminal');
+      assert.deepEqual(ui.view.snapshot.entries, entries);
+      assert.equal(ui.view.snapshot.live.busy, true, 'Local cleanup must not stop remote work');
+      assert.ok(connection.requests.every(request => request.method === 'filesystem_metadata' || request.method === 'snapshot'
+        || (request.method === 'rpc' && ['get_available_models', 'get_session_stats', 'get_commands'].includes(request.params?.command?.type))),
+      'Presentation animation and cleanup may only read remote state');
+    } finally { ui.detach(); await flush(); for (const timer of active) clear(timer); }
+  });
 });

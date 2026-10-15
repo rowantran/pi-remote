@@ -82,7 +82,7 @@ test('deploy builds, explicitly archives the lockfile, installs, restarts, and c
   assert.ok(f.calls.every(call => call.options.cwd === f.root));
   assert.deepEqual(f.calls[2].args, ['run', 'build']);
   const archive = join(f.tempDir, 'release.tar.gz');
-  assert.deepEqual(f.calls[3].args, ['-czf', archive, 'package.json', 'package-lock.json', 'dist', 'bin', 'completions', 'example-configs']);
+  assert.deepEqual(f.calls[3].args, ['-czf', archive, 'package.json', 'package-lock.json', 'dist', 'bin', 'completions']);
   assert.equal(f.calls[3].options.env?.COPYFILE_DISABLE, '1');
   assert.ok(!f.calls[3].args.includes('--no-xattrs'), 'Use tar arguments supported by both BSD and GNU tar');
   assert.deepEqual(f.calls[4].args, ['-o', 'BatchMode=yes', 'user@dev-box', 'mktemp /tmp/pi-remote-deploy.XXXXXX']);

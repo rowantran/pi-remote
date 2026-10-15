@@ -45,7 +45,7 @@ async function fixture() {
     }
   `);
   // Do not rely on import.meta.url in the browser for nested paths: the browser has one bundle URL.
-  // The fixture passes an explicit home-based path just as the real rowan-ui adapter does.
+  // User-owned adapters can select display modules with explicit home-based paths.
   await writeFile(join(dir, 'dynamic.ts'), `
     import { createJiti } from 'jiti';
     import { join } from 'node:path';

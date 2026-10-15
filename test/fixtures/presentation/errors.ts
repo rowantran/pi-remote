@@ -6,6 +6,7 @@ export default function (pi: any) {
   pi.registerTool({ name: 'broken', parameters: {}, renderCall() { throw new Error('tool renderer failed'); }, execute() { throw new Error('MUST NOT EXECUTE'); } });
   pi.registerCommand('exec', { handler() { pi.exec('must-not-run'); } });
   pi.registerCommand('send', { handler() { pi.sendUserMessage('must-not-send'); } });
+  pi.registerCommand('append', { handler() { pi.appendEntry('worked-for', { elapsedSeconds: 999 }); } });
   pi.registerCommand('provider', { handler() { pi.registerProvider('must-not-register', {}); } });
   pi.registerCommand('virtual', { handler() { pi.registerVirtualModel({}); } });
   pi.registerCommand('mcp', { handler() { pi.registerMcpServer('must-not-start', {}); } });
