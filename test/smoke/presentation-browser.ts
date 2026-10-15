@@ -214,7 +214,7 @@ try {
   const presentation = await new ServerPresentation({ uiConfig }).read();
   assert.ok(presentation.bundle);
   assert.equal(presentation.config.presentation?.extensions.length, 1);
-  if (!real) assert.match(presentation.bundle, new RegExp(`~/${basename(sourceDir)}/leaf\\.ts`));
+  if (!real) assert.ok(presentation.bundle.includes(join(sourceDir, 'leaf.ts')), 'Dynamic modules use absolute server paths');
 
   for (const browserType of [chromium, webkit]) {
     // Chromium's service-worker loader does not inherit ignoreHTTPSErrors.

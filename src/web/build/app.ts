@@ -4,6 +4,8 @@ import { copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build, type BuildFailure, type Message, type Plugin } from 'esbuild';
+import { canonicalBrowserModule } from '../../protocol/browser-compat.js';
+import { browserBuildOptions, runtimeOnlyBrowserModule } from './browser-compat.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const require = createRequire(import.meta.url);
@@ -19,7 +21,6 @@ const replacements: Record<string, string> = {
   perf_hooks: join(shims, 'perf-hooks.ts'),
 };
 const builtins = new Set(builtinModules.flatMap(name => [name, `node:${name}`]));
-const bare = (path: string) => path.replace(/^node:/, '');
 
 /**
  * Shared display modules import Node APIs for laptop-only features. Missing named exports are
@@ -30,6 +31,7 @@ function browserPlugin(missing: Map<string, Set<string>>): Plugin {
   return {
     name: 'pi-remote-browser',
     setup(context) {
+      context.onResolve({ filter: runtimeOnlyBrowserModule }, args => ({ errors: [{ text: `Browser build cannot import runtime-only module: ${args.path}` }] }));
       context.onResolve({ filter: /^@earendil-works\/pi-coding-agent$/ }, () => ({ path: join(shims, 'pi-coding-agent.ts') }));
       context.onResolve({ filter: /^pi-coding-agent-dist\// }, args => ({ path: join(agentDist, args.path.slice('pi-coding-agent-dist/'.length)) }));
       context.onResolve({ filter: /^@earendil-works\/pi-ai$/ }, () => ({ path: join(shims, 'pi-ai.ts') }));
@@ -44,7 +46,7 @@ function browserPlugin(missing: Map<string, Set<string>>): Plugin {
       context.onResolve({ filter: /^jiti$/ }, () => ({ path: join(shims, 'jiti.ts') }));
       context.onResolve({ filter: /^(node:)?[a-z_/]+$/ }, args => {
         if (!builtins.has(args.path)) return undefined;
-        return { path: bare(args.path), namespace: 'node-stub' };
+        return { path: canonicalBrowserModule(args.path), namespace: 'node-stub' };
       });
       context.onLoad({ filter: /.*/, namespace: 'node-stub' }, args => {
         const names = [...(missing.get(args.path) ?? [])].filter(name => name !== 'default');
@@ -114,18 +116,15 @@ export async function buildWeb(options: BuildWebOptions = {}): Promise<void> {
   for (let attempt = 0; ; attempt++) {
     try {
       const result = await build({
-        entryPoints: [options.entry ?? join(root, 'src/web/client/main.ts')], bundle: true, format: 'esm', platform: 'browser',
-        target: ['safari16.4', 'chrome120'], outdir, entryNames: 'app', minify: options.minify ?? true, sourcemap: true,
-        logLevel: 'silent', legalComments: 'none', plugins: [browserPlugin(missing)],
+        ...browserBuildOptions, entryPoints: [options.entry ?? join(root, 'src/web/client/main.ts')],
+        outdir, entryNames: 'app', minify: options.minify ?? true, sourcemap: true, plugins: [browserPlugin(missing)],
         // Injection binds references before dependency evaluation; an entry side-effect import is too late.
         inject: [join(shims, 'globals.ts')],
         define: { 'process.env.NODE_ENV': '"production"', 'import.meta.resolve': 'browserModuleResolve' },
-        conditions: ['browser', 'import', 'default'], metafile: true, write: false,
         loader: { '.json': 'json' },
       });
       // Fail closed if a new display import brings in runtime-only modules.
-      const forbidden = Object.keys(result.metafile!.inputs).filter(path =>
-        /@earendil-works\/(?:pi-agent-core|pi-ai\/dist\/(?:api|auth|providers)|pi-coding-agent\/dist\/core\/(?:agent-session|extensions|tools\/(?:bash|read|edit|write|grep|find|ls|powershell)\.js))/.test(path));
+      const forbidden = Object.keys(result.metafile!.inputs).filter(path => runtimeOnlyBrowserModule.test(path));
       if (forbidden.length) throw new Error(`Browser build includes runtime-only modules:\n${forbidden.join('\n')}`);
       await mkdir(outdir, { recursive: true });
       for (const output of result.outputFiles!) await writeFile(output.path, output.contents);

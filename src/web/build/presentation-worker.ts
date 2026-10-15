@@ -19,7 +19,6 @@ async function main(): Promise<void> {
     chunks.push(data);
   }
   const request = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { extensions: string[] };
-  // Trace keys describe this machine's real home, not the browser's virtual home option.
   const result = await bundlePresentation(request.extensions);
   if (Buffer.byteLength(result.bundle) > 8 * 1024 * 1024) throw new Error('Presentation bundle exceeds limit');
   await send({ ok: true, result });

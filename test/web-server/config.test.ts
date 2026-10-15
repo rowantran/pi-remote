@@ -4,11 +4,6 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { defaultBrowserConfig, MAX_THEME_BYTES } from '../../src/web/server/browser-config.js';
-import { startWebServer } from '../../src/web/server/server.js';
-import { request as httpRequest } from 'node:http';
-
-const ORIGIN = 'https://phone.example.ts.net';
-const LOGIN = 'rowan@isara.io';
 
 test('browser config exposes only safe settings, pinned themes, bounded custom themes, and virtual client settings', async t => {
   const home = await mkdtemp('/tmp/pi-web-config-');
@@ -98,40 +93,4 @@ test('browser settings accept theme names and light/dark pairs, but never paths'
     assert.deepEqual(JSON.parse(config.files[join(home, '.pi', 'agent', 'settings.json')]), expected);
     assert.deepEqual(JSON.parse(config.files[join(home, '.config', 'pi-remote', 'config.json')]), expected);
   }
-});
-
-test('authenticated /api/config delivers the provider output only to paired devices', async t => {
-  const root = await mkdtemp('/tmp/pi-web-config-route-');
-  const home = join(root, 'home');
-  await mkdir(home, { mode: 0o700 });
-  let calls = 0;
-  const server = await startWebServer({
-    origin: ORIGIN, allowedLogins: [LOGIN], stateDir: join(root, 'state'),
-    checkTailscale: async () => {},
-    configProvider: async () => { calls++; return defaultBrowserConfig({ home, env: {} }); },
-  });
-  t.after(async () => { await server.close(); await rm(root, { recursive: true, force: true }); });
-  async function get(headers: Record<string, string>) {
-    return new Promise<{ status: number; body: any; cache?: string }>((accept, reject) => {
-      const request = httpRequest({ socketPath: server.socketPath, path: '/api/config', headers: { Host: 'localhost', 'X-Forwarded-Host': new URL(ORIGIN).host, 'X-Forwarded-Proto': 'https', ...headers }, agent: false }, response => {
-        const chunks: Buffer[] = [];
-        response.on('data', chunk => chunks.push(chunk));
-        response.on('end', () => accept({ status: response.statusCode!, body: JSON.parse(Buffer.concat(chunks).toString()), cache: response.headers['cache-control'] }));
-      });
-      request.once('error', reject); request.end();
-    });
-  }
-  assert.equal((await get({})).status, 403);
-  assert.equal((await get({ 'Tailscale-User-Login': LOGIN })).status, 401);
-  assert.equal(calls, 0);
-  const code = await server.devices.issuePairingCode();
-  const paired = await server.devices.pair(code.code, 'Configuration phone', LOGIN);
-  assert.ok(paired);
-  const result = await get({ 'Tailscale-User-Login': LOGIN, Cookie: `__Host-pi-remote-device=${paired.token}` });
-  assert.equal(result.status, 200);
-  assert.equal(result.cache, 'no-store');
-  assert.equal(result.body.home, home);
-  assert.ok(result.body.files[join(home, '.pi', 'agent', 'themes', 'dark.json')]);
-  assert.ok(result.body.files[join(home, '.pi', 'agent', 'themes', 'light.json')]);
-  assert.equal(calls, 1);
 });

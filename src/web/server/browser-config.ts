@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { configPath } from '../../protocol/config.js';
+import type { PresentationConfig } from '../../protocol/presentation-config.js';
 
 export interface PresentationMetadata { hash: string; bundleBytes: number; extensions: string[] }
 export interface BrowserConfig { home: string; files: Record<string, string>; presentation?: PresentationMetadata; presentationError?: string }
@@ -65,7 +66,7 @@ export async function builtinThemeFiles(home: string): Promise<Record<string, st
 }
 
 /** Deliberately independent of daemon/agent configuration loaders: those can read secrets. */
-export async function defaultBrowserConfig(options: { home?: string; env?: NodeJS.ProcessEnv; uiConfig?: string } = {}): Promise<BrowserConfig> {
+export async function defaultBrowserConfig(options: { home?: string; env?: NodeJS.ProcessEnv; uiConfig?: string; config?: PresentationConfig } = {}): Promise<BrowserConfig> {
   const home = options.home ?? homedir();
   const env = options.env ?? process.env;
   const selectedAgentDir = env.PI_CODING_AGENT_DIR ?? join(home, '.pi', 'agent');
@@ -93,7 +94,7 @@ export async function defaultBrowserConfig(options: { home?: string; env?: NodeJ
   if (typeof settings.hideThinkingBlock === 'boolean') safeSettings.hideThinkingBlock = settings.hideThinkingBlock;
   if (typeof settings.doubleEscapeAction === 'string' && ['fork', 'tree', 'none'].includes(settings.doubleEscapeAction)) safeSettings.doubleEscapeAction = settings.doubleEscapeAction;
   files[join(home, '.pi', 'agent', 'settings.json')] = JSON.stringify(safeSettings);
-  const config = await jsonFile(options.uiConfig ?? configPath(env, home), true) ?? {};
+  const config = options.config ?? await jsonFile(options.uiConfig ?? configPath(env, home), true) ?? {};
   const safeConfig: Record<string, unknown> = {};
   if (validThemeSelection(config.theme)) safeConfig.theme = config.theme;
   if (typeof config.bell === 'boolean') safeConfig.bell = config.bell;

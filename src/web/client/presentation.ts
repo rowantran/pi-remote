@@ -24,7 +24,6 @@ export interface BrowserPresentationConfig extends VirtualFiles { presentation?:
 export interface BrowserPresentationBundle {
   factories: readonly PresentationFactoryEntry[];
   dynamic?: Record<string, any>;
-  traceHome?: string;
 }
 let factories: readonly PresentationFactoryEntry[] = [];
 export let presentationWarning: Error | undefined;
@@ -32,20 +31,13 @@ export let presentationWarning: Error | undefined;
 /** Both bundles use these exact module instances, including Pi's theme singleton and classes. */
 export function installPresentationRegistry(): void {
   const registry = presentationRegistry();
-  const modules: Record<string, Record<string, any>> = {
+  Object.assign(registry.modules, {
     '@earendil-works/pi-coding-agent': agent, '@earendil-works/pi-tui': tui, '@earendil-works/pi-ai': ai,
     '@earendil-works/pi-ai/compat': ai, jiti,
-    'file:///__pi_browser__/modes/interactive/components/custom-entry.js': { CustomEntryComponent: (agent as any).CustomEntryComponent },
     '/__pi_browser__/modes/interactive/components/custom-entry.js': { CustomEntryComponent: (agent as any).CustomEntryComponent },
     fs, 'fs/promises': fsPromises, os, path, url, crypto, module, util, events, buffer, perf_hooks: perfHooks,
     process: { ...registry.globals.process, default: registry.globals.process },
-  };
-  for (const [specifier, namespace] of Object.entries(modules)) {
-    registry.modules[specifier] = namespace;
-    if (specifier.startsWith('@earendil-works/')) registry.modules[specifier.replace('@earendil-works/', '@mariozechner/')] = namespace;
-    else if (!specifier.includes('/') && specifier !== 'jiti' || specifier === 'fs/promises') registry.modules[`node:${specifier}`] = namespace;
-  }
-  registry.import = specifier => jiti.createJiti().import(specifier);
+  });
 }
 
 /** A failed adapter never blocks attaching to the remote session or falls back to eval. */
@@ -59,7 +51,6 @@ export async function loadBrowserPresentation(
   factories = [];
   presentationWarning = undefined;
   registry.dynamic = Object.create(null);
-  registry.traceHome = undefined;
   if (config.presentationError) {
     presentationWarning = new Error(config.presentationError);
     notify(presentationWarning);
@@ -77,12 +68,10 @@ export async function loadBrowserPresentation(
     if (bundle.dynamic !== undefined && (!bundle.dynamic || typeof bundle.dynamic !== 'object' || Array.isArray(bundle.dynamic))) {
       throw new Error('Invalid bundled presentation modules');
     }
-    registry.traceHome = typeof bundle.traceHome === 'string' ? bundle.traceHome : undefined;
-    registry.dynamic = Object.fromEntries(Object.entries(bundle.dynamic ?? {}).map(([key, value]) => [jiti.presentationModuleKey(key), value]));
+    registry.dynamic = bundle.dynamic ?? Object.create(null);
     factories = bundle.factories;
   } catch (error) {
     registry.dynamic = Object.create(null);
-    registry.traceHome = undefined;
     presentationWarning = new Error(`Phone presentation unavailable; using built-in display. ${error instanceof Error ? error.message : String(error)}`);
     notify(presentationWarning);
   }

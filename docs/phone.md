@@ -225,7 +225,7 @@ A saved transcript is a read-only preview while the daemon reconnects, including
 reload. Sending and answering old questions are disabled. Once authenticated, the daemon's current
 snapshot replaces the preview; neither cached messages nor unsent drafts are submitted to Pi.
 Quota/private-browsing errors only disable caching. iOS can evict local storage; the remote session
-remains authoritative and continues running on the devbox. Synced presentation bundles and
+remains authoritative and continues running on the devbox. Server-built presentation bundles and
 settings are not persisted with snapshots; an offline reload uses built-in presentation until
 online authentication and configuration loading succeed again.
 

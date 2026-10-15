@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { request as httpRequest, type IncomingHttpHeaders } from 'node:http';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { webRequest } from './http.js';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import { startWebServer } from '../../src/web/server/server.js';
@@ -16,30 +16,27 @@ test('server config and hash-bound JavaScript routes require pairing, identity, 
   const root = await mkdtemp('/tmp/pi-presentation-route-');
   const configPath = join(root, 'config.json');
   const extension = join(root, 'extension.ts');
+  const marker = join(root, 'build-marker');
   let daemonOpens = 0;
   await writeFile(configPath, JSON.stringify({ theme: 'light/dark', bell: false, extensions: ['./extension.ts'], host: 'PRIVATE_HOST', cwd: '/PRIVATE_CWD' }));
-  await writeFile(extension, 'export default function(pi) { pi.on("session_start", () => { console.log("FIRST_RENDERER"); }); }');
+  await writeFile(extension, `import { appendFileSync } from 'node:fs'; export default function(pi) {
+    appendFileSync(${JSON.stringify(marker)}, 'built');
+    pi.on("session_start", () => { console.log("FIRST_RENDERER"); });
+  }`);
   const server = await startWebServer({
     origin: ORIGIN, allowedLogins: [LOGIN], stateDir: join(root, 'state'), uiConfig: configPath,
     checkTailscale: async () => {},
     openDaemon: async () => { daemonOpens++; throw new Error('HTTP presentation must not open a daemon'); },
   });
   t.after(async () => { await server.close(); await rm(root, { recursive: true, force: true }); });
-  async function get(path: string, headers: Record<string, string> = {}, method = 'GET') {
-    return new Promise<{ status: number; body: string; headers: IncomingHttpHeaders }>((accept, reject) => {
-      const request = httpRequest({ socketPath: server.socketPath, path, method, agent: false, headers: {
-        Host: 'localhost', 'X-Forwarded-Host': new URL(ORIGIN).host, 'X-Forwarded-Proto': 'https', 'Tailscale-User-Login': LOGIN, ...headers,
-      } }, response => {
-        const chunks: Buffer[] = [];
-        response.on('data', chunk => chunks.push(chunk));
-        response.on('error', reject);
-        response.on('end', () => accept({ status: response.statusCode!, body: Buffer.concat(chunks).toString('utf8'), headers: response.headers }));
-      });
-      request.on('error', reject); request.end();
-    });
-  }
+  const get = (path: string, headers: Record<string, string> = {}, method = 'GET') =>
+    webRequest(server.socketPath, path, { method, headers: {
+      Host: 'localhost', 'X-Forwarded-Host': new URL(ORIGIN).host, 'X-Forwarded-Proto': 'https', 'Tailscale-User-Login': LOGIN, ...headers,
+    } });
+  assert.equal((await get('/api/config', { 'Tailscale-User-Login': '' })).status, 403);
   assert.equal((await get('/api/config')).status, 401);
   assert.equal((await get('/api/presentation.js?v=anything')).status, 401);
+  await assert.rejects(readFile(marker), { code: 'ENOENT' }, 'No extension setup may run before identity and device pairing');
   const code = await server.devices.issuePairingCode();
   const paired = await server.devices.pair(code.code, 'Presentation test phone', LOGIN);
   assert.ok(paired);
@@ -48,6 +45,8 @@ test('server config and hash-bound JavaScript routes require pairing, identity, 
   assert.equal(configResult.status, 200, configResult.body);
   const config = JSON.parse(configResult.body);
   const hash = config.presentation.hash;
+  assert.equal(await readFile(marker, 'utf8'), 'built');
+  for (const name of ['dark', 'light']) assert.ok(config.files[join(config.home, '.pi', 'agent', 'themes', `${name}.json`)]);
   assert.equal(configResult.headers['cache-control'], 'no-store');
   assert.deepEqual(config.presentation.extensions, [extension]);
   assert.deepEqual(JSON.parse(config.files[join(config.home, '.config', 'pi-remote', 'config.json')]), { theme: 'light/dark', bell: false });

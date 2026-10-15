@@ -7,13 +7,6 @@ import { startActivityMonitor } from './activity-monitor.js';
 import { Connection, handshake } from '../../client/connection.js';
 import { ensureDaemon } from '../../daemon/launch.js';
 
-export { startWebServer, defaultWebStateDir, defaultStaticDir, readJsonBody } from './server.js';
-export type { WebServerOptions, WebServerHandle, WebServerContext, AuthenticatedContext } from './server.js';
-export { DeviceStore, DEVICE_COOKIE } from './devices.js';
-export type { Device } from './devices.js';
-export { defaultBrowserConfig } from './browser-config.js';
-export type { BrowserConfig, PresentationMetadata } from './browser-config.js';
-
 const HELP = `Usage:
   pi-remote serve --origin https://HOST --allow-user LOGIN [--allow-user LOGIN ...]
   pi-remote serve pair [--web-state-dir DIR]

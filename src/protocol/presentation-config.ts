@@ -16,6 +16,13 @@ export async function readPresentationConfig(
   let text: string | undefined;
   try { text = await readFile(file, 'utf8'); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  return parsePresentationConfig(text, file, cliExtensions, home);
+}
+
+/** Parse one config snapshot and resolve extension paths without reading files or loading code. */
+export function parsePresentationConfig(
+  text: string | undefined, file: string, cliExtensions: string[] = [], home = homedir(),
+): PresentationConfig {
   let config: ClientConfig = {};
   if (text !== undefined) {
     try { config = parseConfig(text, file); }

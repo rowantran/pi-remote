@@ -1,5 +1,8 @@
 import { Buffer } from 'buffer';
-import { unavailable } from './unsupported.js';
+import { normalize } from 'node:path';
+import { canonicalBrowserModule } from '../../../protocol/browser-compat.js';
+import { virtualHome, unavailable } from './vfs.js';
+import { fileURLToPath } from './url.js';
 
 /** Injected by esbuild into every module, so globals exist before dependency evaluation. */
 const env: Record<string, string | undefined> = {
@@ -39,7 +42,7 @@ export const global = globalThis;
 export interface BrowserPresentationRegistry {
   modules: Record<string, Record<string, any>>;
   dynamic: Record<string, any>;
-  traceHome?: string;
+  require: typeof requirePresentation;
   resolve: typeof browserModuleResolve;
   import: (specifier: string) => Promise<any>;
   globals: Record<string, any>;
@@ -47,21 +50,37 @@ export interface BrowserPresentationRegistry {
 export function presentationRegistry(): BrowserPresentationRegistry {
   const host = globalThis as typeof globalThis & { __piRemotePresentation?: BrowserPresentationRegistry };
   return host.__piRemotePresentation ??= {
-    modules: Object.create(null), dynamic: Object.create(null), resolve: browserModuleResolve,
-    import: async specifier => unavailable(`Presentation module ${specifier} was not bundled`),
+    modules: Object.create(null), dynamic: Object.create(null), require: requirePresentation, resolve: browserModuleResolve,
+    import: async specifier => requirePresentation(specifier),
     globals: { process: processShim, Buffer, global, setTimeout, clearTimeout, setInterval, clearInterval, setImmediate, clearImmediate },
   };
 }
+/** Dynamic imports resolve only against this server's bundled modules, without network/eval. */
+export function presentationModuleKey(path: string): string {
+  if (typeof path !== 'string') throw new TypeError('Presentation module path must be a string');
+  if (path.startsWith('file:')) path = fileURLToPath(path);
+  if (path === '~' || path.startsWith('~/')) path = virtualHome() + path.slice(1);
+  return normalize(canonicalBrowserModule(path));
+}
+function requirePresentation(specifier: string, alias?: string): any {
+  const registry = presentationRegistry();
+  for (const path of alias ? [specifier, alias] : [specifier]) {
+    const key = presentationModuleKey(path);
+    if (Object.hasOwn(registry.modules, key)) return registry.modules[key];
+    if (Object.hasOwn(registry.dynamic, key)) return registry.dynamic[key];
+  }
+  return unavailable(`Presentation module ${specifier} was not bundled; import it during extension setup on the server, then reload`);
+}
 /** Metadata URLs only; this does not import Node modules or grant filesystem access. */
 export function browserModuleResolve(specifier: string): string {
-  const canonical = specifier.replace(/^@mariozechner\//, '@earendil-works/');
+  const canonical = canonicalBrowserModule(specifier);
   if (canonical === '@earendil-works/pi-coding-agent') return 'file:///__pi_browser__/index.js';
   if (/^@earendil-works\/pi-(?:tui|ai|agent-core)(?:\/(?:compat|oauth|providers\/all))?$/.test(canonical)) {
     return `file:///__pi_browser__/${canonical.slice('@earendil-works/'.length)}/index.js`;
   }
   if (specifier.startsWith('file:') || specifier.startsWith('/')) return new URL(specifier, 'file:///').href;
-  if (Object.hasOwn(presentationRegistry().modules, specifier)) return `file:///__pi_browser__/modules/${encodeURIComponent(specifier)}.js`;
-  return unavailable(`Module resolution (${specifier}); sync and bundle this presentation dependency first`);
+  if (Object.hasOwn(presentationRegistry().modules, canonical)) return `file:///__pi_browser__/modules/${encodeURIComponent(canonical)}.js`;
+  return unavailable(`Module resolution (${specifier}); bundle this presentation dependency on the server first`);
 }
 /** Pi's ScrollView/selection timers use Node's unref(). Bind timer calls in the bundle
  * to these handles rather than patching the pinned package or browser globals. */

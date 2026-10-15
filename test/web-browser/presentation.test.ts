@@ -17,13 +17,12 @@ const { Text } = registry.modules['@earendil-works/pi-tui'];
 const { createJiti } = registry.modules.jiti;
 const { homedir } = registry.modules.os;
 const { join } = registry.modules.path;
-export const traceHome = '/laptop';
-export const dynamic = { '~/extensions/footer.ts': {
+export const dynamic = { '/devbox/extensions/footer.ts': {
   default: pi => pi.on('session_start', (_event, context) => {
     context.ui.setFooter(() => new Text('SYNCED_PHONE_FOOTER', 0, 0));
   }), named: 'DYNAMIC_NAMESPACE',
 } };
-export const factories = [{ path: '/laptop/adapter.ts', factory: async pi => {
+export const factories = [{ path: '/devbox/adapter.ts', factory: async pi => {
   const factory = await createJiti().import(join(homedir(), 'extensions/footer.ts'), { default: true });
   await factory(pi);
 } }];
@@ -64,13 +63,17 @@ async function probe() {
   const loader = createJiti();
   const namespace = await loader.import('/devbox/extensions/footer.ts');
   check(namespace.named === 'DYNAMIC_NAMESPACE', 'Namespace import lost named exports');
-  check(await loader.import('file:///laptop/extensions/footer.ts', { default: true }) === namespace.default, 'Laptop/file URL/default import normalization failed');
+  check(await loader.import('file:///devbox/extensions/../extensions/footer.ts', { default: true }) === namespace.default, 'File URL/default import normalization failed');
+  check(await createJiti(undefined, { alias: { footer: '/devbox/extensions/footer.ts' } }).import('footer') === namespace, 'Dynamic import alias failed');
+  check(await loader.import('@mariozechner/pi-tui') === registry.modules['@earendil-works/pi-tui'], 'Legacy display namespace was not shared');
   check(await loader.import('~/extensions/footer.ts', { default: true }) === namespace.default, 'Home-relative import failed');
   const component = '/__pi_browser__/modes/interactive/components/custom-entry.js';
   check(existsSync(component), 'Display component metadata is missing');
   const native = await registry.import('file://' + component);
   check(typeof native.CustomEntryComponent === 'function', 'Private display component was not shared');
   check(browserModuleResolve('@earendil-works/pi-tui').startsWith('file:'), 'Package metadata resolution failed');
+  check(browserModuleResolve('@mariozechner/pi-tui') === browserModuleResolve('@earendil-works/pi-tui'), 'Legacy package metadata resolution failed');
+  check(browserModuleResolve('node:path') === browserModuleResolve('path'), 'Builtin metadata resolution failed');
   check(themeCssColor('a', { a: 'b', b: 'a' }) === undefined, 'Circular variable must fall back');
   check(themeCssColor(231) === '#ffffff' && themeCssColor(16) === '#000000', 'Palette colors were not converted');
   check(/^#[a-f0-9]{6}$/.test(themeCssColor('okhsl(225 5% 27%)')), 'Pi OKHSL colors must convert to browser-compatible hex');

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
-import { request as httpRequest } from 'node:http';
+import { webRequest, type WebRequestOptions } from './http.js';
 import { createConnection, createServer, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -61,25 +61,8 @@ async function fixture(t: TestContext, overrides: Partial<WebServerOptions> = {}
     await new Promise<void>(accept => daemon.close(() => accept()));
     await rm(root, { recursive: true, force: true });
   });
-  async function request(path: string, options: { method?: string; headers?: Record<string, string>; body?: unknown; rawBody?: string; omitIdentity?: boolean; chunked?: boolean } = {}) {
-    const body = options.rawBody ?? (options.body === undefined ? undefined : JSON.stringify(options.body));
-    const headers = { ...(options.omitIdentity ? proxyHeaders : standard), ...(body === undefined ? {} : { 'Content-Type': 'application/json', ...(options.chunked ? { 'Transfer-Encoding': 'chunked' } : { 'Content-Length': String(Buffer.byteLength(body)) }) }), ...options.headers };
-    return new Promise<{ status: number; headers: import('node:http').IncomingHttpHeaders; body: string; json: any }>((accept, reject) => {
-      const request = httpRequest({ socketPath: server.socketPath, path, method: options.method ?? 'GET', headers, agent: false }, response => {
-        const chunks: Buffer[] = [];
-        response.on('data', chunk => chunks.push(chunk));
-        response.on('end', () => {
-          const body = Buffer.concat(chunks).toString();
-          let json: any;
-          try { json = JSON.parse(body); } catch {}
-          accept({ status: response.statusCode!, headers: response.headers, body, json });
-        });
-        response.on('error', reject);
-      });
-      request.on('error', reject);
-      request.end(body);
-    });
-  }
+  const request = (path: string, options: WebRequestOptions & { omitIdentity?: boolean } = {}) =>
+    webRequest(server.socketPath, path, { ...options, headers: { ...(options.omitIdentity ? proxyHeaders : standard), ...options.headers } });
   async function pair(label = 'Phone') {
     const { code } = await server.devices.issuePairingCode();
     const response = await request('/api/pair', { method: 'POST', headers: { Origin: ORIGIN }, body: { code, label } });

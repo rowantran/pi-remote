@@ -23,11 +23,9 @@ export function defaultStaticDir(moduleUrl = import.meta.url): string {
   // src/web/server/*.ts in a checkout; dist/web/server/*.js in a deployed release.
   return fileURLToPath(new URL(moduleUrl.endsWith('.ts') ? '../../../dist/web/' : '../', moduleUrl));
 }
-export interface WebServerContext {
+interface WebServerContext {
   readonly origin: string;
   readonly devices: DeviceStore;
-  getDevice(request: IncomingMessage): Promise<Device | undefined>;
-  closeDeviceConnections(id: string): void;
 }
 export interface AuthenticatedContext extends WebServerContext { device: Device; login: string }
 export interface WebServerOptions {
@@ -46,17 +44,13 @@ export interface WebServerOptions {
   openDaemon?: () => Promise<Socket>;
   handshakeTimeoutMs?: number;
   now?: () => number;
-  configProvider?: () => Promise<BrowserConfig>;
   /** Called only for paired, identity-checked requests with verified Host/Origin. */
   handleApi?: (request: IncomingMessage, response: ServerResponse, context: AuthenticatedContext) => boolean | Promise<boolean>;
-  /** Reserved for bounded presence messages; daemon request envelopes stay unchanged. */
-  handleMessage?: (message: Record<string, unknown>, context: AuthenticatedContext) => boolean | Promise<boolean>;
 }
 export interface WebServerHandle extends WebServerContext {
   readonly socketPath: string;
   readonly stateDir: string;
   close(): Promise<void>;
-  revokeDevice(id: string): Promise<boolean>;
 }
 class HttpError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 
@@ -186,10 +180,8 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       peer.ws.once('close', () => clearTimeout(timer));
     }
   }
-  const context: WebServerContext = {
-    origin: origin.origin, devices, closeDeviceConnections,
-    async getDevice(request) { return devices.authenticate(deviceToken(header(request, 'cookie')), validate(request)); },
-  };
+  const context: WebServerContext = { origin: origin.origin, devices };
+  const getDevice = (request: IncomingMessage, login: string) => devices.authenticate(deviceToken(header(request, 'cookie')), login);
   const authenticatedContext = (device: Device, login: string): AuthenticatedContext => ({ ...context, device, login });
 
   async function serveStatic(request: IncomingMessage, response: ServerResponse, path: string): Promise<void> {
@@ -224,7 +216,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       const login = validate(request, !['GET', 'HEAD'].includes(request.method ?? ''));
       const path = (request.url ?? '').split('?')[0];
       if (request.method === 'GET' && path === '/api/status') {
-        const device = await context.getDevice(request);
+        const device = await getDevice(request, login);
         json(response, 200, { authenticated: !!device, ...(device ? { device, label: device.label } : {}) });
       } else if (request.method === 'POST' && path === '/api/pair') {
         const previous = attempts.get(login);
@@ -237,24 +229,21 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
         response.setHeader('Set-Cookie', deviceCookie(paired.token));
         json(response, 200, { authenticated: true, device: paired.device, label: paired.device.label });
       } else if (path.startsWith('/api/')) {
-        const device = await context.getDevice(request);
+        const device = await getDevice(request, login);
         if (!device) throw new HttpError(401, 'Device pairing required');
         if (path === '/api/config' && request.method === 'GET') {
           let config: BrowserConfig;
-          if (options.configProvider) config = await options.configProvider();
-          else {
-            try { config = (await readPresentation()).config; }
-            catch {
-              // A broken optional renderer must not prevent listing/attaching sessions.
-              config = await defaultBrowserConfig({ uiConfig: options.uiConfig });
-              config.presentationError = 'Phone presentation unavailable; using built-in display. Check the web server logs.';
-            }
+          try { config = (await readPresentation()).config; }
+          catch {
+            // A broken optional renderer must not prevent listing/attaching sessions.
+            config = await defaultBrowserConfig({ uiConfig: options.uiConfig });
+            config.presentationError = 'Phone presentation unavailable; using built-in display. Check the web server logs.';
           }
           if (Buffer.byteLength(JSON.stringify(config)) > MAX_WEB_BYTES) throw new Error('Browser config exceeds limit');
           json(response, 200, config);
         } else if (path === '/api/presentation.js') {
           if (request.method !== 'GET') throw new HttpError(405, 'Method not allowed');
-          const current = options.configProvider ? undefined : await readPresentation();
+          const current = await readPresentation();
           const query = new URL(request.url!, origin).searchParams;
           // Never serve changed source under the hash from an earlier config response.
           if (!current?.bundle || query.getAll('v').length !== 1 || query.get('v') !== current.config.presentation?.hash) throw new HttpError(404, 'Presentation bundle not found');
@@ -328,12 +317,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
         try { message = JSON.parse(data.toString()); }
         catch { release(); fail('Expected a JSON request'); return; }
         if (!message || typeof message !== 'object' || Array.isArray(message)) { release(); fail('Expected a JSON request'); return; }
-        if (message.type !== 'request') {
-          try {
-            if (!options.handleMessage || !await options.handleMessage(message, authenticatedContext(device, login))) fail('Invalid WebSocket message');
-          } finally { release(); }
-          return;
-        }
+        if (message.type !== 'request') { release(); fail('Invalid WebSocket message'); return; }
         if (typeof message.id !== 'string' || !message.id || message.id.length > 128 || ids.has(message.id)
           || typeof message.method !== 'string' || !message.method || message.method.length > 128
           || (message.params !== undefined && (!message.params || typeof message.params !== 'object' || Array.isArray(message.params)))) {
@@ -390,7 +374,6 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   let stopped: Promise<void> | undefined;
   return {
     ...context, stateDir, socketPath,
-    async revokeDevice(id) { const revoked = await devices.revoke(id); closeDeviceConnections(id); return revoked; },
     close() {
       stopped ??= (async () => {
         closing = true;

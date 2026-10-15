@@ -25,7 +25,7 @@ async function call(service: PushService, devices: DeviceStore, paired: Device, 
   request.headers = { 'content-type': 'application/json' };
   let result = ''; let status = 200;
   const response = { get statusCode() { return status; }, set statusCode(value) { status = value; }, setHeader() {}, end(text: string) { result = text; } } as unknown as ServerResponse;
-  const context: AuthenticatedContext = { origin, devices, device: paired, login: paired.login, getDevice: async () => paired, closeDeviceConnections() {} };
+  const context: AuthenticatedContext = { origin, devices, device: paired, login: paired.login };
   assert.equal(await service.handleApi(request, response, context), true);
   return { status, data: JSON.parse(result) };
 }

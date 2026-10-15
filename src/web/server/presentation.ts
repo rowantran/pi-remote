@@ -7,7 +7,7 @@ import type { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { configPath } from '../../protocol/config.js';
 import type { PresentationBundle } from '../../protocol/presentation-bundle.js';
-import { readPresentationConfig } from '../../protocol/presentation-config.js';
+import { parsePresentationConfig } from '../../protocol/presentation-config.js';
 import { defaultBrowserConfig, type BrowserConfig } from './browser-config.js';
 import { MAX_PRESENTATION_CONFIG_BYTES, presentationSourcesHash, readPresentationFile } from '../../protocol/presentation-files.js';
 
@@ -97,12 +97,12 @@ export class ServerPresentation {
 
   private async readCurrent(): Promise<ServerPresentationResult> {
     const { uiConfig, env, home } = this.options;
-    // readPresentationConfig owns parsing/path resolution; preflight its input to bound reads.
     const file = uiConfig ?? configPath(env, home);
-    try { await readPresentationFile(file, MAX_PRESENTATION_CONFIG_BYTES); }
+    let text: string | undefined;
+    try { text = (await readPresentationFile(file, MAX_PRESENTATION_CONFIG_BYTES)).toString('utf8'); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    const presentation = await readPresentationConfig(uiConfig, [], { env, home });
-    const config = await defaultBrowserConfig({ uiConfig, env, home });
+    const presentation = parsePresentationConfig(text, file, [], home);
+    const config = await defaultBrowserConfig({ env, home, config: presentation });
     const extensions = presentation.extensions;
     if (!extensions.length) { this.cache = undefined; return { config }; }
     if (extensions.length > MAX_EXTENSIONS || extensions.some(path => Buffer.byteLength(path) > 4096)) {
@@ -118,7 +118,6 @@ export class ServerPresentation {
     if (!cached || signature !== cached.signature) {
       // Drop the old generation before tracing: a failed trace cannot serve stale JavaScript.
       this.cache = undefined;
-      await presentationSourcesHash(extensions);
       const output = await buildPresentation(extensions, env);
       const currentSignature = await presentationSourcesHash(output.dependencies);
       if (currentSignature !== output.sourceSignature) throw new Error('Presentation sources changed during build; reload to retry');

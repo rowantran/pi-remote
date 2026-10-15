@@ -7,14 +7,14 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { chromium, webkit } from 'playwright';
-import { bundlePresentation, presentationTraceKey } from '../src/web/build/presentation-bundle.js';
+import { bundlePresentation } from '../src/web/build/presentation-bundle.js';
 import { buildWeb } from '../src/web/build/app.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const source = (path: string) => JSON.stringify(join(root, path));
 const traceGlobal = globalThis as typeof globalThis & { __bundleFactoryCount?: number; __bundleSessionStarts?: number };
 
-/** Real files under home exercise both original-home and different-browser-home key normalization. */
+/** The browser config uses the server's home, as do real dynamically loaded adapters. */
 async function fixture() {
   const dir = await mkdtemp(join(homedir(), '.pi-remote-presentation-fixture-'));
   const homeRelative = relative(homedir(), dir);
@@ -85,24 +85,16 @@ async function fixture() {
   return { dir, entry };
 }
 
-test('presentation keys are home-relative only within the selected home', () => {
-  assert.equal(presentationTraceKey('/home/user/a.ts', '/home/user'), '~/a.ts');
-  assert.equal(presentationTraceKey('/home/user', '/home/user'), '~');
-  assert.equal(presentationTraceKey('/home/username/a.ts', '/home/user'), '/home/username/a.ts');
-  assert.equal(presentationTraceKey('/outside/a.ts', '/home/user'), '/outside/a.ts');
-});
-
 test('an empty extension list still exports a valid browser module', async () => {
   const output = await bundlePresentation([]);
   const host = globalThis as typeof globalThis & { __piRemotePresentation?: any };
   const previous = host.__piRemotePresentation;
-  host.__piRemotePresentation = { modules: {}, globals: {}, dynamic: {}, traceHome: undefined };
+  host.__piRemotePresentation = { modules: {}, globals: {}, dynamic: {} };
   try {
     const module = await import(`data:text/javascript;base64,${Buffer.from(output.bundle).toString('base64')}`);
     assert.deepEqual(module.factories, []);
     assert.deepEqual(module.dynamic, {});
-    assert.deepEqual(output.extensions, []);
-    assert.deepEqual(output.tracedModules, []);
+    assert.deepEqual(output.dependencies, []);
   } finally {
     if (previous === undefined) delete host.__piRemotePresentation; else host.__piRemotePresentation = previous;
   }
@@ -127,8 +119,8 @@ test('presentation trace and browser bundle preserve static/nested dynamic impor
   const first = await bundlePresentation([entry, entry]);
   assert.equal(traceGlobal.__bundleFactoryCount, 1, 'Only one factory invocation while tracing duplicate extension paths');
   assert.equal(traceGlobal.__bundleSessionStarts, 0, 'Tracing must not start a session');
-  assert.deepEqual(first.extensions, [entry]);
-  assert.deepEqual(first.tracedModules, ['dynamic.ts', 'namespace.ts', 'nested.ts'].map(name => join(dir, name)));
+  assert.deepEqual(first.dependencies.filter(path => path.startsWith(dir + '/')),
+    ['dynamic.ts', 'extension.ts', 'namespace.ts', 'nested.ts', 'static.ts'].map(name => join(dir, name)));
   const second = await bundlePresentation([entry]);
   assert.equal(second.bundle, first.bundle, 'No timestamps, random wrapper paths or execution counters in bundle bytes');
   assert.equal(traceGlobal.__bundleFactoryCount, 2);
@@ -158,7 +150,7 @@ test('presentation trace and browser bundle preserve static/nested dynamic impor
       live: { busy: false, compacting: false, messages: [], tools: {}, steering: [], followUp: [] },
     };
     async function run() {
-      configureVirtualFiles({ home: '/different/device/home', files: {} });
+      configureVirtualFiles({ home: ${JSON.stringify(homedir())}, files: {} });
       installPresentationRegistry();
       const registry = presentationRegistry();
       check(!process.env.PI_REMOTE_RENDERER_REPO, 'Browser inherited the Node environment');
@@ -177,7 +169,7 @@ test('presentation trace and browser bundle preserve static/nested dynamic impor
           check(stripTerminalSequences(rendered.render(80).join('\\n')).includes('STATIC_FIXTURE:NESTED_DYNAMIC_FIXTURE'), 'Static/nested dynamic renderer did not run');
           check(host.tools.get('fixture').parameters.properties.input.type === 'string', 'TypeBox was not bundled');
           const namespace = Object.entries(bundle.dynamic).find(([key]) => key.endsWith('/namespace.ts'))[1];
-          check(Object.keys(bundle.dynamic).every(key => key.startsWith('~/')), 'Home paths were not normalized');
+          check(JSON.stringify(Object.keys(bundle.dynamic).sort()) === ${JSON.stringify(JSON.stringify(['dynamic.ts', 'namespace.ts', 'nested.ts'].map(name => join(dir, name))))}, 'Dynamic keys must be absolute server module paths');
           check(namespace.Text === Text && namespace.Theme === Theme, 'Display constructor identity differs');
           check(namespace.initTheme === initTheme && namespace.getMarkdownTheme === getMarkdownTheme, 'Theme singleton module was duplicated');
           check(registry.modules['/__pi_browser__/modes/interactive/components/custom-entry.js'].CustomEntryComponent === CustomEntryComponent, 'Native dynamic display import used a duplicate class');
@@ -247,6 +239,25 @@ test('presentation trace and browser bundle preserve static/nested dynamic impor
   }
 });
 
+test('both browser builders reject runtime-only imports under current and legacy package names', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-remote-browser-policy-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const entry = join(dir, 'extension.ts');
+  for (const namespace of ['@earendil-works', '@mariozechner']) {
+    for (const module of ['pi-agent-core', 'pi-agent-core/dist/index.js', 'pi-ai/oauth', 'pi-ai/providers/all',
+      'pi-ai/dist/api.js', 'pi-ai/dist/auth.js', 'pi-ai/dist/providers/openai.js',
+      'pi-coding-agent/dist/core/agent-session.js', 'pi-coding-agent/dist/core/extensions/index.js',
+      ...['bash', 'read', 'edit', 'write', 'grep', 'find', 'ls', 'powershell'].map(name => `pi-coding-agent/dist/core/tools/${name}.js`)]) {
+      await t.test(`${namespace}/${module}`, async () => {
+        // Keep the import reachable to esbuild without executing runtime code during the trace.
+        await writeFile(entry, `export default function () { if (globalThis.__runtimePolicyProbe) return import(${JSON.stringify(`${namespace}/${module}`)}); }`);
+        await assert.rejects(bundlePresentation([entry]), /cannot import runtime-only module/);
+        await assert.rejects(buildWeb({ entry, outdir: join(dir, 'web') }), /cannot import runtime-only module/);
+      });
+    }
+  }
+});
+
 test('presentation bundler rejects runtime-only imports, failed factories, and non-file roots', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-remote-presentation-rejection-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -264,5 +275,5 @@ test('presentation bundler rejects runtime-only imports, failed factories, and n
   const absolute = await bundlePresentation([path]);
   assert.match(absolute.bundle, /@earendil-works\/pi-tui/);
   await writeFile(path, 'export default function () {}');
-  assert.equal((await bundlePresentation([path])).tracedModules.length, 0, 'Failed traces must restore/release their loader context');
+  assert.deepEqual((await bundlePresentation([path])).dependencies, [path], 'Failed traces must restore/release their loader context');
 });

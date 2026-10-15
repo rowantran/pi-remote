@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { watch } from 'node:fs';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import fs, { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -35,7 +37,9 @@ test('provider uses ordinary config paths, relative/~/ extensions, and only safe
   const tilde = join(f.home, 'tilde.ts');
   await writeFile(relative, countedFactory(f.calls, 'RELATIVE_FACTORY'));
   await writeFile(tilde, countedFactory(f.calls, 'TILDE_FACTORY'));
-  await writeFile(f.config, JSON.stringify({ extensions: ['./relative.ts', '~/tilde.ts'], theme: 'custom', bell: false, sideSplit: 'down', host: 'PRIVATE_HOST', cwd: '/PRIVATE_CWD' }));
+  const dotfiles = join(f.home, 'dotfiles-config.json');
+  await writeFile(dotfiles, JSON.stringify({ extensions: ['./relative.ts', '~/tilde.ts'], theme: 'custom', bell: false, sideSplit: 'down', host: 'PRIVATE_HOST', cwd: '/PRIVATE_CWD' }));
+  await symlink(dotfiles, f.config);
   await writeFile(join(f.agent, 'settings.json'), JSON.stringify({ theme: 'custom', hideThinkingBlock: true, doubleEscapeAction: 'tree', apiKey: 'PRIVATE_API_KEY', providers: ['PRIVATE_PROVIDER'] }));
   await writeFile(join(f.agent, 'themes', 'custom.json'), JSON.stringify({ name: 'custom', colors: { text: '#abcdef' }, apiKey: 'PRIVATE_THEME_KEY' }));
   const result = await f.provider.read();
@@ -51,6 +55,40 @@ test('provider uses ordinary config paths, relative/~/ extensions, and only safe
   assert.doesNotMatch(JSON.stringify(result.config.files), /PRIVATE_|extensions|relative\.ts|tilde\.ts/);
   assert.equal((await f.history()).length, 2);
   assert.ok((await f.history()).every(call => call.pid !== process.pid), 'Factories must never execute in the server process');
+});
+
+test('one bounded config snapshot supplies both extension selection and safe browser preferences', async t => {
+  const f = await fixture(t);
+  const entry = join(f.home, 'extension.ts');
+  await writeFile(entry, countedFactory(f.calls, 'ORIGINAL_CONFIG'));
+  await writeFile(f.config, JSON.stringify({ extensions: [entry], theme: 'dark', bell: false, sideSplit: 'left', host: 'PRIVATE_HOST' }));
+  const open = fs.open;
+  let configReads = 0;
+  t.mock.method(fs, 'open', async (...args: Parameters<typeof open>) => {
+    const file = await open(...args);
+    if (args[0] === f.config) {
+      configReads++;
+      const close = file.close.bind(file);
+      file.close = async () => {
+        await close();
+        // Replace the config after its snapshot was read, before browser files are projected.
+        if (configReads === 1) await writeFile(f.config, JSON.stringify({ theme: 'light', bell: true, sideSplit: 'right' }));
+      };
+    }
+    return file;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const first = await f.provider.read();
+  assert.deepEqual(first.config.presentation?.extensions, [entry]);
+  assert.deepEqual(JSON.parse(first.config.files[clientFile(f.home)]), { theme: 'dark', bell: false, sideSplit: 'left' });
+  assert.doesNotMatch(JSON.stringify(first.config.files), /PRIVATE_HOST|extensions|extension\.ts/);
+  assert.equal(configReads, 1);
+  const next = await f.provider.read();
+  assert.equal(next.bundle, undefined);
+  assert.deepEqual(JSON.parse(next.config.files[clientFile(f.home)]), { theme: 'light', bell: true, sideSplit: 'right' });
+  assert.equal(configReads, 2);
+  assert.equal((await f.history()).length, 1);
 });
 
 test('explicit UI config replaces default selection and reloads settings/themes without rebuilding code', async t => {
@@ -258,5 +296,11 @@ test('source/config reads and trace output are bounded', async t => {
   await writeFile(entry, `export default function () {}`);
   assert.ok((await f.provider.read()).bundle, 'An output-bound failure must not poison future reloads');
   await writeFile(f.config, ' '.repeat(128 * 1024 + 1));
+  await assert.rejects(f.provider.read(), /regular file at most/);
+  await rm(f.config);
+  await mkdir(f.config);
+  await assert.rejects(f.provider.read(), /regular file at most/);
+  await rm(f.config, { recursive: true });
+  execFileSync('mkfifo', [f.config]);
   await assert.rejects(f.provider.read(), /regular file at most/);
 });
