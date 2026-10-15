@@ -4,19 +4,27 @@
   "private": true,
   "description": "Local terminal client for persistent, unmodified remote Pi RPC processes",
   "type": "module",
-  "bin": { "pi-remote": "bin/pi-remote" },
+  "bin": {
+    "pi-remote": "bin/pi-remote"
+  },
   "scripts": {
     "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\"",
-    "build": "npm run clean && tsc -b",
+    "build": "npm run clean && tsc -b && npm run build:web",
+    "build:web": "node --import tsx scripts/build-web.ts",
     "deploy": "node --import tsx scripts/deploy.ts",
-    "check": "tsc -b && tsc -p test/tsconfig.json --noEmit && tsc -p scripts/tsconfig.json --noEmit",
+    "check": "tsc -b && tsc -p test/tsconfig.json --noEmit && tsc -p scripts/tsconfig.json --noEmit && tsc -p src/web/client/tsconfig.json --noEmit",
     "test": "node --import tsx --test 'test/**/*.test.ts'",
+    "test:mobile": "npm run build && node --import tsx test/smoke/mobile-browser.ts",
+    "test:presentation": "npm run build && node --import tsx test/smoke/presentation-browser.ts",
+    "test:push": "npm run build && node --import tsx test/smoke/web-push.ts",
     "test:golden": "node --import tsx test/bench/golden-transcript.ts",
     "test:scroll": "node --import tsx test/bench/scroll-benchmark.ts",
     "test:native-scroll": "node --import tsx test/bench/native-scroll-benchmark.ts",
     "verify": "npm run check && npm test && npm run build"
   },
-  "engines": { "node": ">=22.19" },
+  "engines": {
+    "node": ">=22.19"
+  },
   "dependencies": {
     "@earendil-works/pi-ai": "1.0.4",
     "@earendil-works/pi-coding-agent": "1.0.4",
@@ -30,6 +38,13 @@
     "@types/node": "^22.0.0",
     "@types/web-push": "^3.6.4",
     "@types/ws": "^8.18.2",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-webgl": "^0.19.0",
+    "@xterm/xterm": "^6.0.0",
+    "buffer": "^6.0.3",
+    "events": "^3.3.0",
+    "path-browserify": "^1.0.1",
+    "playwright": "^1.64.1",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"
   }
