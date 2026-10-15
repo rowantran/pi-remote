@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#161616">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Pi Remote">
+  <title>Pi Remote</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon-192.png">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/xterm.css">
+  <link rel="stylesheet" href="/app.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header>
+    <button id="slots-button" aria-label="Choose session">Sessions</button>
+    <span id="session-name">Pi Remote</span>
+    <span id="status" role="status">Connecting…</span>
+    <button id="menu-button" aria-label="More actions">⋯</button>
+  </header>
+  <p id="notice" role="alert" hidden></p>
+  <main id="terminal" aria-label="Session transcript"></main>
+  <div id="completions" aria-label="Suggestions" hidden></div>
+  <div id="picker-keys" aria-label="Choice controls" hidden>
+    <button type="button" data-key="up" aria-label="Previous choice">↑</button>
+    <button type="button" data-key="down" aria-label="Next choice">↓</button>
+    <button type="button" data-key="enter">Choose</button>
+    <button type="button" data-key="escape">Cancel</button>
+  </div>
+  <form id="composer">
+    <textarea id="prompt" aria-label="Message Pi" placeholder="Message Pi" rows="1" maxlength="262144" autocorrect="on" autocapitalize="sentences" autocomplete="on" spellcheck="true" enterkeyhint="enter"></textarea>
+    <button id="stop" type="button" aria-label="Stop" title="Stop (Esc)" hidden>■</button>
+    <button id="send" type="submit" aria-label="Send" title="Send" disabled>↑</button>
+  </form>
+  <dialog id="pair-dialog">
+    <form id="pair-form">
+      <h1>Pair this device</h1>
+      <p>This gives the device full access to your agent sessions and devbox.</p>
+      <p>On the devbox, run <code>pi-remote serve pair</code>. Install this page on your Home Screen first, then pair from the installed app.</p>
+      <label>Pairing code<input id="pair-code" name="code" required autocomplete="one-time-code" autocapitalize="none" spellcheck="false"></label>
+      <label>Device name<input id="device-name" name="label" required maxlength="80" value="My phone" autocomplete="off"></label>
+      <p id="pair-error" role="alert"></p>
+      <button type="submit">Pair device</button>
+    </form>
+  </dialog>
+  <dialog id="slots-dialog">
+    <h1>Sessions</h1>
+    <div id="slot-list"></div>
+    <button id="refresh-slots">Refresh</button>
+    <button id="close-slots">Close</button>
+  </dialog>
+  <dialog id="action-dialog"><div id="action-content"></div></dialog>
+  <dialog id="menu-dialog">
+    <h1>Pi Remote</h1>
+    <p>The agent runs on your devbox even when you close this app.</p>
+    <button id="reconnect">Reconnect</button>
+    <h2>View</h2>
+    <button type="button" data-key="tools">Expand or collapse tool output</button>
+    <button type="button" data-key="thinking">Show or hide thinking</button>
+    <h2>Notifications</h2>
+    <p id="notification-status" role="status">Install on the Home Screen to receive pushes while the app is closed.</p>
+    <button id="enable-notifications">Enable notifications</button>
+    <button id="test-notification" disabled>Send test notification</button>
+    <button id="disable-notifications" disabled>Disable notifications</button>
+    <h2>This device</h2>
+    <button id="clear-cache">Clear saved transcripts</button>
+    <button id="unpair">Unpair this device</button>
+    <button id="close-menu">Close</button>
+  </dialog>
+</body>
+</html>

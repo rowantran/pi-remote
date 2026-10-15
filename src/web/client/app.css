@@ -1,0 +1,64 @@
+:root { color-scheme: dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; background: var(--app-bg, #161616); color: var(--app-fg, #dedede); }
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; overscroll-behavior: none; }
+/* Pin the app to the visual viewport. iOS pans the layout viewport when the keyboard opens;
+   following offsetTop keeps the composer directly above the keyboard instead of scrolling it away. */
+body { position: fixed; left: 0; right: 0; top: var(--viewport-top, 0px); display: flex; flex-direction: column; height: var(--viewport-height, 100dvh); padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+body.keyboard-open { padding-bottom: 0; }
+header { display: flex; align-items: center; gap: 8px; padding: 6px; border-bottom: 1px solid #333; flex: 0 0 auto; }
+#session-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; font-size: 14px; }
+#status { font-size: 11px; color: #aaa; max-width: 90px; }
+button, input, textarea, select { font: inherit; }
+button { border: 1px solid #444; background: #262626; color: inherit; border-radius: 8px; padding: 9px 12px; min-height: 42px; touch-action: manipulation; }
+button:active { background: #444; }
+button:disabled { opacity: .45; }
+button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid #89b4fa; outline-offset: 1px; }
+#terminal { min-height: 0; min-width: 0; flex: 1 1 0; padding: 4px; overflow: hidden; position: relative; }
+#terminal .xterm { height: 100%; }
+#notice { margin: 0; padding: 8px; background: #4d3025; font-size: 13px; max-height: 18dvh; overflow: auto; flex-shrink: 0; }
+#picker-keys { display: flex; gap: 6px; padding: 6px 8px 0; flex: 0 0 auto; }
+#picker-keys[hidden] { display: none; }
+#picker-keys button { flex: 1; font-size: 14px; min-height: 36px; padding: 6px; }
+dialog { background: #202020; color: inherit; border: 1px solid #555; border-radius: 14px; padding: 18px; max-width: min(94vw, 600px); max-height: 85dvh; overscroll-behavior: contain; }
+dialog::backdrop { background: #000a; }
+dialog h1 { font-size: 20px; margin: 0 0 16px; }
+dialog p { font-size: 14px; line-height: 1.5; }
+dialog button { margin: 4px; }
+label { display: block; margin: 12px 0; font-size: 14px; }
+input, textarea { display: block; width: 100%; margin-top: 6px; padding: 10px; font-size: 16px; color: inherit; background: #111; border: 1px solid #555; border-radius: 8px; }
+#slot-list { display: grid; gap: 7px; margin-bottom: 12px; }
+#slot-list button { text-align: left; overflow-wrap: anywhere; }
+#pair-error { color: #ffaaaa; }
+#composer { padding: 6px 8px; display: flex; gap: 6px; flex: 0 0 auto; align-items: flex-end; position: relative; }
+#prompt { flex: 1; min-width: 0; margin: 0; resize: none; line-height: 20px; height: 36px; min-height: 36px; max-height: 40dvh; padding: 7px 14px; border-radius: 18px; background: #1e1e1e; border-color: #444; overflow-y: auto; }
+#prompt:focus-visible { outline: none; border-color: #6b7a99; }
+#send, #stop { flex: 0 0 auto; width: 36px; height: 36px; min-height: 36px; padding: 0; border-radius: 50%; border: none; font-size: 18px; font-weight: 700; line-height: 36px; }
+#send { background: #3478f6; color: #fff; }
+#send:disabled { background: #333; color: #888; opacity: 1; }
+#stop { background: #dedede; color: #161616; font-size: 13px; }
+#send[hidden], #stop[hidden] { display: none; }
+#completions { flex: 0 0 auto; overflow-x: auto; white-space: nowrap; padding: 4px; max-height: 56px; }
+#completions button { font-size: 13px; margin-right: 4px; }
+#terminal.touch-terminal { touch-action: none; -webkit-user-select: none; user-select: none; }
+#terminal.touch-terminal .xterm-helper-textarea { pointer-events: none; }
+.choices { display: grid; gap: 4px; max-height: 50dvh; overflow: auto; margin: 8px 0; }
+.choices button { text-align: left; overflow-wrap: anywhere; }
+#action-content textarea { min-height: 110px; }
+code { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+@media (min-width: 800px) { #terminal { padding: 8px; } }
+/* Theme colors only: keep presentation independent of composer layout. */
+body { background: var(--app-bg, #161616); color: var(--app-fg, #dedede); }
+#terminal .xterm-viewport { background: var(--app-bg, #161616); }
+header { border-color: var(--border, #333); }
+header, #composer, dialog { background: var(--chrome-bg, #202020); }
+#status { color: var(--muted, #aaa); }
+button { background: var(--button-bg, #262626); border-color: var(--border, #444); }
+button:active, #notice { background: var(--info-bg, #4d3025); }
+input, textarea { background: var(--input-bg, #111); border-color: var(--border, #555); }
+dialog { border-color: var(--border, #555); }
+button:focus-visible, input:focus-visible, textarea:focus-visible { outline-color: var(--accent, #89b4fa); }
+#prompt { background: var(--input-bg, #1e1e1e); border-color: var(--border, #444); }
+#send { background: var(--accent, #3478f6); color: var(--app-bg, #fff); }
+#send:disabled { background: var(--button-bg, #333); color: var(--muted, #888); }
+#stop { background: var(--app-fg, #dedede); color: var(--app-bg, #161616); }
+#pair-error { color: var(--error, #ffaaaa); }
