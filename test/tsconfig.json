@@ -9,6 +9,9 @@
   ],
   "references": [
     {
+      "path": "../src/config"
+    },
+    {
       "path": "../src/protocol"
     },
     {

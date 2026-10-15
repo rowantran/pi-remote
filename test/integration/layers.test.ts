@@ -7,7 +7,7 @@ import test from 'node:test';
 import ts from 'typescript';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
-const layers = ['protocol', 'daemon', 'client', 'tui', 'cli'] as const;
+const layers = ['config', 'protocol', 'daemon', 'client', 'tui', 'cli'] as const;
 
 // Use the real project configurations with tiny source files. This checks compiler
 // enforcement without modifying the checkout or depending on existing dist output.
@@ -21,7 +21,8 @@ test('project references allow composition and reject cross-layer source imports
     const dir = join(root, 'src', layer);
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, 'tsconfig.json'), await readFile(join(repo, 'src', layer, 'tsconfig.json')));
-    const dependencies = layer === 'cli' ? ['daemon', 'client', 'tui', 'protocol'] : layer === 'protocol' ? [] : ['protocol'];
+    const dependencies = layer === 'cli' ? ['daemon', 'client', 'tui', 'protocol', 'config']
+      : layer === 'tui' ? ['protocol', 'config'] : layer === 'protocol' || layer === 'config' ? [] : ['protocol'];
     await writeFile(join(dir, 'index.ts'), dependencies.map(name => `import '../${name}/index.js';`).join('\n') + `\nexport const ${layer} = true;\n`);
   }
   const diagnostics: ts.Diagnostic[] = [];
@@ -38,7 +39,10 @@ test('project references allow composition and reject cross-layer source imports
   const initial = build();
   assert.equal(initial, ts.ExitStatus.Success, format());
 
-  for (const [from, to] of [['client', 'tui'], ['daemon', 'client'], ['tui', 'daemon'], ['protocol', 'daemon']]) {
+  for (const [from, to] of [
+    ['client', 'tui'], ['daemon', 'client'], ['tui', 'daemon'], ['protocol', 'daemon'],
+    ['protocol', 'config'], ['config', 'protocol'],
+  ]) {
     await writeFile(join(root, 'src', from!, 'forbidden.ts'), `import '../${to}/index.js';\n`);
     assert.notEqual(build(), ts.ExitStatus.Success, `${from} must not import ${to}`);
     assert.ok(diagnostics.some(diagnostic => diagnostic.code === 6059 || diagnostic.code === 6307),

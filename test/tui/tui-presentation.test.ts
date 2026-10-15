@@ -442,8 +442,8 @@ test('partial shell timers are retired on UI reload, reconnect and detach withou
       ui.tui.renderNow(); assert.equal(active.size, 1);
       const originalTimer = [...active][0];
       if (action === 'reload') {
-        await launched.submit('/reload-ui');
-        for (let i = 0; i < 20 && active.has(originalTimer); i++) await flush();
+        ui.setDraft('/reload-ui');
+        await ui.submitDraft('steer'); // Wait for the command, not a machine-speed-dependent flush budget.
         ui.tui.renderNow();
       }
       if (action === 'async-reload') {
@@ -512,7 +512,7 @@ test('terminal appearance follows reported colors, mode 2031 reports, then COLOR
   assert.throws(() => resolveThemeSelection('a/b/c', 'light'), /theme name/);
 });
 
-test('light/dark theme pairs pick the member for the local terminal and follow live switches', async t => {
+test('light/dark theme pairs pick the member for the local terminal and follow live switches', { timeout: 5_000 }, async t => {
   class ColorTerminal extends FakeTerminal {
     background = 'ffff/ffff/ffff'; foreground = '0000/0000/0000';
     override write(data: string) {
@@ -532,9 +532,18 @@ test('light/dark theme pairs pick the member for the local terminal and follow l
   await ui.initialize(); await flush();
   const themeName = () => (ui as any).localTheme.name;
   assert.equal(themeName(), 'light');
+  // Wait for the reload triggered by real terminal input, not an event-loop turn budget.
+  const reload = (ui as any).reloadPresentation.bind(ui);
+  const switched = new Promise<void>((resolve, reject) => {
+    t.mock.method(ui as any, 'reloadPresentation', () => {
+      const completion: Promise<void> = reload();
+      void completion.then(resolve, reject);
+      return completion;
+    });
+  });
   terminal.background = '0000/0000/0000'; terminal.foreground = 'ffff/ffff/ffff';
   terminal.input('\x1b[?997;1n');
-  for (let i = 0; i < 50 && themeName() !== 'dark'; i++) await flush();
+  await switched;
   assert.equal(themeName(), 'dark');
 });
 

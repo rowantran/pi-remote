@@ -324,6 +324,7 @@ function handle(command) {
         send({ type: 'extension_ui_request', id, method: 'confirm', title: 'New session hook', message: 'Switch sessions?' });
       } else { newSession(); send(response(command, { cancelled: false })); }
       break;
+    case 'clear_queue': send(response(command, { steering: [], followUp: [] })); break;
     case 'abort': streaming = false; send({ type: 'agent_settled' }, response(command, {})); break;
     case 'bash': later(180, () => send(response(command, { output: command.command, exitCode: 0, cancelled: false, truncated: false }))); break;
     default: send(response(command, undefined, `Unsupported fixture command: ${command.type}`));

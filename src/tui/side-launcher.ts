@@ -3,9 +3,9 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-import { isSplitDirection, type SplitDirection } from '../protocol/config.js';
+import { isSplitDirection, type SplitDirection } from '../config/client.js';
 
-export { isSplitDirection, type SplitDirection } from '../protocol/config.js';
+export { isSplitDirection, type SplitDirection } from '../config/client.js';
 export type ExplicitSplitDirection = Exclude<SplitDirection, 'auto'>;
 export interface SplitDimensions { columns: number; rows: number; cellWidth?: number; cellHeight?: number }
 

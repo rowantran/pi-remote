@@ -1,4 +1,7 @@
 import { readAttachment } from '../protocol/attachments.js';
+import type { Attachment } from '../protocol/files.js';
+import { checkExternalPromptSize, externalAttachments, ExternalInputEditor, localAttachmentText, MAX_PROMPT_BYTES, type ExternalInput } from './external-input.js';
+export type { ExternalInput } from './external-input.js';
 import { emptyLive } from '../protocol/live.js';
 import { Transcript } from './transcript.js';
 import { ForkSelector } from './fork-selector.js';
@@ -8,7 +11,7 @@ import { WorkingIndicator } from './working-indicator.js';
 import { ProgramActivity, ProgramStatusTerminal } from './program-status.js';
 import { createRemoteKeybindings } from './keybindings.js';
 import { readLocalClipboard, editLocally } from './local-input.js';
-import { PresentationHost, readPresentationConfig, createPresentationTheme, type PresentationChange } from './presentation.js';
+import { PresentationHost, readPresentationConfig, createPresentationTheme, type PresentationChange, type PresentationFactoryEntry } from './presentation.js';
 import { loadLocalTheme, readPiDoubleEscapeAction, readPiHideThinkingBlock, readPiThemeSetting, resolveThemeSelection, terminalAppearance, type DoubleEscapeAction } from './local-theme.js';
 import { hostname } from 'node:os';
 import { remoteSessionEnv } from '../protocol/remote-session.js';
@@ -103,6 +106,10 @@ class Dialog extends Container implements Focusable {
 
 export interface TuiOptions {
   presentationPaths?: string[]; presentationConfig?: string; theme?: string;
+  /** Trusted preloaded adapters; when supplied, extension paths are never read from disk. */
+  presentationFactories?: readonly PresentationFactoryEntry[];
+  /** Browser clients know the display appearance without querying terminal OSC colors. */
+  appearance?: TerminalColorScheme;
   /** Remote host label for the footer, such as the SSH host alias. */
   host?: string;
   /** Minimum interval between normal frame starts; defaults to 8 ms locally. */
@@ -117,6 +124,10 @@ export interface TuiOptions {
   attachContext?: AttachContext;
   /** Terminal integration; replace in tests without creating real panes. */
   sideLauncher?: GhosttyLauncher;
+  /** A host-owned prompt and simple dialogs, for example native browser controls. */
+  externalInput?: ExternalInput;
+  /** A display host may cache verified snapshots locally. It must never feed them back to Pi. */
+  onSnapshot?: (snapshot: Snapshot) => void;
 }
 
 /** Exported for terminal-adapter tests; uses only the public pi-tui API. */
@@ -127,6 +138,7 @@ export class RemoteTui {
   private transcript: Transcript;
   private bottom = new VStack();
   private root: VStack;
+  private transcriptScroll: ScrollView;
   private connected = true;
   private detached = false;
   /** True after /quit stopped the remote Pi process; the client then closed. */
@@ -142,8 +154,11 @@ export class RemoteTui {
   private refreshAgain = false;
   private journal: RemoteEvent[] = [];
   private generation = 0;
-  private activeRemote?: { id: string; component: Dialog };
-  private localDialog?: { component: Component & Partial<Focusable>; cancel: () => void; escape?: (data: string) => void };
+  private activeRemote?: { id: string; component?: Dialog };
+  private localDialog?: { component: Component & Partial<Focusable>; cancel: () => void; escape?: (data: string) => void; external?: boolean };
+  private externalDialogInitialized = false;
+  private externalDialogKey?: string;
+  private terminalDialogActive = false;
   private answering = new Set<string>();
   private unsubscribe: (() => void)[] = [];
   private finish?: () => void;
@@ -151,7 +166,8 @@ export class RemoteTui {
   private appliedEditorId?: string;
   private appliedTitle?: string;
   private bashRunning = false;
-  private pendingAttachments: Awaited<ReturnType<typeof readAttachment>>[] = [];
+  private reportedWorking?: boolean;
+  private pendingAttachments: Attachment[] = [];
   private editorHistory: string[] = [];
   private completion?: RemoteAutocompleteProvider;
   private metadataTimer?: NodeJS.Timeout;
@@ -206,11 +222,90 @@ export class RemoteTui {
     this.editor.onSubmit = text => { void this.submit(text, 'steer'); };
     this.transcript = new Transcript(this.view, this.tui, () => this.presentation, () => this.tui.statusOnlyFrame);
     this.transcript.thinking = !options.hideThinkingBlock;
+    this.transcriptScroll = new ScrollView(this.transcript, { primary: true, follow: 'end', scrollbar: 'auto' });
     this.root = new DocumentLayout([
-      { component: new ScrollView(this.transcript, { primary: true, follow: 'end', scrollbar: 'auto' }), basis: 0, grow: 1, minSize: 1 },
+      { component: this.transcriptScroll, basis: 0, grow: 1, minSize: 1 },
       { component: this.bottom, basis: 'auto', shrink: 1, minSize: 1 },
     ]);
     this.tui.setLayoutRoot(this.root);
+    options.externalInput?.onDraftChange(this.editor.getExpandedText());
+    this.observeSnapshot();
+  }
+
+  private observeSnapshot(): void {
+    try { this.options.onSnapshot?.(this.view.snapshot); }
+    catch { this.notify('Local transcript caching failed; remote work is unaffected.'); }
+  }
+
+  /** Replace the local draft without sending a request, including while disconnected. */
+  setDraft(text: string): void {
+    if (this.detached) throw new Error('This client is detached; its draft cannot be changed');
+    if (typeof text !== 'string') throw new TypeError('The draft must be text');
+    checkExternalPromptSize(text, this.pendingAttachments);
+    this.editor.setText(text);
+    this.tui.requestRender();
+  }
+
+  /** Use the same one-shot submission and uncertain-outcome restoration as the terminal editor. */
+  async submitDraft(behavior: 'steer' | 'followUp'): Promise<void> {
+    if (behavior !== 'steer' && behavior !== 'followUp') throw new Error('Submit behavior must be steer or followUp');
+    this.requireInputConnection();
+    if (this.activeRemote || this.view.snapshot.ui.some(record => DIALOG_METHODS.has(record.method))) throw new Error('Answer the remote dialog before submitting a prompt');
+    if (this.localDialog) throw new Error('Close the local dialog before submitting a prompt');
+    if (this.commandPending || this.localInputPending) throw new Error('A local command is still pending; your draft is preserved');
+    await this.submit(this.editor.getExpandedText(), behavior, true);
+  }
+
+  /** Positive lines move down; scrolling is local and never downloads session history. */
+  scrollTranscript(lines: number): void {
+    if (this.detached) throw new Error('This client is detached');
+    if (!Number.isFinite(lines)) throw new RangeError('Scroll distance must be finite');
+    this.transcriptScroll.scrollBy(lines); this.tui.requestRender();
+  }
+
+  followLatest(): void {
+    if (this.detached) throw new Error('This client is detached');
+    this.transcriptScroll.scrollToEnd(); this.tui.requestRender();
+  }
+
+  /** Answer only the currently displayed question, through the daemon's existing answer path. */
+  async answerExternalDialog(id: string, response: RecordValue): Promise<void> {
+    this.requireInputConnection();
+    const record = this.view.snapshot.ui.find(record => DIALOG_METHODS.has(record.method));
+    if (!record || record.id !== id) throw new Error('That remote dialog is no longer active');
+    if (this.answering.has(id)) throw new Error('A response to this dialog is already pending; it will not be replayed');
+    if (!response || typeof response !== 'object' || Array.isArray(response)) throw new TypeError('A dialog response must be a record');
+    if (response.id !== undefined && response.id !== id) throw new Error('The response identifies a different dialog');
+    if (response.cancelled !== undefined && typeof response.cancelled !== 'boolean') throw new TypeError('cancelled must be a boolean');
+    if (response.cancelled !== true) {
+      if (record.method === 'confirm') {
+        if (typeof response.confirmed !== 'boolean') throw new TypeError('confirmed must be a boolean');
+      } else {
+        if (typeof response.value !== 'string') throw new TypeError('The dialog response needs a text value');
+        if (record.method === 'select' && !(record.options ?? []).includes(response.value)) throw new Error('Select one of the remote dialog options');
+      }
+    }
+    await this.answerDialog(id, response, true);
+  }
+
+  /** Queue explicitly supplied text/images. Never interpret filenames or read them from disk. */
+  queueAttachments(attachments: Attachment[]): void {
+    if (this.detached) throw new Error('This client is detached');
+    if (!Array.isArray(attachments)) throw new TypeError('Attachments must be an array');
+    if (this.pendingAttachments.length + attachments.length > 8) throw new Error('At most eight pending attachments');
+    const next = [...this.pendingAttachments, ...externalAttachments(attachments)];
+    checkExternalPromptSize(this.editor.getExpandedText(), next);
+    this.pendingAttachments = next; this.syncBottom();
+  }
+
+  private requireInputConnection(): void {
+    if (this.detached) throw new Error('This client is detached; nothing was sent');
+    if (!this.connected || this.view.snapshot.slot.status === 'exited') throw new Error('Disconnected. Nothing was sent; reconnect before submitting or answering');
+    if (this.view.snapshot.slot.status === 'starting' || this.reloadRequestPending) throw new Error('Remote Pi is starting or reloading. Nothing was sent; your draft is preserved');
+  }
+
+  private sessionIdentity(): string {
+    return JSON.stringify([this.view.snapshot.state.sessionId ?? null, this.view.snapshot.state.sessionFile ?? this.view.snapshot.slot.sessionFile ?? null]);
   }
 
   /** Local module loading only. Remote metadata reads are deliberately not awaited. */
@@ -246,15 +341,16 @@ export class RemoteTui {
     if (this.detached) return;
     this.refreshPresentationData();
     this.metadataTimer = setInterval(() => this.refreshPresentationData(), 15_000);
-    this.metadataTimer.unref();
+    this.metadataTimer.unref?.();
   }
 
   private get appearance(): TerminalColorScheme {
-    return terminalAppearance(this.terminalColors, this.terminalColorScheme);
+    return this.options.appearance ?? terminalAppearance(this.terminalColors, this.terminalColorScheme);
   }
 
   /** Query OSC 10/11/4 colors. Late replies, such as over slow SSH links, still apply. */
   private async queryTerminalColors(): Promise<void> {
+    if (this.options.appearance) return;
     let colors: TerminalColors = {};
     try {
       colors = await this.tui.queryTerminalColors({ timeoutMs: TERMINAL_COLOR_TIMEOUT_MS, onLateReply: late => this.terminalColorsChanged(late) });
@@ -323,7 +419,7 @@ export class RemoteTui {
     this.themeSelection = selection;
     // Theme pairs follow live terminal light/dark switches. Without Pi's private terminal-color
     // state, the system theme uses palette indices and default colors, which the terminal adapts itself.
-    this.tui.setTerminalColorSchemeNotifications(selection.includes('/'));
+    this.tui.setTerminalColorSchemeNotifications(!this.options.appearance && selection.includes('/'));
     const previous = this.presentation;
     this.presentation = undefined; // Async shutdown must not rebuild rows against a retiring host.
     this.clearWorkingIndicator();
@@ -341,7 +437,8 @@ export class RemoteTui {
       setTitle: title => this.tui.terminal.setTitle(safeText(title).replace(/\n/g, ' ')),
     });
     this.presentation = host;
-    await host.load(config.extensions);
+    if (this.options.presentationFactories) await host.loadFactories(this.options.presentationFactories);
+    else await host.load(config.extensions);
     if (this.detached) { await host.shutdown(); return; }
     await host.start();
     // Loading a factory can request a render before its later registrations finish.
@@ -353,7 +450,7 @@ export class RemoteTui {
   }
 
   private installEditor(force = false): void {
-    const factory = this.presentation?.editorFactory;
+    const factory = this.options.externalInput ? undefined : this.presentation?.editorFactory;
     if (!force && factory === this.appliedEditorFactory) return;
     const previous = this.editor;
     const text = previous.getExpandedText();
@@ -450,8 +547,11 @@ export class RemoteTui {
   }
 
   private makeEditor(): Editor {
-    return new CustomEditor(this.tui, { borderColor: text => this.localTheme.getThinkingBorderColor(this.view.snapshot.state.thinkingLevel ?? 'off')(text), selectList: getSelectListTheme() },
-      getKeybindings() as unknown as ConstructorParameters<typeof CustomEditor>[2], { paddingX: 0, embedWorkingStatus: true });
+    const EditorClass = this.options.externalInput ? ExternalInputEditor : CustomEditor;
+    const editor = new EditorClass(this.tui, { borderColor: text => this.localTheme.getThinkingBorderColor(this.view.snapshot.state.thinkingLevel ?? 'off')(text), selectList: getSelectListTheme() },
+      getKeybindings() as unknown as ConstructorParameters<typeof CustomEditor>[2], { paddingX: 0, embedWorkingStatus: !this.options.externalInput });
+    if (this.options.externalInput) editor.onChange = () => this.options.externalInput!.onDraftChange(editor.getExpandedText());
+    return editor;
   }
   private notify(text: string, kind: 'general' | 'connection' = 'general'): void {
     if (this.detached) return;
@@ -485,6 +585,7 @@ export class RemoteTui {
       if (this.connection.onReconnect) this.unsubscribe.push(this.connection.onReconnect(snapshot => {
         if (this.detached) return;
         this.connected = true; this.generation++;
+        this.localDialog?.cancel();
         this.resetSnapshotFlight();
         const processChanged = snapshot.slot.status === 'starting'
           || (snapshot.slot.pid !== undefined && this.view.snapshot.slot.pid !== undefined && snapshot.slot.pid !== this.view.snapshot.slot.pid);
@@ -500,7 +601,7 @@ export class RemoteTui {
         this.transcript.clearConnectionNotices();
         this.displayEvent({ type: 'session_switch', reason: 'reconnect' });
         this.answering.clear();
-        this.transcript.invalidate(); this.syncBottom();
+        this.transcript.invalidate(); this.syncBottom(); this.observeSnapshot();
         this.notify('Reattached. Remote history restored; no submitted commands were replayed.', 'connection');
         void this.refreshPresentationData();
       }));
@@ -528,7 +629,7 @@ export class RemoteTui {
             else this.localDialog.cancel();
             this.tui.requestRender();
           }
-          else if (this.view.snapshot.live.busy || this.view.snapshot.live.compacting || this.hasQueue() || this.bashRunning || Object.keys(this.view.snapshot.live.bash ?? {}).length) void this.interrupt();
+          else if (this.interruptible()) void this.interrupt();
           else if (this.connected && this.view.snapshot.slot.status === 'running' && !this.commandPending && !this.interruptPending
             && !this.editor.getExpandedText().trim() && this.options.doubleEscapeAction !== 'none') {
             const now = Date.now();
@@ -564,6 +665,7 @@ export class RemoteTui {
           if (matchesKey(data, Key.shift('tab'))) { void this.rpc({ type: 'cycle_thinking_level' }).then(() => this.refresh()).catch(error => this.notify(errorText(error))); return { consume: true }; }
           if (this.presentation?.hasShortcut(data)) { void this.presentation.shortcut(data); return { consume: true }; }
         }
+        if (this.options.externalInput && this.activeRemote) return { consume: true };
         return undefined;
       }));
       try {
@@ -585,6 +687,7 @@ export class RemoteTui {
     for (const unsubscribe of this.unsubscribe.splice(0)) unsubscribe();
     // Cancel only a LOCAL picker promise. Never answer a remote dialog on detach.
     this.localDialog?.cancel();
+    this.syncExternalDialogs(undefined, false);
     try { this.tui.stop(); } finally {
       // Stop output before retiring components: remote tools still run after detach.
       this.transcript.reset();
@@ -604,7 +707,9 @@ export class RemoteTui {
       && event.event.state?.messageCount > (this.view.snapshot.state.messageCount ?? 0);
     if (this.refreshing) this.journal.push(event);
     const wasBusy = this.view.snapshot.live.busy;
+    const session = this.sessionIdentity();
     if (!this.view.apply(event)) return;
+    if (session !== this.sessionIdentity()) this.localDialog?.cancel();
     if (event.event.type === 'remote_slot_restart') {
       this.resetRemoteProcess();
       this.notify('Remote Pi is reloading in the same slot. Running work and queued prompts were discarded.');
@@ -644,6 +749,7 @@ export class RemoteTui {
     this.appliedEditorId = undefined; this.appliedTitle = undefined;
     this.tui.terminal.setTitle('');
     this.localDialog?.cancel();
+    this.syncExternalDialogs(undefined, false);
     this.clearWorkingIndicator(); this.transcript.reset();
     // Display adapters can retire their own working timers without treating restart as a normal completion.
     this.displayEvent({ type: 'agent_settled' });
@@ -665,6 +771,7 @@ export class RemoteTui {
         if (this.detached || generation !== this.generation) return;
         const presentation = this.view.snapshot.presentation;
         const wasBusy = this.view.snapshot.live.busy;
+        const session = this.sessionIdentity();
         try { this.view.replace(snapshot, this.journal); }
         catch (error) {
           if (!(error instanceof HistoryMismatchError)) throw error;
@@ -674,11 +781,12 @@ export class RemoteTui {
           if (this.detached || generation !== this.generation) return;
           this.view.replace(snapshot, this.journal);
         }
+        if (session !== this.sessionIdentity()) this.localDialog?.cancel();
         this.view.snapshot.presentation = { ...presentation, ...snapshot.presentation };
         this.reconcileWorkingLifecycle(wasBusy);
         this.syncProgramStatus({ snapshot: true });
         this.presentation?.update(this.view.snapshot);
-        this.transcript.invalidate(); this.syncBottom();
+        this.transcript.invalidate(); this.syncBottom(); this.observeSnapshot();
         void this.refreshPresentationData();
       } finally {
         if (generation !== this.generation) return;
@@ -692,6 +800,10 @@ export class RemoteTui {
     return this.refreshPromise;
   }
 
+  private interruptible(): boolean {
+    const live = this.view.snapshot.live;
+    return !!(live.busy || live.compacting || this.hasQueue() || this.bashRunning || Object.keys(live.bash ?? {}).length);
+  }
   private hasQueue(): boolean { const live = this.view.snapshot.live; return !!(live.steering.length || live.followUp.length); }
   /** Like Pi's app.message.dequeue: move queued text into the editor; keep the run going. */
   private async dequeue(): Promise<void> {
@@ -747,7 +859,7 @@ export class RemoteTui {
     return new Dialog(input, record.title ?? 'Input', 'Enter submit · Esc cancel · Ctrl+D detach');
   }
 
-  private async answerDialog(id: string, response: RecordValue): Promise<void> {
+  private async answerDialog(id: string, response: RecordValue, rethrow = false): Promise<void> {
     if (this.answering.has(id)) return;
     if (!this.connected || this.detached || this.view.snapshot.slot.status === 'exited') {
       this.notify('Dialog preserved. Ctrl+D detaches; run the same CLI attach command again before answering.'); return;
@@ -755,15 +867,16 @@ export class RemoteTui {
     this.answering.add(id);
     const generation = this.generation;
     try {
-      await this.connection.request('answer', { slotId: this.slotId, response: { id, ...response } });
+      await this.connection.request('answer', { slotId: this.slotId, response: { ...response, id } });
       if (this.detached || generation !== this.generation) return;
       this.view.snapshot.ui = this.view.snapshot.ui.filter(record => record.id !== id);
       this.syncBottom();
     } catch (error) {
-      if (generation !== this.generation) return;
+      if (generation !== this.generation) { if (rethrow) throw error; return; }
       this.notify(`Dialog response failed: ${errorText(error)}. The response will not be replayed.`);
       // Leave an uncertain response disabled until a fresh attach verifies outstanding dialogs.
       if (this.connected) { this.answering.delete(id); void this.refresh().catch(() => {}); }
+      if (rethrow) throw error;
     }
   }
 
@@ -830,9 +943,31 @@ export class RemoteTui {
     this.workingEditor?.setWorkingStatusIndicator(this.working);
   }
 
+  /** Do not reset a host's typed answer during unrelated status or transcript renders. */
+  private syncExternalDialogs(record: RecordValue | undefined, terminalDialog: boolean): void {
+    const external = this.options.externalInput;
+    if (!external) return;
+    const key = record === undefined ? undefined : JSON.stringify(record, (_key, value) =>
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value);
+    if (!this.externalDialogInitialized || key !== this.externalDialogKey) {
+      this.externalDialogInitialized = true; this.externalDialogKey = key;
+      external.onDialogChange(record === undefined ? undefined : structuredClone(record));
+    }
+    if (terminalDialog !== this.terminalDialogActive) {
+      this.terminalDialogActive = terminalDialog;
+      external.onTerminalDialogChange?.(terminalDialog);
+    }
+  }
+
   private syncBottom(): void {
     if (this.detached) return;
     this.syncProgramStatus();
+    const working = this.interruptible();
+    if (working !== this.reportedWorking) {
+      this.reportedWorking = working;
+      try { this.options.externalInput?.onWorkingChange?.(working); } catch { /* Host display only. */ }
+    }
     if (this.externalEditorActive) return;
     const ui = this.view.snapshot.ui;
     const editorText = ui.find(record => record.method === 'set_editor_text');
@@ -845,8 +980,10 @@ export class RemoteTui {
     }
     const record = ui.find(record => DIALOG_METHODS.has(record.method));
     if (record?.id !== this.activeRemote?.id) {
-      this.activeRemote = record ? { id: record.id, component: this.remoteDialog(record) } : undefined;
+      this.activeRemote = record ? { id: record.id, component: this.options.externalInput ? undefined : this.remoteDialog(record) } : undefined;
     }
+    if (record && this.localDialog?.external) this.localDialog.cancel();
+    this.syncExternalDialogs(record, !!this.localDialog && !this.localDialog.external && !this.activeRemote);
     this.bottom.clear();
     const widget = (placement: string) => {
       for (const record of ui) if (record.method === 'setWidget' && (record.widgetPlacement ?? 'aboveEditor') === placement && record.widgetLines?.length && !this.presentation?.widgets.has(record.widgetKey)) {
@@ -855,7 +992,7 @@ export class RemoteTui {
       for (const local of this.presentation?.widgets.values() ?? []) if (local.placement === placement) this.bottom.addChild(local.component);
     };
     // Pi embeds status in supporting editors, or uses the padded Loader above widgets.
-    const control = this.activeRemote?.component ?? this.localDialog?.component ?? this.editor;
+    const control = this.activeRemote ? this.activeRemote.component ?? this.editor : this.localDialog?.component ?? this.editor;
     this.syncWorkingIndicator(control);
     this.addPendingMessages();
     if (this.working && !this.workingEditor) this.bottom.addChild(this.working);
@@ -902,8 +1039,36 @@ export class RemoteTui {
       cost ? `$${cost.toFixed(3)} (message usage)` : undefined, ...statuses].filter(Boolean).map(value => safeText(value).replace(/\n/g, ' ')).join(' · '));
   }
 
+  private chooseExternal(title: string, items: SelectItem[]): Promise<string | undefined> {
+    const external = this.options.externalInput!;
+    const generation = this.generation, session = this.sessionIdentity();
+    const controller = new AbortController();
+    const values = new Set(items.map(item => item.value));
+    const safeItems = items.map(item => ({ ...item, label: safeText(item.label), description: safeText(item.description) }));
+    return new Promise((resolve, reject) => {
+      let finished = false;
+      const done = (value?: string, failure?: { error: unknown }) => {
+        if (finished) return;
+        finished = true;
+        const valid = !this.detached && this.connected && generation === this.generation && session === this.sessionIdentity();
+        if (this.localDialog === dialog) this.localDialog = undefined;
+        controller.abort(); this.syncBottom();
+        if (valid && failure) reject(failure.error);
+        else if (valid && value !== undefined && !values.has(value)) reject(new Error('The local dialog returned an unavailable choice'));
+        else resolve(valid ? value : undefined);
+      };
+      const dialog = { component: new Container(), external: true, cancel: () => done() };
+      this.localDialog = dialog; this.syncBottom();
+      // Call asynchronously so cancellation can close even a host chooser that never settles.
+      void Promise.resolve().then(() => finished ? undefined : external.choose!(safeText(title), safeItems, controller.signal))
+        .then(value => done(value), error => done(undefined, { error }));
+    });
+  }
+
   private choose(title: string, items: SelectItem[]): Promise<string | undefined> {
     if (!items.length) { this.notify(`No choices available: ${title}`); return Promise.resolve(undefined); }
+    if (this.detached || !this.connected) return Promise.resolve(undefined);
+    if (this.options.externalInput?.choose) return this.chooseExternal(title, items);
     return new Promise(resolve => {
       const input = new Input({ placeholder: 'Filter choices…' });
       const safeItems = items.map(item => ({ ...item, label: safeText(item.label), description: safeText(item.description) }));
@@ -1016,7 +1181,7 @@ export class RemoteTui {
     this.editor.setText(draft === text ? text : [text, draft].filter(Boolean).join('\n\n'));
   }
 
-  private async submit(text: string, streamingBehavior: 'steer' | 'followUp'): Promise<void> {
+  private async submit(text: string, streamingBehavior: 'steer' | 'followUp', rethrow = false): Promise<void> {
     if (!text.trim() || this.detached) return;
     const command = text.trim().split(/\s+/, 1)[0];
     const args = text.trim().slice(command.length).trim();
@@ -1040,18 +1205,19 @@ export class RemoteTui {
           if (this.view.snapshot.slot.status === 'starting' || this.reloadRequestPending) throw new Error('Remote Pi is starting or reloading. Nothing was sent');
           const prepared = await transformPromptWithAttachments(text, path => this.connection.request('read_attachment', {slotId: this.slotId, path}));
           if (this.detached || generation !== this.generation) throw new Error('Remote Pi changed while preparing the prompt. Nothing was sent');
-          const attachments = this.pendingAttachments;
-          const localText = attachments.filter(file => file.text !== undefined).map(file => `\n\nAttached local file ${file.path}:\n${file.text}`).join('');
+          const attachments = this.pendingAttachments.slice();
+          const localText = localAttachmentText(attachments);
           const images = [...(prepared.images ?? []), ...attachments.flatMap(file => file.image ? [file.image] : [])];
           const prompt = { type: 'prompt', message: prepared.message + localText, ...(images.length ? {images} : {}), streamingBehavior };
-          if (Buffer.byteLength(JSON.stringify(prompt), 'utf8') > 24 * 1024 * 1024) throw new Error('Combined prompt and attachments exceed 24 MiB; nothing was sent');
+          if (Buffer.byteLength(JSON.stringify(prompt), 'utf8') > MAX_PROMPT_BYTES) throw new Error('Combined prompt and attachments exceed 24 MiB; nothing was sent');
           await this.rpc(prompt);
-          if (generation === this.generation) this.pendingAttachments = [];
+          if (generation === this.generation) this.pendingAttachments = this.pendingAttachments.filter(file => !attachments.includes(file));
         }
       }
     } catch (error) {
       this.notify(`Request failed: ${errorText(error)}. After connection loss, its remote outcome can be unknown. Nothing will be replayed; attach again and check the session before resending.`);
       if (!this.detached) this.restoreSubmission(text);
+      if (rethrow) throw error;
     } finally { this.commandPending--; if (!this.detached) this.syncBottom(); }
   }
 
@@ -1063,8 +1229,8 @@ export class RemoteTui {
   }
 
   private async runBuiltin(command: string, args: string): Promise<boolean> {
-    const generation = this.generation;
-    const valid = () => !this.detached && this.connected && generation === this.generation;
+    const generation = this.generation, session = this.sessionIdentity();
+    const valid = () => !this.detached && this.connected && generation === this.generation && session === this.sessionIdentity();
     switch (command) {
       case '/paste': await this.pasteLocal(); return true;
       case '/editor': await this.externalEditor(); return true;
@@ -1229,8 +1395,8 @@ export class RemoteTui {
     if (!this.connected || this.detached) throw new Error('Disconnected. Nothing was sent. Reconnect, then run /reload again');
     if (this.view.snapshot.slot.status !== 'running') throw new Error('Remote Pi is not ready. Wait until it is running before /reload');
     this.localDialog?.cancel();
-    const generation = this.generation;
-    const valid = () => !this.detached && this.connected && generation === this.generation;
+    const generation = this.generation, session = this.sessionIdentity();
+    const valid = () => !this.detached && this.connected && generation === this.generation && session === this.sessionIdentity();
     const confirm = async () => {
       const choice = await this.choose('Reload remote Pi? Running work, queued prompts, and unpersisted state will be discarded.', [
         { value: 'cancel', label: 'Cancel' }, { value: 'reload', label: 'Reload remote Pi' },
@@ -1279,6 +1445,8 @@ export class RemoteTui {
 
   /** Stop the remote Pi process with the daemon's explicit kill, then close the client. */
   private async quitSlot(): Promise<void> {
+    const generation = this.generation, session = this.sessionIdentity();
+    const valid = () => !this.detached && this.connected && generation === this.generation && session === this.sessionIdentity();
     const live = this.view.snapshot.live;
     if (this.view.snapshot.slot.status !== 'exited') {
       if (!this.connected) throw new Error('Disconnected. The remote Pi process was not stopped. Reconnect, then run /quit again');
@@ -1287,7 +1455,7 @@ export class RemoteTui {
         const choice = await this.choose('Stop the remote Pi process? Running work and queued prompts will be lost.', [
           { value: 'cancel', label: 'Cancel' }, { value: 'stop', label: 'Stop remote Pi' },
         ]);
-        if (choice !== 'stop' || this.detached) { if (!this.detached) this.notify('Quit cancelled. Remote Pi is still running.'); return; }
+        if (choice !== 'stop' || !valid()) { if (!this.detached) this.notify('Quit cancelled. Remote Pi is still running.'); return; }
       }
       await this.connection.request('kill', { slotId: this.slotId });
     }
