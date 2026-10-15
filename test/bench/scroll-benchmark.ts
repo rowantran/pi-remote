@@ -54,7 +54,7 @@ import { parseArgs } from 'node:util';
 import { AssistantMessageComponent, ToolExecutionComponent } from '@earendil-works/pi-coding-agent';
 import type { Terminal } from '@earendil-works/pi-tui';
 import { readPresentationConfig } from '../../src/tui/presentation.js';
-import { configPath } from '../../src/protocol/config.js';
+import { configPath } from '../../src/config/client.js';
 import type { RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../../src/protocol/types.js';
 import { remoteSessionEnv } from '../../src/protocol/remote-session.js';
 import { RemoteTui } from '../../src/tui/tui.js';

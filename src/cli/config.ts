@@ -1,6 +1,6 @@
-import { configPath, loadConfig, type ClientConfig } from '../protocol/config.js';
+import { configPath, loadConfig, type ClientConfig } from '../config/client.js';
 
-export { configPath, loadConfig, parseConfig, type ClientConfig } from '../protocol/config.js';
+export { configPath, loadConfig, parseConfig, type ClientConfig } from '../config/client.js';
 
 /** --host > PI_REMOTE_HOST > config file. An empty environment value is unset. */
 export function defaultHost(env: NodeJS.ProcessEnv = process.env, load: () => ClientConfig = () => loadConfig(configPath(env))): string | undefined {

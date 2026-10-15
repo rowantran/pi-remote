@@ -45,6 +45,29 @@ function setup(initial = snapshot()) {
   return { host, notices, tui, initial, update(value: Snapshot) { current = value; host.update(value); }, get text() { return text; }, get expanded() { return expanded; }, get invalidations() { return invalidations; } };
 }
 
+test('preloaded presentation factories need no files and isolate failed adapters', async () => {
+  const { host, notices } = setup();
+  let loads = 0;
+  const factory = (pi: any) => {
+    loads++;
+    pi.on('session_start', (_event: any, context: any) => context.ui.setFooter(() => new Text('BUNDLED_FOOTER', 0, 0)));
+  };
+  await host.loadFactories([
+    { path: '/no-such-browser-file.ts', factory },
+    { path: '/broken-adapter.ts', factory: pi => {
+      pi.on('session_start', () => { throw new Error('disabled adapter hook must not run'); });
+      throw new Error('bad bundled factory');
+    } },
+  ]);
+  await host.loadFactories([{ path: '/no-such-browser-file.ts', factory }]);
+  await host.start();
+  assert.equal(loads, 1);
+  assert.equal(host.footer?.render(80)[0].trimEnd(), 'BUNDLED_FOOTER');
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /broken-adapter.*bad bundled factory/);
+  await host.shutdown();
+});
+
 test('presentation configuration is opt-in and exact paths are resolved predictably', async () => {
   const dir = await mkdtemp(resolve(tmpdir(), 'presentation-'));
   try {
