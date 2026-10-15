@@ -438,19 +438,18 @@ The client runs `ssh HOST ~/.local/share/pi-remote/bin/pi-remote bridge`, so tha
 2. Runs `npm ci --omit=dev --ignore-scripts` there and checks that the release starts.
 3. Switches `bin/pi-remote` to the new release in one atomic rename. When the deploying machine's config contains `web`, installs/updates, enables, and starts/restarts [the phone web service](docs/phone.md#install-and-run) on that release. It discovers the target's Tailscale origin unless configured explicitly, preserves private web state, and prints any missing routing/linger setup commands without changing them. Web setup failures skip old-release cleanup. This only reconnects phones and runs even with `--no-restart`. Without `web`, it leaves systemd untouched.
 4. Deletes old releases. It keeps the new release, the previous one, and any release a running process uses. A release never changes after install, because a running daemon loads modules from its own release.
-5. Runs `pi-remote restart-daemon`. If a slot is busy, the new release stays installed and the old daemon keeps running; run `pi-remote restart-daemon --wait` later. `npm run deploy -- --wait` waits instead; `npm run deploy -- --no-restart` skips this step.
+5. Runs `pi-remote restart-daemon`, which waits until no slot is busy. If you stop the wait with Ctrl-C, the new release stays installed and the old daemon keeps running; run `pi-remote restart-daemon` later. `npm run deploy -- --force` interrupts busy slots instead of waiting; `npm run deploy -- --no-restart` skips this step.
 
 ### Restart the daemon without losing slots
 
 ```sh
-pi-remote restart-daemon           # refuses if a slot is busy, and says which
-pi-remote restart-daemon --wait    # retries until no slot is busy
+pi-remote restart-daemon           # waits until no slot is busy, and says which slots it waits for
 pi-remote restart-daemon --force   # interrupts busy slots
 ```
 
 This is [`/reload`](#reload-remote-pi) applied to every slot at once, plus a new daemon:
 
-- The daemon uses `/reload`'s rules for every slot: a slot that is starting, reloading or changing session blocks the restart, and a busy slot blocks it unless `--force` is given. It checks all slots and commits in one step, so a prompt cannot start in between. A refusal locks and stops nothing.
+- The daemon uses `/reload`'s rules for every slot: a slot that is starting, reloading or changing session blocks the restart, and a busy slot blocks it unless `--force` is given. It checks all slots and commits in one step, so a prompt cannot start in between. A refusal locks and stops nothing; the client asks again every 2 seconds until the daemon accepts or you press Ctrl-C.
 - When it accepts, it marks each running slot `reopen` in `slots.json` and exits. The next daemon starts from the installed release and starts those slots again from their session files, with the same slot IDs, numbers and launch arguments.
 - Attached clients reconnect automatically and show the same slots. As with `/reload`, persisted history remains; in-memory state such as model or thinking-level changes is discarded.
 - Slots that were already stopped stay stopped. A crashed daemon never reopens anything.
@@ -461,7 +460,7 @@ A 0.2 client also works with a running 0.1 daemon: it uses the installed release
 
 ## Development and verification
 
-Locally, `pi-remote` runs from `src/` through the `tsx` devDependency, so source edits take effect on the next run without `npm run build`. `npm link` creates a symlink to this checkout in npm's global bin directory; `npm unlink -g pi-remote` removes it. Deployed releases contain no `src/` and run the compiled `dist/`; `npm run deploy` builds it. To try daemon changes on the remote host, run `npm run deploy -- --wait`: attached clients reconnect to the same slots on the new code.
+Locally, `pi-remote` runs from `src/` through the `tsx` devDependency, so source edits take effect on the next run without `npm run build`. `npm link` creates a symlink to this checkout in npm's global bin directory; `npm unlink -g pi-remote` removes it. Deployed releases contain no `src/` and run the compiled `dist/`; `npm run deploy` builds it. To try daemon changes on the remote host, run `npm run deploy`: attached clients reconnect to the same slots on the new code.
 
 ```sh
 npm run verify

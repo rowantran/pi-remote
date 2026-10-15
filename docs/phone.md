@@ -62,7 +62,7 @@ Tailscale DNS name. To use a fixed origin or non-default HTTPS port, set
 From your laptop checkout:
 
 ```sh
-npm run deploy -- --wait
+npm run deploy
 ```
 
 The remote host needs systemd 246 or later and Tailscale 1.50 or later.

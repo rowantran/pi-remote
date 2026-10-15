@@ -56,13 +56,14 @@ function fixture(options: {
 const stages = (f: ReturnType<typeof fixture>) => f.calls.map(call => call.stage);
 
 test('deploy parses optional host and mutually exclusive restart modes', () => {
-  assert.deepEqual(parseDeployArgs([]), { restart: 'restart', help: false });
-  assert.deepEqual(parseDeployArgs(['--wait', 'user@dev-box']), { host: 'user@dev-box', restart: 'wait', help: false });
+  assert.deepEqual(parseDeployArgs([]), { restart: 'wait', help: false });
+  assert.deepEqual(parseDeployArgs(['--force', 'user@dev-box']), { host: 'user@dev-box', restart: 'force', help: false });
   assert.equal(parseDeployArgs(['devbox', '--no-restart']).restart, 'none');
   assert.equal(parseDeployArgs(['-h']).help, true);
-  for (const args of [['--wait', '--no-restart'], ['--no-restart', '--wait']]) {
+  for (const args of [['--force', '--no-restart'], ['--no-restart', '--force']]) {
     assert.throws(() => parseDeployArgs(args), /cannot be used together/);
   }
+  assert.throws(() => parseDeployArgs(['--wait']), /Unknown option --wait/);
   assert.throws(() => parseDeployArgs(['--unknown']), /Unknown option --unknown/);
   assert.throws(() => parseDeployArgs(['box', 'other-box']), /Usage:/);
 });
@@ -118,7 +119,7 @@ test('deploy passes only configured web settings to the remote install, includin
 
 test('deploy uses the same config snapshot for the default host and web settings', async () => {
   const f = fixture({ config: { host: 'snapshot-box', web: { allowUsers: ['rowan@example.test'] } } });
-  await main(['--wait'], f.deps);
+  await main([], f.deps);
   assert.equal(f.configs, 1);
   const install = f.calls.find(call => call.stage === 'install')!;
   assert.equal(install.args[2], 'snapshot-box');
@@ -134,12 +135,19 @@ test('deploy uses the shared default host and marks dirty releases', async () =>
   assert.equal(install.args.at(-1), '20261008T153000Z-9f6e91e-dirty');
 });
 
-test('deploy --wait forwards the wait flag only to daemon restart', async () => {
+test('deploy restarts the daemon with its default wait mode', async () => {
   const f = fixture();
-  await main(['--wait'], f.deps);
+  await main([], f.deps);
   assert.deepEqual(f.calls.find(call => call.stage === 'restart')!.args,
-    [join(f.root, 'bin', 'pi-remote'), 'restart-daemon', '--wait', '--host', 'default-box']);
-  assert.ok(f.calls.filter(call => call.stage !== 'restart').every(call => !call.args.includes('--wait')));
+    [join(f.root, 'bin', 'pi-remote'), 'restart-daemon', '--host', 'default-box']);
+});
+
+test('deploy --force forwards the force flag only to daemon restart', async () => {
+  const f = fixture();
+  await main(['--force'], f.deps);
+  assert.deepEqual(f.calls.find(call => call.stage === 'restart')!.args,
+    [join(f.root, 'bin', 'pi-remote'), 'restart-daemon', '--force', '--host', 'default-box']);
+  assert.ok(f.calls.filter(call => call.stage !== 'restart').every(call => !call.args.includes('--force')));
 });
 
 test('deploy --no-restart installs and cleans up without contacting the daemon', async () => {
@@ -221,7 +229,7 @@ for (const stage of ['copy', 'install'] as const) {
 
 test('deploy restart failure reports that the release is installed, preserves stderr detail, and cleans archives', async () => {
   const f = fixture({ failures: ['restart'] });
-  await assert.rejects(main([], f.deps), /release is installed.*restart failed.*restart-daemon --wait[^]*restart failed: child stderr detail/);
+  await assert.rejects(main([], f.deps), /release is installed.*restart failed.*restart-daemon when ready[^]*restart failed: child stderr detail/);
   assert.match(f.logs[0], /Installed release/);
   assert.equal(stages(f).at(-1), 'cleanup');
   assert.deepEqual(f.removed, [f.tempDir]);

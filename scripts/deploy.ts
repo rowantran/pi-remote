@@ -5,11 +5,12 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ClientConfig } from '../src/config/client.js';
 
-export const HELP = `Usage: npm run deploy -- [HOST] [--wait | --no-restart]
+export const HELP = `Usage: npm run deploy -- [HOST] [--force | --no-restart]
 
-Install this checkout as a new release on an SSH Linux host.
-HOST defaults to PI_REMOTE_HOST, then the client configuration file.
-  --wait        Wait for idle slots before restarting the daemon.
+Install this checkout as a new release on an SSH Linux host, then restart the daemon
+onto it once no slot is busy. HOST defaults to PI_REMOTE_HOST, then the client
+configuration file.
+  --force       Restart the daemon now, interrupting busy slots.
   --no-restart  Install without restarting the daemon.
   -h, --help    Show this help without building or connecting.
 
@@ -20,18 +21,18 @@ it does not manage a web service. Tailscale routing and device pairing remain ma
 
 export interface DeployOptions {
   host?: string;
-  restart: 'restart' | 'wait' | 'none';
+  restart: 'wait' | 'force' | 'none';
   help: boolean;
 }
 
 export function parseDeployArgs(args: string[]): DeployOptions {
-  const options: DeployOptions = { restart: 'restart', help: false };
+  const options: DeployOptions = { restart: 'wait', help: false };
   for (const arg of args) {
     if (arg === '-h' || arg === '--help') options.help = true;
-    else if (arg === '--wait' || arg === '--no-restart') {
-      const restart = arg === '--wait' ? 'wait' : 'none';
-      if (options.restart !== 'restart' && options.restart !== restart) {
-        throw new Error('--wait and --no-restart cannot be used together.');
+    else if (arg === '--force' || arg === '--no-restart') {
+      const restart = arg === '--force' ? 'force' : 'none';
+      if (options.restart !== 'wait' && options.restart !== restart) {
+        throw new Error('--force and --no-restart cannot be used together.');
       }
       options.restart = restart;
     } else if (arg.startsWith('-')) throw new Error(`Unknown option ${arg}\n${HELP}`);
@@ -193,9 +194,9 @@ export async function main(args = process.argv.slice(2), overrides: Partial<Depl
       deps.log('Daemon not restarted (--no-restart). Run pi-remote restart-daemon when ready.');
     } else {
       try {
-        await run(process.execPath, [join(deps.root, 'bin', 'pi-remote'), 'restart-daemon', ...(options.restart === 'wait' ? ['--wait'] : []), '--host', host]);
+        await run(process.execPath, [join(deps.root, 'bin', 'pi-remote'), 'restart-daemon', ...(options.restart === 'force' ? ['--force'] : []), '--host', host]);
       } catch (error) {
-        throw new Error(`The release is installed, but the daemon restart failed. Run pi-remote restart-daemon --wait when ready.\n${errorMessage(error)}`, { cause: error });
+        throw new Error(`The release is installed, but the daemon restart failed. Run pi-remote restart-daemon when ready.\n${errorMessage(error)}`, { cause: error });
       }
     }
   } catch (error) { failed = true; throw error; }
