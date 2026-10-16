@@ -33,7 +33,7 @@ const flush = async () => { await new Promise<void>(resolve => setImmediate(reso
 
 class FakeTerminal implements Terminal {
   columns = 80; rows = 24; kittyProtocolActive = false;
-  output = ''; title = ''; stopped = false;
+  output = ''; title = ''; titles: string[] = []; stopped = false;
   input: (data: string) => void = () => {};
   resize: () => void = () => {};
   start(input: (data: string) => void, resize: () => void) { this.input = input; this.resize = resize; }
@@ -41,7 +41,7 @@ class FakeTerminal implements Terminal {
   async drainInput() {}
   write(data: string) { this.output += data; }
   moveBy() {} hideCursor() {} showCursor() {} clearLine() {} clearFromCursor() {} clearScreen() {}
-  setTitle(title: string) { this.title = title; }
+  setTitle(title: string) { this.title = title; this.titles.push(title); }
   setProgress() {}
 }
 class FakeConnection implements RemoteConnection {
@@ -204,6 +204,106 @@ test('queue restoration preserves order, multiline text, and the local draft', (
 test('remote text cannot emit terminal controls; generic tools include image placeholders', () => {
   assert.equal(safeText('\x1b[2Jhello\x1b]0;title\x07\x00\r\n世界\x9b'), 'hello\n世界');
   assert.equal(toolText({ content: [{ type: 'text', text: 'output' }, { type: 'image', mimeType: 'image/png' }] }), 'output\n[image: image/png]');
+});
+
+test('terminal titles match native Pi using the remote session name and workspace basename', t => {
+  for (const [state, slotName, expected] of [
+    [{}, undefined, 'π - project'],
+    [{ sessionName: 'Session 世界' }, 'Stale slot name', 'π - Session 世界 - project'],
+    [{}, 'Stored session', 'π - Stored session - project'],
+    [{ sessionName: '' }, 'Stale slot name', 'π - project'],
+  ] as const) {
+    const initial = snapshot({ state, slot: { ...snapshot().slot, cwd: '/remote/work/project/', sessionName: slotName } });
+    const { terminal, connection } = launch(t, initial);
+    assert.equal(terminal.title, expected);
+    assert.equal(connection.requests.length, 0);
+  }
+});
+
+test('live session renames update the title without rewriting it on unrelated events or renders', t => {
+  const { ui, terminal, connection } = launch(t);
+  connection.emit(event(1, { type: 'session_info_changed', name: 'Renamed session' }));
+  assert.equal(terminal.title, 'π - Renamed session - remote');
+  connection.emit(event(2, { type: 'session_info_changed', name: 'Renamed session' }));
+  connection.emit(event(3, { type: 'extension_ui_request', id: 'status', method: 'setStatus', statusKey: 'test', statusText: 'busy' }));
+  screen(ui);
+  assert.deepEqual(terminal.titles, ['π - remote', 'π - Renamed session - remote']);
+  connection.emit(event(4, { type: 'session_info_changed', name: '' }));
+  assert.equal(terminal.title, 'π - remote');
+});
+
+test('title updates wait while an external editor owns the terminal', t => {
+  const { ui, terminal, connection } = launch(t);
+  (ui as any).externalEditorActive = true;
+  connection.emit(event(1, { type: 'session_info_changed', name: 'Renamed in editor' }));
+  assert.deepEqual(terminal.titles, ['π - remote']);
+  (ui as any).externalEditorActive = false;
+  (ui as any).syncBottom();
+  assert.equal(terminal.title, 'π - Renamed in editor - remote');
+  (ui as any).externalEditorActive = true;
+  connection.emit(event(2, { type: 'extension_ui_request', id: 'custom', method: 'setTitle', title: 'Extension title' }));
+  assert.equal(terminal.title, 'π - Renamed in editor - remote');
+  (ui as any).externalEditorActive = false;
+  (ui as any).syncBottom();
+  assert.equal(terminal.title, 'Extension title');
+});
+
+test('snapshot refresh and reconnect restore the current session title', async t => {
+  const connection = new ReconnectingFakeConnection();
+  const { ui, terminal } = launch(t, snapshot(), connection);
+  connection.handler = () => snapshot({ state: { sessionId: 'resumed', sessionName: 'Resumed session' }, seq: 1 });
+  await (ui as any).refresh();
+  assert.equal(terminal.title, 'π - Resumed session - remote');
+  connection.disconnect();
+  connection.reconnected?.(snapshot({ state: { sessionName: 'Renamed while disconnected' }, seq: 2 }));
+  assert.equal(terminal.title, 'π - Renamed while disconnected - remote');
+  connection.reconnected?.(snapshot({ seq: 3 }));
+  assert.equal(terminal.title, 'π - remote');
+});
+
+test('default and extension titles strip wire controls and flatten newlines', t => {
+  const initial = snapshot({
+    state: { sessionName: '\x1b]0;injected\x07Safe\r\n世界\x00' },
+    slot: { ...snapshot().slot, cwd: '/remote/project\nname\x1b[2J' },
+  });
+  const { terminal, connection } = launch(t, initial);
+  assert.equal(terminal.title, 'π - Safe 世界 - project name');
+  connection.emit(event(1, { type: 'extension_ui_request', id: 'custom', method: 'setTitle', title: '\x1b]52;c;ZXZpbA==\x07Custom\nTitle\x00' }));
+  assert.equal(terminal.title, 'Custom Title');
+});
+
+test('remote extension titles override the default, including an explicitly empty title', t => {
+  const initial = snapshot({ ui: [{ id: 'custom', method: 'setTitle', title: 'Custom title' }] });
+  const connection = new ReconnectingFakeConnection();
+  const { terminal } = launch(t, initial, connection);
+  assert.equal(terminal.title, 'Custom title');
+  connection.emit(event(1, { type: 'session_info_changed', name: 'New name' }));
+  assert.deepEqual(terminal.titles, ['Custom title']);
+  connection.emit(event(2, { type: 'extension_ui_request', id: 'clear', method: 'setTitle', title: '' }));
+  assert.equal(terminal.title, '');
+  connection.reconnected?.(snapshot({ seq: 3, state: { sessionName: 'New name' } }));
+  assert.equal(terminal.title, 'π - New name - remote');
+});
+
+test('local presentation title overrides survive startup and unrelated display updates', async t => {
+  const terminal = new FakeTerminal();
+  const connection = new FakeConnection();
+  const ui = new RemoteTui(connection, 'slot', snapshot(), terminal, {
+    appearance: 'dark', theme: 'dark', presentationConfig: '/nonexistent/pi-remote-title-test.json',
+    presentationFactories: [pi => {
+      pi.on('session_start', (_event, ctx) => ctx.ui.setTitle('Local adapter title'));
+    }],
+  });
+  t.after(() => ui.detach());
+  await ui.initialize();
+  assert.equal(terminal.title, 'Local adapter title');
+  const finished = ui.run();
+  connection.emit(event(1, { type: 'extension_ui_request', id: 'status', method: 'setStatus', statusKey: 'test', statusText: 'busy' }));
+  screen(ui);
+  assert.equal(terminal.title, 'Local adapter title');
+  connection.emit(event(2, { type: 'session_info_changed', name: 'Renamed' }));
+  assert.equal(terminal.title, 'π - Renamed - remote');
+  ui.detach(); await finished;
 });
 
 test('Ctrl+D detaches with a remote dialog open without answering, aborting, or killing', async t => {
@@ -499,7 +599,7 @@ test('restart discards stale refresh and dialog answers and accepts new startup 
   ui.editor.setText('preserved draft');
   connection.emit(event(2, { type: 'remote_slot_restart', slot: { ...initial.slot, status: 'starting' } }));
   assert.equal((ui as any).activeRemote, undefined); assert.equal((ui as any).answering.size, 0);
-  assert.equal(terminal.title, ''); assert.equal((ui as any).appliedEditorId, undefined);
+  assert.equal(terminal.title, 'π - remote'); assert.equal((ui as any).appliedEditorId, undefined);
   assert.equal(ui.editor.getExpandedText(), 'preserved draft');
   connection.emit(event(3, { type: 'extension_ui_request', id: 'same-id', method: 'confirm', title: 'New startup dialog' }));
   answer.resolve({}); oldRefresh.resolve(snapshot({ seq: 1, ui: initial.ui })); await flush();
