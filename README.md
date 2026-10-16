@@ -72,6 +72,8 @@ Every command also accepts an unambiguous prefix: `pi-remote n --cwd /remote/pro
 
 `pi-remote ls`, the attach picker, and slot completion show each slot's Pi session name. This is Pi's own session name: the one `/name` sets and `/resume` shows. Set it with `/name NAME` in the attached UI.
 
+The attached terminal's window/tab title follows native Pi's format: `π - SESSION NAME - DIRECTORY`, or `π - DIRECTORY` for an unnamed session. `DIRECTORY` is the remote workspace's basename, not the local directory. The title follows session renames, refreshes, and reconnects. The phone/browser tab uses the same title. Extensions can still set a custom title; a remote extension's title stays in effect until replaced or remote Pi restarts.
+
 To name sessions automatically, install a Pi extension that does this **on the remote host**. Remote Pi loads it like any other extension, and pi-remote shows the name as soon as the extension sets it. For example, [`pi-auto-session-name`](https://github.com/patlux/pi-auto-session-name) names an unnamed session after its first run and keeps names set with `/name`:
 
 ```sh

@@ -14,6 +14,7 @@ import { readLocalClipboard, editLocally } from './local-input.js';
 import { PresentationHost, readPresentationConfig, createPresentationTheme, type PresentationChange, type PresentationFactoryEntry } from './presentation.js';
 import { loadLocalTheme, readPiDoubleEscapeAction, readPiHideThinkingBlock, readPiThemeSetting, resolveThemeSelection, terminalAppearance, type DoubleEscapeAction } from './local-theme.js';
 import { hostname } from 'node:os';
+import { posix } from 'node:path';
 import { remoteSessionEnv } from '../protocol/remote-session.js';
 import { REMOTE_ICON, detachMessage, sideParentLabel, stoppedMessage } from './session-labels.js';
 import { attachInvocation, formatInvocation, ghosttyLauncher, resolveSplitDirection, type AttachContext, type GhosttyLauncher, type SplitDirection } from './side-launcher.js';
@@ -312,6 +313,7 @@ export class RemoteTui {
   async initialize(): Promise<void> {
     if (this.initialized || this.detached) return;
     this.initialized = true;
+    this.syncTerminalTitle(); // Set the default before local adapters can override it.
     this.completion = new RemoteAutocompleteProvider({
       getCommands: async () => {
         const generation = this.generation;
@@ -747,7 +749,6 @@ export class RemoteTui {
     this.lastEscapeTime = undefined;
     this.activeRemote = undefined; this.answering.clear();
     this.appliedEditorId = undefined; this.appliedTitle = undefined;
-    this.tui.terminal.setTitle('');
     this.localDialog?.cancel();
     this.syncExternalDialogs(undefined, false);
     this.clearWorkingIndicator(); this.transcript.reset();
@@ -960,8 +961,21 @@ export class RemoteTui {
     }
   }
 
+  private syncTerminalTitle(): void {
+    const { state, slot, ui } = this.view.snapshot;
+    const name = state.sessionName ?? slot.sessionName;
+    const directory = posix.basename(slot.cwd);
+    // Match native Pi, but use the remote workspace, not the client's working directory.
+    const defaultTitle = name ? `π - ${name} - ${directory}` : `π - ${directory}`;
+    const title = safeText(ui.find(record => record.method === 'setTitle')?.title ?? defaultTitle).replace(/\n/g, ' ');
+    if (title === this.appliedTitle) return;
+    // Avoid overwriting local adapter titles (or a terminal's bell marker) on every render.
+    this.tui.terminal.setTitle(title); this.appliedTitle = title;
+  }
+
   private syncBottom(): void {
     if (this.detached) return;
+    if (!this.externalEditorActive) this.syncTerminalTitle();
     this.syncProgramStatus();
     const working = this.interruptible();
     if (working !== this.reportedWorking) {
@@ -973,10 +987,6 @@ export class RemoteTui {
     const editorText = ui.find(record => record.method === 'set_editor_text');
     if (editorText && editorText.id !== this.appliedEditorId) {
       this.editor.setText(editorText.text ?? ''); this.appliedEditorId = editorText.id;
-    }
-    const title = ui.find(record => record.method === 'setTitle')?.title;
-    if (title !== this.appliedTitle && title !== undefined) {
-      this.tui.terminal.setTitle(safeText(title).replace(/\n/g, ' ')); this.appliedTitle = title;
     }
     const record = ui.find(record => DIALOG_METHODS.has(record.method));
     if (record?.id !== this.activeRemote?.id) {
