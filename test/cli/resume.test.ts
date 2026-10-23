@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { NumberedSlot } from '../../src/cli/completion.js';
 import { homeItems } from '../../src/cli/main.js';
-import { openSession, pickResume, resumeItems, resumeSlot, storedSessions } from '../../src/cli/resume.js';
+import { openSession, pickResume, resumeSlot, storedSessions } from '../../src/cli/resume.js';
+import { sessionItems } from '../../src/tui/session-table.js';
+import { paint } from '../../src/tui/table.js';
 import type { SessionInfo } from '../../src/protocol/methods.js';
 
 const NOW = Date.parse('2026-10-21T12:00:00Z');
@@ -15,63 +17,43 @@ const session = (name: string, minutes: number, extra: Partial<SessionInfo> = {}
   messageCount: 4, firstMessage: `first message of ${name}`, allMessagesText: '', ...extra,
 });
 
-test('resume rows put recent work first and reuse stopped slot names and numbers', () => {
-  const slots = [slot(1, 'exited', { sessionFile: '/sessions/a.jsonl', sessionName: 'fix auth' }), slot(2, 'exited', { sessionFile: '/sessions/b.jsonl' })];
-  const items = resumeItems(slots, [session('a', 30), session('b', 5), session('c', 10, { name: 'named c' })], '/work', NOW);
-  assert.deepEqual(items.map(item => item.title), ['first message of b', 'named c', 'fix auth']);
-  assert.equal(strip(items[0]!.marker!), '#2 ○');
-  assert.equal(items[0]!.right, 'stopped · 4 msgs · 5m');
-  assert.equal(items[1]!.detail, 'first message of c');
-  assert.equal(items[1]!.right, '4 msgs · 10m');
-  assert.deepEqual(items[2]!.value, { kind: 'open', cwd: '/work', sessionPath: '/sessions/a.jsonl' });
-  assert.deepEqual(items[2]!.exact, ['1', '#1', 'id-1']);
-});
-
-test('a session that a running slot has open attaches to that slot', () => {
-  const slots = [slot(1, 'exited', { sessionFile: '/sessions/a.jsonl' }), slot(5, 'running', { sessionFile: '/sessions/a.jsonl' }), slot(6, 'running', { sessionFile: '/sessions/b.jsonl' })];
-  const items = resumeItems(slots, [session('a', 1), session('b', 2)], '/work', NOW);
-  assert.deepEqual(items.map(item => item.value), [{ kind: 'attach', slotId: 'id-5' }, { kind: 'attach', slotId: 'id-6' }]);
-  assert.match(items[0]!.right!, /^open in #5/);
-  assert.equal(strip(items[1]!.marker!), '#6 ●');
-});
-
-test('stopped slots that never saved a session are hidden; unknown directories are kept', () => {
+test('resume rows keep Pi order and mark sessions open in or last used by a slot', () => {
   const slots = [
-    slot(1, 'exited', { sessionFile: '/sessions/unsaved.jsonl' }),
-    slot(2, 'exited', { sessionFile: '/elsewhere/x.jsonl', cwd: '/other' }),
-    slot(3, 'exited'),
-    slot(4, 'exited', { sessionFile: '/sessions/a.jsonl' }),
-    slot(7, 'exited', { sessionFile: '/sessions/a.jsonl', createdAt: ago(1) }),
+    slot(1, 'exited', { sessionFile: '/sessions/a.jsonl', createdAt: ago(600) }),
+    slot(7, 'exited', { sessionFile: '/sessions/a.jsonl', createdAt: ago(60) }),
+    slot(5, 'running', { sessionFile: '/sessions/b.jsonl' }),
   ];
-  const items = resumeItems(slots, [session('a', 2)], '/work', NOW);
-  // Slot 7 is the newest stopped slot for a.jsonl; slot 4 would be a duplicate row.
-  assert.deepEqual(items.map(item => strip(item.marker!)), ['#7 ○', '#2 ○']);
-  assert.equal(items[1]!.title, '(unnamed)');
+  const items = sessionItems([session('b', 5), session('c', 10, { name: 'named c' }), session('a', 30)], slots, paint(false), { now: NOW });
+  assert.deepEqual(items.map(item => item.cells), [
+    ['first message of b', '4 msgs', '5m', '● open in #5'],
+    ['named c', '4 msgs', '10m', ''],
+    ['first message of a', '4 msgs', '30m', '○ stopped #7'],
+  ]);
+  assert.deepEqual(items.map(item => item.value), [{ path: '/sessions/b.jsonl', openIn: 'id-5' }, { path: '/sessions/c.jsonl' }, { path: '/sessions/a.jsonl' }]);
+  assert.deepEqual(items[2]!.exact, ['7', '#7']);
 });
 
-test('resume finder lists the default directory and stopped slot directories in summary form', async () => {
+test('resume picker lists one directory like /resume and maps choices to attach or open', async () => {
   const calls: any[] = [];
-  const slots = [slot(1, 'exited', { sessionFile: '/other/s.jsonl', cwd: '/other' })];
-  const connection = { request: async (method: string, params?: any) => {
-    calls.push({ method, params });
-    if (method === 'list') return slots;
-    return params.cwd === '/other' ? [session('s', 1, { path: '/other/s.jsonl', cwd: '/other' })] : [session('w', 2)];
-  } } as any;
+  const slots = [slot(5, 'running', { sessionFile: '/sessions/b.jsonl' })];
+  const connection = { request: async (method: string, params?: any) => { calls.push({ method, params }); return method === 'list' ? slots : [session('a', 1), session('b', 2)]; } } as any;
   let rendered = '';
-  const choice = await pickResume(connection, { host: 'devbox', cwd: '/work', run: async picker => {
+  const pick = (index: number) => pickResume(connection, { host: 'devbox', cwd: '/work', sessionDir: '.sessions', run: async picker => {
     rendered = strip(picker.render(100).join('\n'));
+    for (let step = 0; step < index; step++) picker.handleInput('\x1b[B');
     return picker.selectedValue();
   } });
-  assert.deepEqual(calls.filter(call => call.method === 'sessions').map(call => call.params), [{ cwd: '/work', summary: true }, { cwd: '/other', summary: true }]);
+  assert.deepEqual(await pick(0), { kind: 'open', cwd: '/work', sessionPath: '/sessions/a.jsonl' });
+  assert.deepEqual(await pick(1), { kind: 'attach', slotId: 'id-5' });
+  assert.deepEqual(calls.find(call => call.method === 'sessions').params, { cwd: '/work', summary: true, sessionDir: '.sessions' });
   assert.match(rendered, /Resume a session\s+devbox · \/work/);
-  assert.match(rendered, /#1 ○ first message of s/);
-  assert.deepEqual(choice, { kind: 'open', cwd: '/other', sessionPath: '/other/s.jsonl' });
+  assert.match(rendered, /first message of b\s+4 msgs\s+\d+[smhd]\s+● open in #5/);
 });
 
-test('resume finder explains empty results and old daemons', async () => {
-  const empty = { request: async (method: string) => method === 'list' ? [] : [] } as any;
-  await assert.rejects(pickResume(empty, { cwd: '/work' }), /No saved sessions to resume in \/work/);
-  await assert.rejects(pickResume(empty, {}), /No stopped slots to resume/);
+test('resume picker explains a missing directory, empty results, and old daemons', async () => {
+  const empty = { request: async () => [] } as any;
+  await assert.rejects(pickResume(empty, {}), /resume lists the sessions of a directory.*resume SLOT/);
+  await assert.rejects(pickResume(empty, { cwd: '/work' }), /No saved sessions in \/work/);
   const old = { request: async (method: string) => { if (method === 'list') return []; throw new Error('slotId must be a string'); } } as any;
   await assert.rejects(storedSessions(old, '/work'), /Deploy this release.*restart-daemon/);
   await assert.rejects(pickResume(old, { cwd: '/work' }), /Deploy this release/);
@@ -95,9 +77,8 @@ test('opening a session creates a slot, attaches if another slot owns it, and ex
   await assert.rejects(openSession(missing, choice), /does not exist.*first response/);
 });
 
-test('home picker offers resume with a directory or a resumable stopped slot', () => {
+test('home picker offers new and resume rows only with a directory', () => {
   const kinds = (slots: NumberedSlot[], cwd?: string) => homeItems(slots, cwd).map(item => item.value.kind);
   assert.deepEqual(kinds([slot(1, 'running')], '/work'), ['attach', 'new', 'resume']);
-  assert.deepEqual(kinds([slot(1, 'exited', { sessionFile: '/s.jsonl' })]), ['resume']);
-  assert.deepEqual(kinds([slot(1, 'exited')]), []);
+  assert.deepEqual(kinds([slot(1, 'exited', { sessionFile: '/s.jsonl' })]), []);
 });

@@ -15,6 +15,7 @@ import { FuzzyPicker, runPicker, type PickerItem } from '../tui/fuzzy-picker.js'
 import { formatSlotList, listSummary, slotColumns, slotItems } from '../tui/slot-table.js';
 import { terminalPaint } from '../tui/table.js';
 import { openSession, pickResume, resumeSlot, type ResumeChoice } from './resume.js';
+import { sessionDirArg } from '../daemon/side-sessions.js';
 
 const HELP = `pi-remote — local terminal UI, persistent remote Pi RPC processes
 
@@ -28,9 +29,9 @@ Everyday commands:
     opening it. --all adds stopped slots; --json prints the slot data.
   pi-remote attach [--host HOST] [SLOT]
   pi-remote resume [--host HOST] [--cwd REMOTE_DIRECTORY] [--no-attach] [SLOT] [-- PI_OPTIONS...]
-    Reopen a stopped slot's session in a new slot. Without SLOT, search stopped
-    slots and the sessions stored for the directory. A session that is still
-    open attaches to its slot instead.
+    The same picker as /resume in a new slot: search the sessions stored for the
+    directory and open one in a new slot. With SLOT, reopen that stopped slot's
+    session. A session that is still open attaches to its slot instead.
   pi-remote kill [--host HOST] SLOT
   pi-remote restart-daemon [--host HOST] [--force]
     Restart the remote daemon on the installed release. Every running slot is
@@ -277,7 +278,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         else if (choice.kind === 'new') createCwd = choice.cwd;
         else {
           // Nothing to resume, or an old daemon, is not fatal here: say why and go back.
-          try { resume = await pickResume(connection, { host, cwd: cwdDefault }); }
+          try { resume = await pickResume(connection, { host, cwd: cwdDefault, sessionDir: sessionDirArg(options.piArgs) }); }
           catch (error) { console.error(errorText(error)); }
         }
       }
@@ -287,7 +288,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       if (id !== undefined) resume = resumeSlot(selectSlot(await connection.request('list'), id));
       else {
         if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Specify a stopped slot number from ls --all; selection needs a local terminal.');
-        resume = await pickResume(connection, { host, cwd: cwdDefault });
+        resume = await pickResume(connection, { host, cwd: cwdDefault, sessionDir: sessionDirArg(options.piArgs) });
         if (!resume) return;
       }
     }

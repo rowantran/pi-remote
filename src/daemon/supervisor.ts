@@ -812,15 +812,18 @@ export class Supervisor {
             if (params.side !== undefined && typeof params.side !== 'boolean') throw new Error('side must be a boolean');
             if (params.summary !== undefined && typeof params.summary !== 'boolean') throw new Error('summary must be a boolean');
             if ((params.slotId === undefined) === (params.cwd === undefined)) throw new Error('Give exactly one of slotId or cwd');
-            // A slot supplies its workspace and any --session-dir. A bare directory, used to
-            // resume a stopped session without a slot, uses Pi's default session directory.
+            if (params.sessionDir !== undefined && (params.cwd === undefined || typeof params.sessionDir !== 'string' || !params.sessionDir)) throw new Error('sessionDir must be a nonempty string and needs cwd');
+            // A slot supplies its workspace and any --session-dir. A bare directory (resume
+            // without a slot) takes the same --session-dir as sessionDir. Both otherwise use
+            // the default directory that Pi started by this daemon would use, so `resume`
+            // and `/resume` in a new slot list the same sessions.
             const slot = params.slotId === undefined ? undefined : this.slot(params.slotId);
             const cwd = slot ? slot.cwd : await realpath(expandHome(string(params.cwd, 'cwd')));
             if (!slot && !(await stat(cwd)).isDirectory()) throw new Error('cwd must be a directory');
             const { SessionManager } = await import('@earendil-works/pi-coding-agent');
             const env = { ...process.env, ...this.options.env };
-            const dir = params.side ? sideSessionDir(cwd, env) : slot ? sessionDirArg(slot.args) : defaultSessionDir(cwd, env);
-            const sessions = await SessionManager.list(cwd, dir === undefined ? undefined : resolve(cwd, expandHome(dir))) satisfies SessionInfoSource[];
+            const dir = params.side ? sideSessionDir(cwd, env) : (slot ? sessionDirArg(slot.args) : params.sessionDir) ?? defaultSessionDir(cwd, env);
+            const sessions = await SessionManager.list(cwd, resolve(cwd, expandHome(dir))) satisfies SessionInfoSource[];
             // Pickers only need the first message. The full text can be megabytes over SSH.
             data = params.summary ? sessions.map(session => ({ ...session, allMessagesText: '' })) : sessions;
             break;

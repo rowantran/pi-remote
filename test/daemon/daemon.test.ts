@@ -861,6 +861,15 @@ test('sessions lists a directory without a slot, never creates it, and can omit 
   const [summary] = await peer.request('sessions', { cwd: workspace, summary: true });
   assert.equal(summary.allMessagesText, '');
   assert.equal(summary.messageCount, full[0].messageCount);
+  // A slot in the workspace (without --session-dir) lists exactly what the directory lists.
+  const inWorkspace = await peer.request<SlotInfo>('create', { cwd: workspace });
+  assert.deepEqual(await peer.request('sessions', { slotId: inWorkspace.id, summary: true }), [summary]);
+  // sessionDir matches a --session-dir Pi option, relative to the directory.
+  const custom = join(workspace, '.sessions');
+  await mkdir(custom);
+  await writeFile(join(custom, 'custom.jsonl'), (await readFile(path, 'utf8')).replace('stored-session', 'custom-session'));
+  assert.deepEqual((await peer.request('sessions', { cwd: workspace, sessionDir: '.sessions', summary: true })).map((session: RecordValue) => session.id), ['custom-session']);
+  await assert.rejects(peer.request('sessions', { slotId: inWorkspace.id, sessionDir: '.sessions' }), /sessionDir .* needs cwd/);
   await assert.rejects(peer.request('sessions', {}), /exactly one of slotId or cwd/);
   await assert.rejects(peer.request('sessions', { cwd: path }), /must be a directory/);
   await assert.rejects(peer.request('sessions', { cwd: workspace, summary: 'yes' }), /summary must be a boolean/);
