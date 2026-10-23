@@ -14,21 +14,26 @@ export { numberSlots, slotNumber, type NumberedSlot };
 
 export const VALUE_OPTIONS = ['--host', '--remote-bin', '--state-dir', '--cwd', '--session', '--ui-extension', '--ui-config', '--theme'] as const;
 export const BOOLEAN_OPTIONS = ['--local', '--json', '--no-attach', '--no-reconnect', '--no-bell', '--all', '--force', '--help'] as const;
-export const COMMANDS = ['new', 'ls', 'attach', 'kill', 'watch', 'rpc', 'restart-daemon', 'completion', 'help', 'version'] as const;
+export const COMMANDS = ['new', 'ls', 'attach', 'resume', 'kill', 'watch', 'rpc', 'restart-daemon', 'completion', 'help', 'version'] as const;
 const COMMAND_LABELS: Partial<Record<typeof COMMANDS[number], string>> = {
+  resume: 'Reopen a stopped or stored session',
   rpc: 'Power-user/debug: send a JSON command',
   watch: 'Power-user/debug: stream session events as JSON',
   'restart-daemon': 'Run the installed release; reopen idle slots',
 };
-const SLOT_COMMANDS = new Set(['attach', 'kill', 'watch', 'rpc']);
+const SLOT_COMMANDS = new Set(['attach', 'resume', 'kill', 'watch', 'rpc']);
+/** Everyday shortcuts that win over prefix matching: r would otherwise be ambiguous. */
+const ALIASES: Readonly<Record<string, typeof COMMANDS[number]>> = { r: 'resume' };
 /** Server/internal commands: exact names only, never matched by a prefix. */
 export const INTERNAL_COMMANDS = ['complete', 'fs', 'daemon', 'bridge'] as const;
 
 /** Exact names win (including internal ones). Otherwise an unambiguous prefix
  * of a public command selects it, e.g. n -> new, k -> kill. Unknown or
- * ambiguous input is returned unchanged with any matching candidates. */
+ * ambiguous input is returned unchanged with any matching candidates. Aliases
+ * (r -> resume) are checked after exact names and before prefixes. */
 export function matchCommand(input: string): { command?: string; candidates: string[] } {
   if ((COMMANDS as readonly string[]).includes(input) || (INTERNAL_COMMANDS as readonly string[]).includes(input)) return { command: input, candidates: [input] };
+  if (Object.hasOwn(ALIASES, input)) return { command: ALIASES[input], candidates: [ALIASES[input]] };
   const candidates = input ? COMMANDS.filter(command => command.startsWith(input)) : [];
   return { command: candidates.length === 1 ? candidates[0] : undefined, candidates };
 }
@@ -175,8 +180,10 @@ export async function completeWords(words: string[], dependencies: CompletionDep
       }));
     }
     const slots = numberSlots(await connection.request('list'));
-    // Every slot command needs a running Pi process, so stopped slots are not offered.
-    return slots.filter(slot => slot.status !== 'exited').flatMap(slot => {
+    // resume offers stopped slots with a saved session. Every other slot command needs a
+    // running Pi process, so it offers only running slots.
+    const offered = context.command === 'resume' ? slots.filter(slot => slot.status === 'exited' && slot.sessionFile) : slots.filter(slot => slot.status !== 'exited');
+    return offered.flatMap(slot => {
       const number = slotNumber(slot);
       const value = number === undefined ? slot.id : String(number);
       // UUID/prefix remains available if explicitly typed, while the default

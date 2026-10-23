@@ -14,7 +14,7 @@ export function detachMessage(slotId: string, slotNumber?: number): string {
 
 /** Text for the user after /quit stopped the remote Pi process and closed the local UI. */
 export function stoppedMessage(slotId: string, slotNumber?: number): string {
-  return `Stopped slot ${slotLabel(slotId, slotNumber)}`;
+  return `Stopped slot ${slotLabel(slotId, slotNumber)}. Resume it with: pi-remote resume ${slotNumber ?? slotId}`;
 }
 
 function slotLabel(slotId: string, slotNumber?: number): string {

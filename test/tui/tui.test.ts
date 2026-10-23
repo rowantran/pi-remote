@@ -457,8 +457,8 @@ test('working status remains above a remote dialog instead of below the footer',
 test('detach message includes the slot number when known', () => {
   assert.equal(detachMessage('uuid', 3), 'Detached from slot 3 / uuid');
   assert.equal(detachMessage('uuid'), 'Detached from slot uuid');
-  assert.equal(stoppedMessage('uuid', 3), 'Stopped slot 3 / uuid');
-  assert.equal(stoppedMessage('uuid'), 'Stopped slot uuid');
+  assert.equal(stoppedMessage('uuid', 3), 'Stopped slot 3 / uuid. Resume it with: pi-remote resume 3');
+  assert.equal(stoppedMessage('uuid'), 'Stopped slot uuid. Resume it with: pi-remote resume uuid');
 });
 
 test('remote_slot_restart clears live/UI state but keeps cached history and increasing sequence', () => {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
-import { mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createConnection, type Socket } from 'node:net';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
@@ -130,7 +130,7 @@ async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {
     if (verify) {
       const response = await peer.request('hello', hello);
       assert.deepEqual({protocol: response.protocol, piVersion: response.piVersion, pid: response.pid}, { ...hello, pid: process.pid });
-      assert.deepEqual(response.capabilities, ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'transcript_filtering', 'activity_stream']);
+      assert.deepEqual(response.capabilities, ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'transcript_filtering', 'activity_stream', 'sessions_by_cwd']);
     }
     return peer;
   };
@@ -833,6 +833,37 @@ test('sessions lists fixture-written history from an explicit isolated directory
   assert.equal(sessions[0].path, info.sessionFile);
   assert.equal(sessions[0].cwd, dir);
   assert.match(sessions[0].firstMessage, /session listing/);
+});
+
+test('sessions lists a directory without a slot, never creates it, and can omit message text', { timeout: 15_000 }, async t => {
+  const { dir, peer } = await setup(t);
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(dir, 'agent');
+  t.after(() => { if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous; });
+  const workspace = join(dir, 'workspace');
+  await mkdir(workspace);
+  const sessionDir = join(dir, 'agent', 'sessions', `--${workspace.slice(1).replace(/\//g, '-')}--`);
+  // Listing an unused directory must not create Pi's session directory there.
+  assert.deepEqual(await peer.request('sessions', { cwd: workspace }), []);
+  await assert.rejects(stat(sessionDir), { code: 'ENOENT' });
+  await mkdir(sessionDir, { recursive: true });
+  const now = new Date().toISOString();
+  const path = join(sessionDir, 'stored.jsonl');
+  await writeFile(path, [
+    { type: 'session', version: 3, id: 'stored-session', timestamp: now, cwd: workspace },
+    { type: 'message', id: 'm1', parentId: null, timestamp: now, message: { role: 'user', content: 'fix the flaky test', timestamp: Date.now() } },
+  ].map(entry => JSON.stringify(entry)).join('\n') + '\n');
+  const full = await peer.request('sessions', { cwd: workspace });
+  assert.equal(full.length, 1);
+  assert.equal(full[0].path, path);
+  assert.match(full[0].firstMessage, /fix the flaky test/);
+  assert.match(full[0].allMessagesText, /fix the flaky test/);
+  const [summary] = await peer.request('sessions', { cwd: workspace, summary: true });
+  assert.equal(summary.allMessagesText, '');
+  assert.equal(summary.messageCount, full[0].messageCount);
+  await assert.rejects(peer.request('sessions', {}), /exactly one of slotId or cwd/);
+  await assert.rejects(peer.request('sessions', { cwd: path }), /must be a directory/);
+  await assert.rejects(peer.request('sessions', { cwd: workspace, summary: 'yes' }), /summary must be a boolean/);
 });
 
 test('successful mutating RPC stays successful when its follow-up get_state fails', { timeout: 10_000 }, async t => {

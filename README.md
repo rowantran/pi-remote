@@ -55,14 +55,19 @@ pi-remote new --cwd /remote/project --no-attach
 # Pi options after -- are forwarded to the stock remote CLI.
 pi-remote new --cwd /remote/project -- --model PROVIDER/MODEL
 
-# Resume a stored Pi session in a NEW slot.
+# Resume a session you stopped: search stopped slots and stored sessions.
+pi-remote resume
+# Or reopen stopped slot 4's session directly.
+pi-remote resume 4
+
+# Open a specific stored Pi session file in a NEW slot.
 pi-remote new --cwd /remote/project --session /remote/session.jsonl
 
 # Explicitly stop a remote Pi process. Ordinary detach never does this.
 pi-remote kill 1
 ```
 
-From an attached client, `/quit` does the same as `pi-remote kill` for the current slot, then closes the client and prints `Stopped slot NUMBER / UUID`. If Pi is running, compacting, running a shell command, or has queued prompts, `/quit` asks for confirmation first, because stopping Pi interrupts that work. The session file stays on disk; open it in a new slot with `--session` to continue. The stopped slot stays in `pi-remote ls --all`; plain `pi-remote ls` hides stopped slots and prints how many it hid.
+From an attached client, `/quit` does the same as `pi-remote kill` for the current slot, then closes the client and prints `Stopped slot NUMBER / UUID. Resume it with: pi-remote resume NUMBER`. If Pi is running, compacting, running a shell command, or has queued prompts, `/quit` asks for confirmation first, because stopping Pi interrupts that work. The session file stays on disk; `pi-remote resume NUMBER` opens it in a new slot to continue. The stopped slot stays in `pi-remote ls --all`; plain `pi-remote ls` hides stopped slots and prints how many it hid.
 
 The 0.2 daemon persists stable slot numbers in `slots.json`, including stopped slots. A still-running 0.1 daemon uses insertion-order numeric aliases until a later daemon startup migrates its metadata. UUIDs remain valid in both cases. Numeric input always means a slot number, never a UUID prefix.
 
@@ -70,13 +75,28 @@ The 0.2 daemon persists stable slot numbers in `slots.json`, including stopped s
 
 Use `--host HOST` with any command to select another SSH host, for example `pi-remote attach --host otherbox 1`. For local testing, use `--local` instead of a host and use a local `--cwd`.
 
-Every command also accepts an unambiguous prefix: `pi-remote n --cwd /remote/project` runs `new`, `pi-remote a 1` runs `attach`, `pi-remote k 1` runs `kill`, and `pi-remote l` runs `ls`. The internal commands `bridge`, `daemon`, `complete`, and `fs` need their full names.
+Every command also accepts an unambiguous prefix: `pi-remote n --cwd /remote/project` runs `new`, `pi-remote a 1` runs `attach`, `pi-remote k 1` runs `kill`, and `pi-remote l` runs `ls`. `pi-remote r` is short for `resume`; `restart-daemon` needs at least `rest`. The internal commands `bridge`, `daemon`, `complete`, and `fs` need their full names.
 
 ### Picking a session
 
 Run `pi-remote` with no command to open the home picker. It lists active slots with exactly the rows of `pi-remote ls`: number, status, session name (side slots indented under their parent), workspace, attached clients, age, and the first 8 characters of the UUID, with any slot error on the line below. Its header is the same summary line that `ls` prints on a terminal (`devbox · 3 running · 1 stopped`). Type to filter: the search is fuzzy over the session name, number, and directory, and typing a slot number such as `3` or `#3` puts that slot first. Use ↑/↓ (or Ctrl+P/Ctrl+N) to move, Enter to open, and Esc, Ctrl+C, or Ctrl+D to cancel. The last row, **+ New session**, starts a slot in the default directory (`--cwd`, `PI_REMOTE_CWD`, or the config file) and attaches to it. Options such as `--host` work as with other commands: `pi-remote --host otherbox`.
 
+The **↺ Resume a session…** row opens the resume finder described below; Esc there returns to the home picker. It appears when there is a default directory or a stopped slot with a saved session.
+
 `pi-remote attach` without a slot opens the same picker, limited to active slots, when more than one is active. The picker draws below your prompt and erases itself when you choose or cancel; it never clears the screen or scrollback. Without a terminal, `pi-remote` prints help and `attach` asks for a slot number.
+
+### Resuming stopped sessions
+
+`pi-remote resume` (or `pi-remote r`) opens a fuzzy finder of sessions you can continue:
+
+- **Stopped slots** whose Pi session was saved, labelled with their old slot number (`#4 ○`). Type `4` to jump to one.
+- **Stored sessions** for the default directory (`--cwd`, `PI_REMOTE_CWD`, or the config file), from Pi's normal session directory on the remote host. Rows show the session name or first message, message count, and age.
+
+Rows are newest first. Enter opens the session in a **new slot** and attaches to it; `-- PI_OPTIONS` are passed to the new Pi process as with `new`. If a running slot already has the session open, the row says `open in #N` and Enter attaches to that slot instead: one session never runs in two Pi processes. A stopped slot whose session was never saved (Pi saves a session after its first response) is hidden when its directory's listing does not contain it.
+
+`pi-remote resume SLOT` skips the finder and reopens that stopped slot's session. If the slot is still running, it attaches. `--no-attach` prints the slot UUID without opening the UI. Slot completion after `pi-remote resume ` offers stopped slots with a saved session.
+
+The finder lists sessions in Pi's default session directory. Sessions started with `--session-dir` do not appear there; reopen them with `resume SLOT` or `new --session`. Listing needs a daemon from this release; an older daemon reports that you should deploy and run `pi-remote restart-daemon`.
 
 ### Session names
 
@@ -147,7 +167,7 @@ pi-remote completion fish > ~/.config/fish/completions/pi-remote.fish
 
 Choose one setup method. Remove a previously installed completion file if you switch to the config line. Completion uses the same default host as the CLI (`--host`, `PI_REMOTE_HOST`, then the config file), and the same default directory for `--session` (`--cwd`, `PI_REMOTE_CWD`, then the config file).
 
-Type `pi-remote new --cwd /remote/` and press Tab to list **remote directories**, not local ones. Slot completion after `pi-remote attach ` includes numbers, status, session name, and workspace. `--session` completes remote files and directories, relative to `--cwd` or the default directory when one is set.
+Type `pi-remote new --cwd /remote/` and press Tab to list **remote directories**, not local ones. Slot completion after `pi-remote attach ` includes numbers, status, session name, and workspace; after `pi-remote resume ` it offers stopped slots instead. `--session` completes remote files and directories, relative to `--cwd` or the default directory when one is set.
 
 Remote `~` and relative completion prefixes use the remote home directory unless a completion base is supplied. Quote remote tilde paths, for example `--cwd '~/workplace/project'`, so your shell does not expand them to your **local** home. Prefer absolute paths for `--session` when launching. Completion is read-only: it may start the on-demand daemon, but never creates or attaches a Pi slot, sends a prompt, or runs an agent tool. An unavailable host produces no suggestions.
 

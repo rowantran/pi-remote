@@ -74,6 +74,11 @@ connection.request('snapshot', { slotId: 'slot', historyCursor: { sessionId: 'se
 connection.request('sessions');
 // @ts-expect-error side is boolean.
 connection.request('sessions', { slotId: 'slot', side: 'yes' });
+// @ts-expect-error sessions takes a slot or a directory, not both.
+connection.request('sessions', { slotId: 'slot', cwd: '/work' });
+// @ts-expect-error sessions needs a slot or a directory.
+connection.request('sessions', { summary: true });
+connection.request('sessions', { cwd: '/work', summary: true });
 // @ts-expect-error force is boolean.
 connection.request('restart_daemon', { force: 'yes' });
 // @ts-expect-error restart requires params.
