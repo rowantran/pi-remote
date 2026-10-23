@@ -171,9 +171,9 @@ test('slot picker searches rows and returns the chosen UUID without an RPC', asy
   } });
   assert.equal(selected, 'abcdefff-b');
   const text = rendered.join('\n');
-  assert.match(text, /Attach to a slot.*devbox/);
-  assert.match(text, /#19 .*Fix quoted paths.*\/remote\/project with spaces/);
-  assert.match(text, /#3 .*starting/);
+  assert.match(text, /Attach to a slot.*devbox · 2 running · 0 stopped/);
+  assert.match(text, /19  ● running   Fix quoted paths  \/remote\/project with spaces/);
+  assert.match(text, /3  ● starting  Fix quoted paths/);
 });
 
 test('slot picker keeps non-TTY failures and reports cancellation', async () => {
@@ -510,7 +510,7 @@ test('CLI ls displays short numbers and resolves numeric rpc slots to UUIDs befo
   const fixture = await fakeSsh(t);
   const cli = [...nodeModuleArgs(import.meta.url, '../../src/cli/main')];
   const listing = await exec(process.execPath, [...cli, 'l', '--host', 'alias'], { env: fixture.env, cwd: root });
-  assert.match(listing.stdout, /^\s*19  1234abcd-a  running/);
+  assert.match(listing.stdout, /^\s*19  ● running   Fix quoted paths  \/remote\/project with spaces  \d+d  1234abcd$/m);
   const json = await exec(process.execPath, [...cli, 'ls', '--host', 'alias', '--json'], { env: fixture.env, cwd: root });
   assert.equal(JSON.parse(json.stdout)[0].number, 19);
   await writeFile(fixture.log, '');

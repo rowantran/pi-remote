@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
-import { BOOLEAN_OPTIONS, VALUE_OPTIONS, completionScript, resolveCommand, runCompletionCommand, selectHost, slotLabel, slotNumber, numberSlots, type NumberedSlot } from './completion.js';
+import { BOOLEAN_OPTIONS, VALUE_OPTIONS, completionScript, resolveCommand, runCompletionCommand, selectHost, slotNumber, numberSlots, type NumberedSlot } from './completion.js';
 import { runDaemon } from '../daemon/supervisor.js';
 import { defaultStateDir } from '../protocol/paths.js';
 import { configPath, defaultCwd, defaultHost } from './config.js';
@@ -10,9 +10,10 @@ import { connectCompatibleLocal } from './connections.js';
 import { ReconnectingConnection } from '../client/reconnect.js';
 import { releaseName, restartDaemon } from '../client/restart-daemon.js';
 import { PI_VERSION, PROTOCOL_VERSION, type SlotInfo, type Snapshot, type RemoteConnection } from '../protocol/types.js';
-import { sideParentLabel } from '../tui/session-labels.js';
 import type { AttachContext } from '../tui/side-launcher.js';
-import { FuzzyPicker, runPicker, slotItem, style, type PickerItem } from './picker.js';
+import { FuzzyPicker, runPicker, type PickerItem } from '../tui/fuzzy-picker.js';
+import { formatSlotList, listSummary, slotColumns, slotItems } from '../tui/slot-table.js';
+import { terminalPaint } from '../tui/table.js';
 
 const HELP = `pi-remote — local terminal UI, persistent remote Pi RPC processes
 
@@ -138,11 +139,12 @@ export type RunPicker = <T>(picker: FuzzyPicker<T>) => Promise<T | undefined>;
 export interface PickerIo { isTTY?: boolean; host?: string; run?: RunPicker }
 const interactive = (io: PickerIo) => io.isTTY ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
 
-/** Local, pre-TUI selection. It returns a UUID and never sends an RPC. */
-export async function pickSlot(slots: NumberedSlot[], io: PickerIo = {}): Promise<string> {
+/** Local, pre-TUI selection with the same rows as `ls`. It returns a UUID and never sends an RPC. */
+export async function pickSlot(slots: NumberedSlot[], io: PickerIo = {}, all: NumberedSlot[] = slots): Promise<string> {
   if (!interactive(io)) throw new Error('Specify a slot number or UUID from ls; selection needs a local terminal.');
-  const picker = new FuzzyPicker(numberSlots(slots).map(slot => slotItem(slot)), {
-    title: 'Attach to a slot', subtitle: io.host, action: 'attach', empty: 'No slots match.',
+  const p = terminalPaint();
+  const picker = new FuzzyPicker(slotItems(slots, p), {
+    title: 'Attach to a slot', subtitle: listSummary(io.host ?? 'local', all), action: 'attach', empty: 'No slots match.', columns: slotColumns(p), paint: p,
   });
   const chosen = await (io.run ?? runPicker)(picker);
   if (chosen === undefined) throw new Error('Selection cancelled.');
@@ -151,22 +153,24 @@ export async function pickSlot(slots: NumberedSlot[], io: PickerIo = {}): Promis
 
 export type HomeChoice = { kind: 'attach'; slotId: string } | { kind: 'new'; cwd: string };
 
-/** Rows of the bare `pi-remote` picker: active slots, then actions. */
-export function homeItems(slots: NumberedSlot[], cwd?: string, now = Date.now()): PickerItem<HomeChoice>[] {
-  const items: PickerItem<HomeChoice>[] = numberSlots(slots).filter(slot => slot.status !== 'exited')
-    .map(slot => ({ ...slotItem(slot, now), value: { kind: 'attach', slotId: slot.id } }));
-  if (cwd) items.push({ value: { kind: 'new', cwd }, marker: style.accent('+'), title: 'New session', detail: cwd, pinned: true });
+/** Rows of the bare `pi-remote` picker: active slots as in `ls`, then actions. */
+export function homeItems(slots: NumberedSlot[], cwd?: string, p = terminalPaint(), now = Date.now()): PickerItem<HomeChoice>[] {
+  const items: PickerItem<HomeChoice>[] = slotItems(slots.filter(slot => slot.status !== 'exited'), p, now)
+    .map(item => ({ ...item, value: { kind: 'attach', slotId: item.value } }));
+  if (cwd) items.push({ value: { kind: 'new', cwd }, marker: p.accent('+'), label: 'New session', detail: cwd, search: 'new session', pinned: true });
   return items;
 }
 
 /** The bare `pi-remote` picker. Undefined means the user cancelled. */
 export async function pickHome(connection: Pick<RemoteConnection, 'request'>, options: PickerIo & { cwd?: string }): Promise<HomeChoice | undefined> {
-  const items = homeItems(await connection.request('list'), options.cwd);
+  const slots = numberSlots(await connection.request('list'));
+  const p = terminalPaint();
+  const items = homeItems(slots, options.cwd, p);
   if (!items.length) throw new Error(`No active slots. Create one with new --cwd DIRECTORY, or add {"cwd": "DIRECTORY"} to ${configPath()}.`);
-  const active = items.filter(item => item.value.kind === 'attach').length;
+  const active = items.some(item => item.value.kind === 'attach');
   return (options.run ?? runPicker)(new FuzzyPicker(items, {
-    title: 'pi-remote', subtitle: [options.host ?? 'local', `${active} active slot${active === 1 ? '' : 's'}`].join(' · '),
-    action: 'open', empty: active ? 'No active slots match.' : 'No active slots yet.',
+    title: 'pi-remote', subtitle: listSummary(options.host ?? 'local', slots),
+    action: 'open', empty: active ? 'No active slots match.' : 'No active slots yet.', columns: slotColumns(p), paint: p,
   }));
 }
 
@@ -175,26 +179,10 @@ export async function resolveSlot(connection: Pick<RemoteConnection, 'request'>,
   if (id !== undefined) return selectSlot(slots, id).id;
   const active = slots.filter(slot => slot.status !== 'exited');
   if (active.length === 1) return active[0].id;
-  if (allowPicker && active.length > 1) return pickSlot(active, io);
+  if (allowPicker && active.length > 1) return pickSlot(active, io, slots);
   throw new Error(active.length ? 'Specify a slot number or UUID from ls.' : 'No active slots. Create one with new --cwd DIRECTORY.');
 }
-/** Stopped slots are hidden unless --all is given; say how many so they are not lost. */
-export function formatSlotList(slots: NumberedSlot[], hidden = 0): string {
-  const ordered: { slot: NumberedSlot; depth: number }[] = [];
-  const seen = new Set<string>();
-  const visit = (slot: NumberedSlot, depth: number) => {
-    if (seen.has(slot.id)) return;
-    seen.add(slot.id); ordered.push({ slot, depth });
-    for (const child of slots) if (child.parentSlotId === slot.id) visit(child, depth + 1);
-  };
-  const ids = new Set(slots.map(slot => slot.id));
-  for (const slot of slots) if (!slot.parentSlotId || !ids.has(slot.parentSlotId)) visit(slot, 0);
-  for (const slot of slots) visit(slot, 0); // Malformed cycles must not hide entries.
-  const lines = ordered.map(({ slot, depth }) => `${'  '.repeat(depth)}${String(slotNumber(slot) ?? '-').padStart(3)}  ${slot.id}  ${slot.status.padEnd(7)}  ${slot.clients} client(s)  ${slot.sessionName ?? '(unnamed)'}${sideParentLabel(slot) ? ` (${sideParentLabel(slot)})` : ''}  ${slot.cwd}${slot.error ? `\n  ${slot.error}` : ''}`);
-  if (!slots.length) lines.push(hidden ? 'No active slots. Create one with new --cwd DIRECTORY.' : 'No slots. Create one with new --cwd DIRECTORY.');
-  if (hidden) lines.push(`${hidden} stopped slot${hidden === 1 ? '' : 's'} hidden. Use ls --all to show ${hidden === 1 ? 'it' : 'them'}.`);
-  return lines.join('\n');
-}
+export { formatSlotList };
 
 /** Only interactive attach/new request transcript filtering; watch/rpc stay raw. */
 export function usesTerminalUi(command: string, flags: ReadonlySet<string>, stdinIsTTY = Boolean(process.stdin.isTTY), stdoutIsTTY = Boolean(process.stdout.isTTY)): boolean {
@@ -255,7 +243,12 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       const all = numberSlots(await connection.request('list'));
       const slots = options.flags.has('--all') ? all : all.filter(slot => slot.status !== 'exited');
       if (options.flags.has('--json')) console.log(JSON.stringify(slots, null, 2));
-      else console.log(formatSlotList(slots, all.length - slots.length));
+      else {
+        const p = terminalPaint();
+        // On a terminal, the same summary line as the pickers; pipes get only the list.
+        if (process.stdout.isTTY) console.log(p.dim(listSummary(host ?? 'local', all)));
+        console.log(formatSlotList(slots, all.length - slots.length, p));
+      }
       return;
     }
     let slotId: string | undefined;

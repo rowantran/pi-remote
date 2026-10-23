@@ -35,8 +35,8 @@ pi-remote new --cwd /remote/project
 Remote Pi loads its normal settings, credentials, providers, extension factories, skills, and trusted project resources. Deployment copies application files, not your local Pi configuration.
 
 ```sh
-# List running slots with their short numbers and session names.
-# Add --all to include stopped slots.
+# List running slots: number, status, session name, workspace, clients, age,
+# and short UUID. Add --all to include stopped slots, --json for scripts.
 pi-remote ls
 
 # Attach by number, full UUID, or unique nonnumeric UUID prefix.
@@ -74,7 +74,7 @@ Every command also accepts an unambiguous prefix: `pi-remote n --cwd /remote/pro
 
 ### Picking a session
 
-Run `pi-remote` with no command to open the home picker. It lists active slots with their number, status, session name, workspace, age, and attached clients. Type to filter: the search is fuzzy over the session name, number, and directory, and typing a slot number such as `3` or `#3` puts that slot first. Use ↑/↓ (or Ctrl+P/Ctrl+N) to move, Enter to open, and Esc, Ctrl+C, or Ctrl+D to cancel. The last row, **+ New session**, starts a slot in the default directory (`--cwd`, `PI_REMOTE_CWD`, or the config file) and attaches to it. Options such as `--host` work as with other commands: `pi-remote --host otherbox`.
+Run `pi-remote` with no command to open the home picker. It lists active slots with exactly the rows of `pi-remote ls`: number, status, session name (side slots indented under their parent), workspace, attached clients, age, and the first 8 characters of the UUID, with any slot error on the line below. Its header is the same summary line that `ls` prints on a terminal (`devbox · 3 running · 1 stopped`). Type to filter: the search is fuzzy over the session name, number, and directory, and typing a slot number such as `3` or `#3` puts that slot first. Use ↑/↓ (or Ctrl+P/Ctrl+N) to move, Enter to open, and Esc, Ctrl+C, or Ctrl+D to cancel. The last row, **+ New session**, starts a slot in the default directory (`--cwd`, `PI_REMOTE_CWD`, or the config file) and attaches to it. Options such as `--host` work as with other commands: `pi-remote --host otherbox`.
 
 `pi-remote attach` without a slot opens the same picker, limited to active slots, when more than one is active. The picker draws below your prompt and erases itself when you choose or cancel; it never clears the screen or scrollback. Without a terminal, `pi-remote` prints help and `attach` asks for a slot number.
 

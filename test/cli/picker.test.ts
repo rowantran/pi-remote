@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Terminal } from '@earendil-works/pi-tui';
 import { homeItems, pickHome } from '../../src/cli/main.js';
-import { FuzzyPicker, formatAge, runPicker, slotItem, type PickerItem } from '../../src/cli/picker.js';
-import type { NumberedSlot } from '../../src/cli/completion.js';
+import { FuzzyPicker, runPicker, type PickerItem } from '../../src/tui/fuzzy-picker.js';
+import { formatAge, formatSlotList, slotColumns, slotItems, type NumberedSlot } from '../../src/tui/slot-table.js';
+import { paint } from '../../src/tui/table.js';
 
 const NOW = Date.parse('2026-10-21T12:00:00Z');
 const slot = (number: number, status: NumberedSlot['status'], sessionName?: string, cwd = '/work'): NumberedSlot =>
@@ -11,7 +12,9 @@ const slot = (number: number, status: NumberedSlot['status'], sessionName?: stri
 const strip = (text: string) => text.replace(/\x1b\[[0-9;?]*[A-Za-z]|\x1b_[^\x07]*\x07|\x1b\][^\x07]*\x07/g, '');
 const type = (picker: FuzzyPicker<unknown>, text: string) => { for (const key of text) picker.handleInput(key); };
 const items = (titles: string[], pinned?: string): PickerItem<string>[] =>
-  [...titles.map(title => ({ value: title, title })), ...(pinned ? [{ value: pinned, title: pinned, pinned: true }] : [])];
+  [...titles.map(title => ({ value: title, cells: [title], search: title })), ...(pinned ? [{ value: pinned, label: pinned, search: pinned, pinned: true }] : [])];
+const plain = paint(false);
+const slotPicker = (slots: NumberedSlot[]) => new FuzzyPicker(slotItems(slots, plain, NOW), { title: 'Pick', columns: slotColumns(plain), paint: plain });
 
 test('fuzzy picker filters by query and keeps pinned actions below matches', () => {
   const picker = new FuzzyPicker(items(['fix-auth-tests', 'refactor parser', 'flaky ci'], 'New session'), { title: 'Pick' });
@@ -24,7 +27,7 @@ test('fuzzy picker filters by query and keeps pinned actions below matches', () 
 });
 
 test('fuzzy picker ranks exact slot numbers first and selects with Enter', () => {
-  const picker = new FuzzyPicker([slotItem(slot(12, 'running', 'about 3 things')), slotItem(slot(3, 'running', 'other'))], { title: 'Pick' });
+  const picker = slotPicker([slot(12, 'running', 'about 3 things'), slot(3, 'running', 'other')]);
   type(picker, '3');
   assert.equal(picker.selectedValue(), 'id-3');
   let chosen: string | undefined;
@@ -59,8 +62,8 @@ test('fuzzy picker scrolls a long list and shows the position', () => {
 });
 
 test('picker rows neutralize remote control characters and fit the width', () => {
-  const evil = slotItem(slot(1, 'running', 'name\x1b]0;pwned\x07', '/very/long/remote/path/that/does/not/fit/in/a/narrow/terminal'));
-  const lines = new FuzzyPicker([evil], { title: 'Pick\x1b[2J' }).render(50);
+  const evil = slot(1, 'running', 'name\x1b]0;pwned\x07', '/very/long/remote/path/that/does/not/fit/in/a/narrow/terminal');
+  const lines = new FuzzyPicker(slotItems([evil], plain, NOW), { title: 'Pick\x1b[2J', columns: slotColumns(plain), paint: plain }).render(50);
   for (const line of lines) {
     assert.doesNotMatch(line, /\x1b\]0;|\x1b\[2J|\x07pwned/);
     assert.ok(strip(line).length <= 50, line);
@@ -68,15 +71,20 @@ test('picker rows neutralize remote control characters and fit the width', () =>
   assert.match(strip(lines.join('\n')), /…/);
 });
 
-test('slot rows show number, status, name, side parent, workspace, age, and attached clients', () => {
+test('slot pickers show exactly the ls rows, in ls order, with errors as notes', () => {
   const side = { ...slot(4, 'starting', 'question'), parentSlotId: 'id-1', parentSlotNumber: 1, clients: 2 };
-  const row = slotItem(side, NOW);
-  assert.equal(strip(row.marker!), '#4 ●');
-  assert.equal(row.title, 'question');
-  assert.equal(row.detail, 'side of #1 · /work');
-  assert.equal(row.right, 'starting · 1h · 2 attached');
-  assert.equal(slotItem(slot(2, 'running'), NOW).title, '(unnamed)');
-  assert.deepEqual([formatAge(NOW - 5_000, NOW), formatAge(NOW - 300_000, NOW), formatAge(NOW - 7_200_000, NOW), formatAge(NOW - 3 * 86_400_000, NOW)], ['5s', '5m', '2h', '3d']);
+  const slots = [slot(1, 'running', 'main'), slot(2, 'running'), side, { ...slot(5, 'running', 'broken'), error: 'startup failed' }];
+  const list = formatSlotList(slots, 0, plain, NOW).split('\n');
+  const picker = strip(slotPicker(slots).render(200).join('\n')).split('\n');
+  for (const line of list) assert.ok(picker.some(row => row.slice(2) === line.slice(2)), `picker lacks ls line: ${line}`);
+  assert.deepEqual(list, [
+    '  1  ● running   main                     /work             1h  id-1',
+    '  4  ● starting    question (side of #1)  /work  2 clients  1h  id-4',
+    '  2  ● running   (unnamed)                /work             1h  id-2',
+    '  5  ● running   broken                   /work             1h  id-5',
+    '    startup failed',
+  ]);
+  assert.deepEqual([formatAge(NOW - 5_000, NOW), formatAge(NOW - 300_000, NOW), formatAge(NOW - 7_200_000, NOW), formatAge(NOW - 3 * 86_400_000, NOW), formatAge('', NOW)], ['5s', '5m', '2h', '3d', '']);
 });
 
 test('home picker lists active slots and offers a new session only with a directory', () => {
@@ -96,7 +104,7 @@ test('home picker shows the host and fails clearly when there is nothing to offe
     picker.handleInput('\x1b[B');
     return picker.selectedValue();
   } });
-  assert.match(title, /pi-remote\s+devbox · 1 active slot$/);
+  assert.match(title, /pi-remote\s+devbox · 1 running · 0 stopped$/);
   assert.deepEqual(choice, { kind: 'new', cwd: '~/p' });
   await assert.rejects(pickHome(connection([slot(2, 'exited')]), { run: async () => undefined }), /No active slots/);
 });
@@ -130,7 +138,7 @@ test('runPicker fits the list to a short terminal', async () => {
   const terminal = Object.assign(new FakeTerminal(), { rows: 10 });
   const picker = new FuzzyPicker(items(Array.from({ length: 20 }, (_, index) => `s${index}`)), { title: 'Pick' });
   const result = runPicker(picker, terminal);
-  assert.equal(picker.maxVisible, 2);
+  assert.equal(picker.maxVisible, 1);
   terminal.input('\x1b');
   await new Promise(resolve => setTimeout(resolve, 100));
   terminal.input('');
