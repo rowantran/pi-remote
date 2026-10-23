@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { collectStatus, formatReport, lsHeader } from '../../src/cli/status.js';
 import {
   Pinger, daemonRows, daemonStatus, formatBytes, formatDuration, formatLatency, formatSlotCounts, latencyLevel, latencyStats, slotCounts,
+  statusPanelRows, statusSampler,
 } from '../../src/tui/host-status.js';
+import { listSummary } from '../../src/tui/slot-table.js';
+import { paint } from '../../src/tui/table.js';
 import type { DaemonStatus } from '../../src/protocol/methods.js';
 import type { SlotInfo } from '../../src/protocol/types.js';
 
@@ -52,34 +54,39 @@ test('daemon status is optional on older daemons but real errors still surface',
   assert.match(daemonRows(undefined)[0]![1], /restart-daemon/);
 });
 
-test('status connects once, pings sequentially, and closes the connection', async () => {
+test('the status panel shows host, live latency, extra rows, and daemon facts', () => {
+  const rows = statusPanelRows({ host: 'devbox', connected: true, connection: 'connected 2m', samples: [30, 10, 20], extra: [['slot', '#3 · running']], daemon: facts }, paint(false), NOW);
+  assert.deepEqual(rows, [
+    '  host      devbox · connected 2m',
+    '  latency   20 ms min 10 ms · avg 20 ms · max 30 ms · 3 samples',
+    '  slot      #3 · running',
+    '  daemon    pid 7 · up 1m 30s · release abc1234',
+    '  versions  Pi 1.0.4 · Node v22.19.0',
+    '  machine   devbox · linux arm64 · up 3d 2h',
+    '  load      1.00 0.50 0.25 · 1 CPU',
+    '  memory    512 MB free of 2.0 GB',
+  ]);
+  const p = paint(false);
+  assert.match(statusPanelRows({ host: 'h', connected: true, samples: [], daemon: 'loading' }, p).join('\n'), /measuring…[\s\S]*daemon\s+loading…/);
+  assert.match(statusPanelRows({ host: 'h', connected: true, samples: [5], daemon: { error: 'boom' } }, p).join('\n'), /daemon\s+boom/);
+  assert.match(statusPanelRows({ host: 'h', connected: true, samples: [5], daemon: undefined }, p).join('\n'), /newer daemon/);
+  const offline = statusPanelRows({ host: 'h', connected: false, samples: [5], daemon: undefined }, p).join('\n');
+  assert.match(offline, /disconnected, reconnecting[\s\S]*unavailable while disconnected/);
+  assert.doesNotMatch(offline, /daemon/);
+});
+
+test('the status sampler pings and refreshes daemon facts on every call', async () => {
   const calls: string[] = [];
-  let closed = 0;
-  const connection = { request: async (method: string) => { calls.push(method); return method === 'status' ? facts : method === 'list' ? [slot('running', 1), slot('exited')] : {}; }, close: () => { closed++; } } as any;
-  const report = await collectStatus(async () => connection, 'devbox', 3, clock(0, 250, 0, 30, 0, 40, 0, 50));
-  assert.deepEqual(calls, ['ping', 'ping', 'ping', 'status', 'list']);
-  assert.equal(closed, 1);
-  assert.equal(report.connectMs, 250);
-  assert.deepEqual(report.pings, [30, 40, 50]);
-  const text = strip(formatReport(report, NOW));
-  assert.match(text, /^devbox  ● online$/m);
-  assert.match(text, /latency\s+40 ms \(min 30 ms · max 50 ms over 3 round trips\)/);
-  assert.match(text, /connect\s+250 ms \(SSH and daemon handshake\)/);
-  assert.match(text, /slots\s+1 running · 1 stopped · 1 client attached/);
-  assert.match(strip(formatReport({ ...report, local: true })), /\(daemon handshake\)/);
+  const connection = { request: async (method: string) => { calls.push(method); return method === 'status' ? facts : {}; } } as any;
+  const sampler = statusSampler(connection, 'devbox', [['connect', '412 ms']]);
+  await sampler.sample(paint(false));
+  const rows = await sampler.sample(paint(false));
+  assert.deepEqual(calls, ['ping', 'status', 'ping', 'status']);
+  assert.match(rows.join('\n'), /host\s+devbox · connected\n.*2 samples\n  connect\s+412 ms\n  daemon\s+pid 7/);
 });
 
-test('status reports unreachable hosts without the generic transport message', async () => {
-  const report = await collectStatus(async () => { throw new Error('Disconnected. Remote work continues; attach again.\nssh: Could not resolve hostname x'); }, 'x');
-  assert.equal(report.online, false);
-  const text = strip(formatReport(report));
-  assert.match(text, /^x  ✗ unreachable$/m);
-  assert.match(text, /error\s+the connection closed before the daemon answered \(SSH output above\)/);
-  const failed = await collectStatus(async () => ({ request: async () => { throw new Error('Slot not found'); }, close() {} }) as any, 'devbox');
-  assert.equal(failed.online, false);
-  assert.match(strip(formatReport(failed)), /error\s+Slot not found/);
-});
-
-test('ls header shows host, round trip, and counts', () => {
-  assert.equal(strip(lsHeader('devbox', 38.2, [slot('running'), slot('exited')])), 'devbox · 38 ms · 1 running · 1 stopped');
+test('the ls and picker summary shows host, colored round trip, and counts', () => {
+  assert.equal(listSummary('devbox', [slot('running'), slot('exited')], { latencyMs: 38.2 }), 'devbox · 38 ms · 1 running · 1 stopped');
+  assert.equal(listSummary('dev\x1bbox', [], {}), 'dev box · 0 running · 0 stopped');
+  assert.match(listSummary('devbox', [], { latencyMs: 450, paint: paint(true) }), /\x1b\[31m450 ms\x1b\[39m/);
 });

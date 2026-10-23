@@ -1668,6 +1668,8 @@ test('/resume shows the same rows as pi-remote resume and never opens a session 
   submit('/resume'); await flush(); await flush();
   terminal.input('4'); terminal.input('\r'); await flush();
   assert.deepEqual(connection.requests.filter(request => request.params?.command?.type === 'switch_session').map(request => request.params!.command.sessionPath), ['/s/old.jsonl']);
+});
+
 const daemonFacts = {
   pid: 4242, release: '/home/me/.local/share/pi-remote/releases/abc1234', startedAt: new Date(Date.now() - 3 * 3_600_000).toISOString(),
   piVersion: '1.0.4', nodeVersion: 'v22.19.0',

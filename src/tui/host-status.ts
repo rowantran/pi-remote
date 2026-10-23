@@ -1,6 +1,7 @@
 import { basename } from 'node:path';
 import type { DaemonStatus } from '../protocol/methods.js';
 import type { RemoteConnection, SlotInfo } from '../protocol/types.js';
+import { plainText, type Paint } from './table.js';
 
 /** Round trips at or above these are shown as slow and very slow. */
 export const SLOW_MS = 150;
@@ -88,9 +89,9 @@ export function daemonRows(status: DaemonStatus | undefined, now = Date.now()): 
   if (!status) return [['daemon', 'details need a newer daemon: deploy, then run pi-remote restart-daemon']];
   const { host } = status;
   return [
-    ['daemon', `pid ${status.pid} · up ${formatDuration((now - Date.parse(status.startedAt)) / 1000)} · release ${basename(status.release)}`],
-    ['versions', `Pi ${status.piVersion} · Node ${status.nodeVersion}`],
-    ['machine', `${host.hostname} · ${host.platform} ${host.arch} · up ${formatDuration(host.uptimeSeconds)}`],
+    ['daemon', `pid ${status.pid} · up ${formatDuration((now - Date.parse(status.startedAt)) / 1000)} · release ${plainText(basename(status.release))}`],
+    ['versions', `Pi ${plainText(status.piVersion)} · Node ${plainText(status.nodeVersion)}`],
+    ['machine', `${plainText(host.hostname)} · ${plainText(host.platform)} ${plainText(host.arch)} · up ${formatDuration(host.uptimeSeconds)}`],
     ['load', `${host.loadavg.map(value => value.toFixed(2)).join(' ')} · ${host.cpus} CPU${host.cpus === 1 ? '' : 's'}`],
     ['memory', `${formatBytes(host.freeMemory)} free of ${formatBytes(host.totalMemory)}`],
   ];
@@ -100,4 +101,59 @@ export function daemonRows(status: DaemonStatus | undefined, now = Date.now()): 
 export function formatRows(rows: readonly [string, string][], indent = '  '): string[] {
   const width = Math.max(...rows.map(([label]) => label.length));
   return rows.map(([label, value]) => `${indent}${label.padEnd(width)}  ${value}`);
+}
+
+/** A round trip in its level's color: green, yellow when slow, red when very slow. */
+export function styleLatency(ms: number, p: Paint): string {
+  const level = latencyLevel(ms);
+  return (level === 'ok' ? p.ok : level === 'slow' ? p.warn : p.error)(formatLatency(ms));
+}
+
+/** Daemon facts as the panel knows them: still loading, failed, absent (older daemon), or known. */
+export type DaemonState = DaemonStatus | 'loading' | { error: string } | undefined;
+
+export interface StatusPanel {
+  host: string;
+  connected: boolean;
+  /** How long and how reliably this client has been connected, for example `connected 1h 2m`. */
+  connection?: string;
+  /** Recent round trips, oldest first. */
+  samples: readonly number[];
+  /** Rows between latency and the daemon, for example the attached slot. */
+  extra?: [string, string][];
+  daemon: DaemonState;
+}
+
+/**
+ * The status panel: the same rows in the attached UI (Ctrl+S, /status) and in the
+ * CLI pickers (Ctrl+S): host and connection, live latency, then daemon and host facts.
+ */
+export function statusPanelRows(panel: StatusPanel, p: Paint, now = Date.now()): string[] {
+  const stats = panel.connected ? latencyStats(panel.samples) : undefined;
+  const rows: [string, string][] = [
+    ['host', `${plainText(panel.host)} · ${panel.connected ? panel.connection ?? 'connected' : p.error('disconnected, reconnecting')}`],
+    ['latency', stats
+      ? `${styleLatency(stats.last, p)} ${p.dim(`min ${formatLatency(stats.min)} · avg ${formatLatency(stats.avg)} · max ${formatLatency(stats.max)} · ${stats.count} sample${stats.count === 1 ? '' : 's'}`)}`
+      : p.dim(panel.connected ? 'measuring…' : 'unavailable while disconnected')],
+    ...(panel.extra ?? []),
+  ];
+  const daemon = panel.daemon;
+  if (daemon === 'loading') rows.push(['daemon', p.dim('loading…')]);
+  else if (daemon && 'error' in daemon) rows.push(['daemon', p.error(plainText(daemon.error))]);
+  else if (daemon || panel.connected) rows.push(...daemonRows(daemon, now));
+  return formatRows(rows);
+}
+
+/** Live panel data for one connection: a round trip and fresh daemon facts per call. */
+export function statusSampler(connection: Requester, host: string, extra: [string, string][] = [], limit = 20) {
+  const pinger = new Pinger(connection);
+  const samples: number[] = [];
+  let daemon: DaemonState = 'loading';
+  return {
+    async sample(p: Paint): Promise<string[]> {
+      try { samples.push(await pinger.ping()); if (samples.length > limit) samples.shift(); } catch { /* Shown as no new sample. */ }
+      try { daemon = await daemonStatus(connection); } catch (error) { daemon = { error: error instanceof Error ? error.message : String(error) }; }
+      return statusPanelRows({ host, connected: true, samples, extra, daemon }, p);
+    },
+  };
 }
