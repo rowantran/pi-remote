@@ -66,8 +66,6 @@ pi-remote new --cwd /remote/project --session /remote/session.jsonl
 # Explicitly stop a remote Pi process. Ordinary detach never does this.
 pi-remote kill 1
 
-# Check the connection: round-trip latency, daemon and host health, slot counts.
-pi-remote status
 ```
 
 From an attached client, `/quit` does the same as `pi-remote kill` for the current slot, then closes the client and prints `Stopped slot NUMBER / UUID. Resume it with: pi-remote resume NUMBER`. If Pi is running, compacting, running a shell command, or has queued prompts, `/quit` asks for confirmation first, because stopping Pi interrupts that work. The session file stays on disk; `pi-remote resume NUMBER` opens it in a new slot to continue. The stopped slot stays in `pi-remote ls --all`; plain `pi-remote ls` hides stopped slots and prints how many it hid.
@@ -78,7 +76,7 @@ The 0.2 daemon persists stable slot numbers in `slots.json`, including stopped s
 
 Use `--host HOST` with any command to select another SSH host, for example `pi-remote attach --host otherbox 1`. For local testing, use `--local` instead of a host and use a local `--cwd`.
 
-Every command also accepts an unambiguous prefix: `pi-remote n --cwd /remote/project` runs `new`, `pi-remote a 1` runs `attach`, `pi-remote k 1` runs `kill`, and `pi-remote l` runs `ls`. `pi-remote s` runs `status`. `pi-remote r` is short for `resume`; `restart-daemon` needs at least `rest`. The internal commands `bridge`, `daemon`, `complete`, and `fs` need their full names.
+Every command also accepts an unambiguous prefix: `pi-remote n --cwd /remote/project` runs `new`, `pi-remote a 1` runs `attach`, `pi-remote k 1` runs `kill`, and `pi-remote l` runs `ls`. `pi-remote r` is short for `resume`; `restart-daemon` needs at least `rest`. The internal commands `bridge`, `daemon`, `complete`, and `fs` need their full names.
 
 ### Picking a session
 
@@ -104,23 +102,25 @@ Listing without a slot needs a daemon from this release; an older daemon reports
 
 ### Connection status
 
-`pi-remote status` connects once, then times five round trips to the remote daemon and reads facts about it:
+`pi-remote ls` (on a terminal) and the home and attach pickers start with the same summary line: host, the round trip of the list request, and slot counts, for example `devbox · 38 ms · 3 running · 2 stopped`. Latency is green below 150 ms, yellow below 400 ms, and red above. Piped `ls` output contains only the list.
+
+**Ctrl+S** opens the status panel, in the home and attach pickers and in an attached slot (also `/status`). The panel is the same everywhere:
 
 ```text
-devbox  ● online
-  latency   38 ms (min 35 ms · max 52 ms over 5 round trips)
-  connect   412 ms (SSH and daemon handshake)
+  host      devbox · connected 1h 12m · 1 reconnect
+  latency   38 ms min 35 ms · avg 40 ms · max 52 ms · 12 samples
+  slot      #3 · running · 1 client attached · started 2h ago
+  workspace /home/me/project
   daemon    pid 12345 · up 3d 4h · release 2f1c9e0
   versions  Pi 1.0.4 · Node v22.19.0
   machine   devbox · linux x64 · up 12d 3h
   load      0.42 0.38 0.30 · 8 CPUs
   memory    5.2 GB free of 31 GB
-  slots     3 running · 2 stopped · 1 client attached
 ```
 
-Latency is green below 150 ms, yellow below 400 ms, and red above. `--json` prints the same data. An unreachable host prints `✗ unreachable` and exits 1. On a terminal, `pi-remote ls` starts with a one-line summary (`devbox · 38 ms · 3 running · 2 stopped`); piped output contains only the list.
+It pings the daemon every second while open, so latency and host load are live. In an attached slot it shows the slot and its workspace, connection age, and reconnects; in a picker it shows the SSH connection time instead. Esc, Enter, or Ctrl+S closes it in a slot; Ctrl+S hides it in a picker. A trusted local adapter that claims Ctrl+S keeps it.
 
-In the attached UI, the footer shows the latest round trip after the host name (`devbox 38 ms`), measured every 5 seconds, and colors it when the link is slow. **Ctrl+S** or `/status` opens a live panel: host and connection age, reconnect count, latency (latest, min, average, max), the slot, its workspace, and the daemon and host facts above. It pings every second while open; Esc, Enter, or Ctrl+S closes it. A trusted local adapter that claims Ctrl+S keeps it.
+In the attached UI, the footer also shows the latest round trip after the host name (`devbox 38 ms`), measured every 5 seconds, and colors it when the link is slow.
 
 Round trips use the daemon's `ping` method, which does no work. Daemon and host facts need a daemon from this release; an older daemon still shows latency (timed with `list`) and says to deploy and run `pi-remote restart-daemon`.
 

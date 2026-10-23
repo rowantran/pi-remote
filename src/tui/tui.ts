@@ -20,8 +20,7 @@ import { REMOTE_ICON, detachMessage, sideParentLabel, stoppedMessage } from './s
 import { FuzzyPicker, type PickerItem, type PickerOptions } from './fuzzy-picker.js';
 import { sessionItems, sessionPickerOptions } from './session-table.js';
 import { paint } from './table.js';
-import { Pinger, daemonRows, daemonStatus, formatDuration, formatLatency, formatRows, latencyLevel, latencyStats, type LatencyLevel } from './host-status.js';
-import type { DaemonStatus } from '../protocol/methods.js';
+import { Pinger, daemonStatus, formatDuration, formatLatency, latencyLevel, statusPanelRows, styleLatency, type DaemonState } from './host-status.js';
 import { attachInvocation, formatInvocation, ghosttyLauncher, resolveSplitDirection, type AttachContext, type GhosttyLauncher, type SplitDirection } from './side-launcher.js';
 import { RemoteAutocompleteProvider, transformPromptWithAttachments } from './editor-completion.js';
 import {
@@ -53,9 +52,6 @@ function keyDisplayText(action: string): string {
 const accent = (text: string) => `\x1b[36m${text}\x1b[39m`;
 const muted = (text: string) => `\x1b[2m${text}\x1b[22m`;
 const errorColor = (text: string) => `\x1b[31m${text}\x1b[39m`;
-const LATENCY_COLOR: Record<LatencyLevel, (text: string) => string> = {
-  ok: text => `\x1b[32m${text}\x1b[39m`, slow: text => `\x1b[33m${text}\x1b[39m`, 'very-slow': errorColor,
-};
 /** Recent daemon round trips kept for the footer and the status panel. */
 const LATENCY_SAMPLES = 20;
 /** Pi's interactive mode waits this long for terminal color replies before it falls back. */
@@ -1079,9 +1075,9 @@ export class RemoteTui {
   /** The /status panel. It pings every second while open, so the latency is live. */
   private async showStatus(): Promise<void> {
     if (this.localDialog || this.activeRemote || this.detached) return;
-    let daemon: DaemonStatus | undefined, daemonError: string | undefined, loading = this.connected;
+    let daemon: DaemonState = this.connected ? 'loading' : undefined;
     let closed = false;
-    const lines = new DynamicLines(() => this.statusLines(loading ? 'loading' : daemonError ?? daemon));
+    const lines = new DynamicLines(() => this.statusLines(daemon));
     const close = () => {
       if (closed) return;
       closed = true; clearInterval(timer);
@@ -1097,28 +1093,22 @@ export class RemoteTui {
     timer.unref?.();
     void this.sampleLatency();
     if (!this.connected) return;
-    try { daemon = await daemonStatus(this.connection); } catch (error) { daemonError = errorText(error); }
-    loading = false;
+    try { daemon = await daemonStatus(this.connection); } catch (error) { daemon = { error: errorText(error) }; }
     if (!closed) this.tui.requestRender();
   }
 
-  private statusLines(daemon: DaemonStatus | string | undefined): string[] {
+  private statusLines(daemon: DaemonState): string[] {
     const slot = this.view.snapshot.slot;
-    const stats = this.connected ? latencyStats(this.latencySamples) : undefined;
-    const connection = !this.connected ? errorColor('disconnected, reconnecting')
-      : `connected ${formatDuration((Date.now() - this.connectedAt) / 1000)}${this.reconnects ? ` · ${this.reconnects} reconnect${this.reconnects === 1 ? '' : 's'}` : ''}`;
-    const rows: [string, string][] = [
-      ['host', `${safeText(this.options.host ?? hostname())} · ${connection}`],
-      ['latency', stats ? `${LATENCY_COLOR[latencyLevel(stats.last)](formatLatency(stats.last))} ${muted(`min ${formatLatency(stats.min)} · avg ${formatLatency(stats.avg)} · max ${formatLatency(stats.max)} · ${stats.count} sample${stats.count === 1 ? '' : 's'}`)}`
-        : muted(this.connected ? 'measuring…' : 'unavailable while disconnected')],
-      ['slot', [slot.number === undefined ? this.slotId.slice(0, 8) : `#${slot.number}`, slot.status, `${slot.clients} client${slot.clients === 1 ? '' : 's'} attached`,
-        ...(Number.isFinite(Date.parse(slot.createdAt)) ? [`started ${formatDuration((Date.now() - Date.parse(slot.createdAt)) / 1000)} ago`] : [])].join(' · ')],
-      ['workspace', safeText(slot.cwd)],
-    ];
-    if (daemon === 'loading') rows.push(['daemon', muted('loading…')]);
-    else if (typeof daemon === 'string') rows.push(['daemon', errorColor(safeText(daemon))]);
-    else if (daemon || this.connected) rows.push(...daemonRows(daemon).map(([label, value]) => [label, safeText(value)] as [string, string]));
-    return formatRows(rows);
+    const started = Date.parse(slot.createdAt);
+    return statusPanelRows({
+      host: this.options.host ?? hostname(), connected: this.connected, samples: this.latencySamples, daemon,
+      connection: `connected ${formatDuration((Date.now() - this.connectedAt) / 1000)}${this.reconnects ? ` · ${this.reconnects} reconnect${this.reconnects === 1 ? '' : 's'}` : ''}`,
+      extra: [
+        ['slot', [slot.number === undefined ? this.slotId.slice(0, 8) : `#${slot.number}`, slot.status, `${slot.clients} client${slot.clients === 1 ? '' : 's'} attached`,
+          ...(Number.isFinite(started) ? [`started ${formatDuration((Date.now() - started) / 1000)} ago`] : [])].join(' · ')],
+        ['workspace', safeText(slot.cwd)],
+      ],
+    }, paint(true));
   }
 
   private footer(): string {
@@ -1144,8 +1134,7 @@ export class RemoteTui {
     const latency = this.connected ? this.latencySamples.at(-1) : undefined;
     const hostIndex = host === undefined ? -1 : parts.indexOf(safeText(host));
     if (latency !== undefined && hostIndex >= 0) {
-      const level = latencyLevel(latency);
-      parts[hostIndex] += ` ${level === 'ok' ? formatLatency(latency) : LATENCY_COLOR[level](formatLatency(latency))}`;
+      parts[hostIndex] += ` ${latencyLevel(latency) === 'ok' ? formatLatency(latency) : styleLatency(latency, paint(true))}`;
     }
     return muted(parts.join(' · '));
   }

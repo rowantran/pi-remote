@@ -104,7 +104,7 @@ test('home picker shows the host and fails clearly when there is nothing to offe
     picker.handleInput('\x1b[B');
     return picker.selectedValue();
   } });
-  assert.match(title, /pi-remote\s+devbox · 1 running · 0 stopped$/);
+  assert.match(title, /pi-remote\s+devbox · \d+(\.\d)? ms · 1 running · 0 stopped$/);
   assert.deepEqual(choice, { kind: 'new', cwd: '~/p' });
   await assert.rejects(pickHome(connection([slot(2, 'exited')]), { run: async () => undefined }), /No active slots/);
 });
@@ -143,4 +143,26 @@ test('runPicker fits the list to a short terminal', async () => {
   await new Promise(resolve => setTimeout(resolve, 100));
   terminal.input('');
   assert.equal(await Promise.race([result, new Promise(resolve => setTimeout(() => resolve('pending'), 1000))]), undefined);
+});
+
+test('Ctrl+S shows live details under the title, gives up list rows, and stops with the picker', async () => {
+  let loads = 0, changes = 0;
+  const picker = new FuzzyPicker(items(Array.from({ length: 10 }, (_, index) => `s${index}`)), { title: 'Pick', maxVisible: 10,
+    details: { title: 'Connection status', intervalMs: 20, load: async () => [`  latency  ${++loads} ms`] } });
+  picker.maxHeight = 24;
+  picker.onChange = () => { changes++; };
+  assert.match(strip(picker.render(80).at(-1)!), /esc cancel · ctrl\+s status$/);
+  picker.handleInput('\x13');
+  await new Promise(resolve => setTimeout(resolve, 70));
+  const open = strip(picker.render(80).join('\n'));
+  assert.match(open, /^Pick\n\nConnection status\n  latency  \d+ ms\n\n❯/);
+  assert.ok(loads >= 2 && changes >= 2, `${loads} loads, ${changes} changes`);
+  assert.match(open, /ctrl\+s hide status$/);
+  assert.equal(open.split('\n').filter(line => /^[ ›] s\d/.test(line)).length, 6);
+  picker.onSelect = () => {};
+  picker.handleInput('\r');
+  const after = loads;
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(loads, after);
+  assert.ok(!picker.detailsOpen);
 });

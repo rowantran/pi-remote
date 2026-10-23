@@ -14,10 +14,9 @@ export { numberSlots, slotNumber, type NumberedSlot };
 
 export const VALUE_OPTIONS = ['--host', '--remote-bin', '--state-dir', '--cwd', '--session', '--ui-extension', '--ui-config', '--theme'] as const;
 export const BOOLEAN_OPTIONS = ['--local', '--json', '--no-attach', '--no-reconnect', '--no-bell', '--all', '--force', '--help'] as const;
-export const COMMANDS = ['new', 'ls', 'attach', 'resume', 'kill', 'status', 'watch', 'rpc', 'restart-daemon', 'completion', 'help', 'version'] as const;
+export const COMMANDS = ['new', 'ls', 'attach', 'resume', 'kill', 'watch', 'rpc', 'restart-daemon', 'completion', 'help', 'version'] as const;
 const COMMAND_LABELS: Partial<Record<typeof COMMANDS[number], string>> = {
   resume: 'Reopen a stopped or stored session',
-  status: 'Show latency and remote host health',
   rpc: 'Power-user/debug: send a JSON command',
   watch: 'Power-user/debug: stream session events as JSON',
   'restart-daemon': 'Run the installed release; reopen idle slots',
