@@ -75,6 +75,7 @@ const defaultCommands: readonly SlashCommand[] = [
   { name: 'tree', description: 'Tree-style fork picker (creates a new session)' },
   { name: 'resume', description: 'Resume a session' },
   { name: 'session', description: 'Show session information' },
+  { name: 'status', description: 'Show live latency and remote host status' },
   { name: 'copy', description: 'Copy the last response' },
   { name: 'name', description: 'Name this session' },
   { name: 'compact', description: 'Compact session context' },
