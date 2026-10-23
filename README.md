@@ -65,6 +65,9 @@ pi-remote new --cwd /remote/project --session /remote/session.jsonl
 
 # Explicitly stop a remote Pi process. Ordinary detach never does this.
 pi-remote kill 1
+
+# Check the connection: round-trip latency, daemon and host health, slot counts.
+pi-remote status
 ```
 
 From an attached client, `/quit` does the same as `pi-remote kill` for the current slot, then closes the client and prints `Stopped slot NUMBER / UUID. Resume it with: pi-remote resume NUMBER`. If Pi is running, compacting, running a shell command, or has queued prompts, `/quit` asks for confirmation first, because stopping Pi interrupts that work. The session file stays on disk; `pi-remote resume NUMBER` opens it in a new slot to continue. The stopped slot stays in `pi-remote ls --all`; plain `pi-remote ls` hides stopped slots and prints how many it hid.
@@ -75,7 +78,7 @@ The 0.2 daemon persists stable slot numbers in `slots.json`, including stopped s
 
 Use `--host HOST` with any command to select another SSH host, for example `pi-remote attach --host otherbox 1`. For local testing, use `--local` instead of a host and use a local `--cwd`.
 
-Every command also accepts an unambiguous prefix: `pi-remote n --cwd /remote/project` runs `new`, `pi-remote a 1` runs `attach`, `pi-remote k 1` runs `kill`, and `pi-remote l` runs `ls`. `pi-remote r` is short for `resume`; `restart-daemon` needs at least `rest`. The internal commands `bridge`, `daemon`, `complete`, and `fs` need their full names.
+Every command also accepts an unambiguous prefix: `pi-remote n --cwd /remote/project` runs `new`, `pi-remote a 1` runs `attach`, `pi-remote k 1` runs `kill`, and `pi-remote l` runs `ls`. `pi-remote s` runs `status`. `pi-remote r` is short for `resume`; `restart-daemon` needs at least `rest`. The internal commands `bridge`, `daemon`, `complete`, and `fs` need their full names.
 
 ### Picking a session
 
@@ -98,6 +101,28 @@ Enter opens the chosen session in a **new slot** and attaches to it. `-- PI_OPTI
 `pi-remote resume SLOT` skips the picker and reopens that stopped slot's session, in any directory. If the slot is still running, it attaches. `--no-attach` prints the slot UUID without opening the UI. Slot completion after `pi-remote resume ` offers stopped slots with a saved session. Pi saves a session after its first response, so a slot stopped before that has nothing to resume.
 
 Listing without a slot needs a daemon from this release; an older daemon reports that you should deploy and run `pi-remote restart-daemon`.
+
+### Connection status
+
+`pi-remote status` connects once, then times five round trips to the remote daemon and reads facts about it:
+
+```text
+devbox  ● online
+  latency   38 ms (min 35 ms · max 52 ms over 5 round trips)
+  connect   412 ms (SSH and daemon handshake)
+  daemon    pid 12345 · up 3d 4h · release 2f1c9e0
+  versions  Pi 1.0.4 · Node v22.19.0
+  machine   devbox · linux x64 · up 12d 3h
+  load      0.42 0.38 0.30 · 8 CPUs
+  memory    5.2 GB free of 31 GB
+  slots     3 running · 2 stopped · 1 client attached
+```
+
+Latency is green below 150 ms, yellow below 400 ms, and red above. `--json` prints the same data. An unreachable host prints `✗ unreachable` and exits 1. On a terminal, `pi-remote ls` starts with a one-line summary (`devbox · 38 ms · 3 running · 2 stopped`); piped output contains only the list.
+
+In the attached UI, the footer shows the latest round trip after the host name (`devbox 38 ms`), measured every 5 seconds, and colors it when the link is slow. **Ctrl+S** or `/status` opens a live panel: host and connection age, reconnect count, latency (latest, min, average, max), the slot, its workspace, and the daemon and host facts above. It pings every second while open; Esc, Enter, or Ctrl+S closes it. A trusted local adapter that claims Ctrl+S keeps it.
+
+Round trips use the daemon's `ping` method, which does no work. Daemon and host facts need a daemon from this release; an older daemon still shows latency (timed with `list`) and says to deploy and run `pi-remote restart-daemon`.
 
 ### Session names
 
@@ -206,6 +231,7 @@ For zsh or bash, put `pi-remote` on `PATH` with `npm link`, then install the mat
 | `/resume` | Pick a stored remote session in the slot's workspace; Pi switches to it. Same picker and rows as `pi-remote resume` |
 | `/resume --side` | Pick a stored side conversation in the workspace; Pi switches to it |
 | `/session` | Show authoritative remote usage and session statistics |
+| Ctrl+S / `/status` | Live connection panel: latency, connection age, reconnects, slot, daemon, and host load and memory |
 | `/copy` | Copy the last assistant text to the **local** clipboard |
 | `/name NAME` | Set the current session name |
 | `/compact [instructions]` | Ask remote Pi to compact |

@@ -16,6 +16,7 @@ import { formatSlotList, listSummary, slotColumns, slotItems } from '../tui/slot
 import { terminalPaint } from '../tui/table.js';
 import { openSession, pickResume, resumeSlot, type ResumeChoice } from './resume.js';
 import { sessionDirArg } from '../daemon/side-sessions.js';
+import { collectStatus, formatReport, lsHeader } from './status.js';
 
 const HELP = `pi-remote — local terminal UI, persistent remote Pi RPC processes
 
@@ -33,6 +34,9 @@ Everyday commands:
     directory and open one in a new slot. With SLOT, reopen that stopped slot's
     session. A session that is still open attaches to its slot instead.
   pi-remote kill [--host HOST] SLOT
+  pi-remote status [--host HOST] [--json]
+    Measure the round trip to the remote daemon, and show daemon uptime, host
+    load and memory, and slot counts. Exits 1 if the host is unreachable.
   pi-remote restart-daemon [--host HOST] [--force]
     Restart the remote daemon on the installed release. Every running slot is
     reopened from its session file with the same number, like /reload. Waits
@@ -50,7 +54,7 @@ Power-user / debugging commands:
     Print a session snapshot, then stream live events as JSON.
   These are for scripts and debugging. Use attach for normal interactive work.
 
-Any unambiguous command prefix works: n = new, a = attach, k = kill, l = ls, rest = restart-daemon.
+Any unambiguous command prefix works: n = new, a = attach, k = kill, l = ls, s = status, rest = restart-daemon.
 r is short for resume.
 
 Options:
@@ -236,13 +240,19 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const stateDir = options.values.get('--state-dir');
   if (command === 'daemon') { await runDaemon({ stateDir: stateDir ?? defaultStateDir(), executable: process.env.PI_REMOTE_PI_BIN ?? 'pi' }); return; }
   if (command === 'bridge') { await bridge(stateDir); return; }
-  if (!['home', 'new', 'ls', 'attach', 'resume', 'kill', 'rpc', 'watch', 'restart-daemon'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
+  if (!['home', 'new', 'ls', 'attach', 'resume', 'kill', 'status', 'rpc', 'watch', 'restart-daemon'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
   const local = options.flags.has('--local');
   const host = selectHost({ host: options.values.get('--host'), local, defaultHost: local ? undefined : defaultHost() });
   const maxPositionals = command === 'rpc' ? 2 : ['attach', 'resume', 'kill', 'watch'].includes(command) ? 1 : 0;
   if (options.positionals.length > maxPositionals) throw new Error(`Too many arguments. Use --host HOST to select a host. See --help.`);
   if (!local && !host) throw new Error(`No host. Use --host HOST, set PI_REMOTE_HOST, add {"host": "HOST"} to ${configPath()}, or use --local.`);
   const factory = () => options.flags.has('--local') ? connectCompatibleLocal(stateDir) : connectCompatibleSsh({ host: host!, remoteBin: options.values.get('--remote-bin'), stateDir });
+  if (command === 'status') {
+    const report = await collectStatus(factory, host ?? 'local', 5, undefined, local);
+    console.log(options.flags.has('--json') ? JSON.stringify(report, null, 2) : formatReport(report));
+    if (!report.online) process.exitCode = 1;
+    return;
+  }
   if (command === 'restart-daemon') {
     const result = await restartDaemon(factory, { force: options.flags.has('--force'), log: line => console.error(line) });
     console.log(`Daemon restarted: ${result.before.pid} (${releaseName(result.before.release)}) -> ${result.after.pid} (${releaseName(result.after.release)})`);
@@ -254,7 +264,9 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   let removeSignal: (() => void) | undefined;
   try {
     if (command === 'ls') {
+      const started = performance.now();
       const all = numberSlots(await connection.request('list'));
+      const latency = performance.now() - started;
       const slots = options.flags.has('--all') ? all : all.filter(slot => slot.status !== 'exited');
       if (options.flags.has('--json')) console.log(JSON.stringify(slots, null, 2));
       else {
