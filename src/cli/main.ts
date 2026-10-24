@@ -9,23 +9,29 @@ import { connectCompatibleSsh } from '../client/compat-client.js';
 import { connectCompatibleLocal } from './connections.js';
 import { ReconnectingConnection } from '../client/reconnect.js';
 import { releaseName, restartDaemon } from '../client/restart-daemon.js';
-import { PI_VERSION, PROTOCOL_VERSION, type SlotInfo, type Snapshot, type RemoteConnection } from '../protocol/types.js';
+import { PI_VERSION, PROTOCOL_VERSION, errorText, type SlotInfo, type Snapshot, type RemoteConnection } from '../protocol/types.js';
 import type { AttachContext } from '../tui/side-launcher.js';
 import { FuzzyPicker, runPicker, type PickerItem } from '../tui/fuzzy-picker.js';
 import { formatSlotList, listSummary, slotColumns, slotItems } from '../tui/slot-table.js';
 import { terminalPaint } from '../tui/table.js';
+import { openSession, pickResume, resumeSlot, type ResumeChoice } from './resume.js';
+import { sessionDirArg } from '../daemon/side-sessions.js';
 
 const HELP = `pi-remote — local terminal UI, persistent remote Pi RPC processes
 
 Everyday commands:
   pi-remote [--host HOST]
-    Open a searchable picker: attach to a running slot, or start a new one in
-    the default directory. Without a terminal, print this help.
+    Open a searchable picker: attach to a running slot, start a new one in the
+    default directory, or resume a session. Without a terminal, print this help.
   pi-remote new [--cwd REMOTE_DIRECTORY] [--host HOST] [--no-attach] [-- PI_OPTIONS...]
   pi-remote ls [--host HOST] [--all] [--json]
     A read-only attach: print the attach picker's header and rows without
     opening it. --all adds stopped slots; --json prints the slot data.
   pi-remote attach [--host HOST] [SLOT]
+  pi-remote resume [--host HOST] [--cwd REMOTE_DIRECTORY] [--no-attach] [SLOT] [-- PI_OPTIONS...]
+    The same picker as /resume in a new slot: search the sessions stored for the
+    directory and open one in a new slot. With SLOT, reopen that stopped slot's
+    session. A session that is still open attaches to its slot instead.
   pi-remote kill [--host HOST] SLOT
   pi-remote restart-daemon [--host HOST] [--force]
     Restart the remote daemon on the installed release. Every running slot is
@@ -44,11 +50,13 @@ Power-user / debugging commands:
     Print a session snapshot, then stream live events as JSON.
   These are for scripts and debugging. Use attach for normal interactive work.
 
-Any unambiguous command prefix works: n = new, a = attach, k = kill, l = ls, re = restart-daemon.
+Any unambiguous command prefix works: n = new, a = attach, k = kill, l = ls, rest = restart-daemon.
+r is short for resume.
 
 Options:
   --host HOST          SSH host (default: PI_REMOTE_HOST, then the config file)
-  --cwd PATH           Remote working directory for new (default: PI_REMOTE_CWD,
+  --cwd PATH           Remote working directory for new, and the directory whose
+                       stored sessions resume lists (default: PI_REMOTE_CWD,
                        then the config file)
   --remote-bin PATH    Remote program (default ~/.local/share/pi-remote/bin/pi-remote)
   --state-dir PATH     Remote daemon state directory (default ~/.pi/remote)
@@ -153,13 +161,17 @@ export async function pickSlot(slots: NumberedSlot[], io: PickerIo = {}, all: Nu
   return chosen;
 }
 
-export type HomeChoice = { kind: 'attach'; slotId: string } | { kind: 'new'; cwd: string };
+export type HomeChoice = { kind: 'attach'; slotId: string } | { kind: 'new'; cwd: string } | { kind: 'resume' };
 
 /** Rows of the bare `pi-remote` picker: active slots as in `ls`, then actions. */
 export function homeItems(slots: NumberedSlot[], cwd?: string, p = terminalPaint(), now = Date.now()): PickerItem<HomeChoice>[] {
   const items: PickerItem<HomeChoice>[] = slotItems(slots.filter(slot => slot.status !== 'exited'), p, now)
     .map(item => ({ ...item, value: { kind: 'attach', slotId: item.value } }));
-  if (cwd) items.push({ value: { kind: 'new', cwd }, marker: p.accent('+'), label: 'New session', detail: cwd, search: 'new session', pinned: true });
+  if (cwd) {
+    items.push({ value: { kind: 'new', cwd }, marker: p.accent('+'), label: 'New session', detail: cwd, search: 'new session', pinned: true });
+    // Like `new` followed by /resume: the stored sessions of this directory.
+    items.push({ value: { kind: 'resume' }, marker: p.accent('↺'), label: 'Resume a session…', detail: cwd, search: 'resume session', pinned: true });
+  }
   return items;
 }
 
@@ -188,7 +200,7 @@ export { formatSlotList };
 
 /** Only interactive attach/new request transcript filtering; watch/rpc stay raw. */
 export function usesTerminalUi(command: string, flags: ReadonlySet<string>, stdinIsTTY = Boolean(process.stdin.isTTY), stdoutIsTTY = Boolean(process.stdout.isTTY)): boolean {
-  return stdinIsTTY && stdoutIsTTY && (command === 'attach' || command === 'home' || (command === 'new' && !flags.has('--no-attach')));
+  return stdinIsTTY && stdoutIsTTY && (command === 'attach' || command === 'home' || ((command === 'new' || command === 'resume') && !flags.has('--no-attach')));
 }
 
 /** Only a live terminal UI owns recovery. Headless commands end on disconnect. */
@@ -224,10 +236,10 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const stateDir = options.values.get('--state-dir');
   if (command === 'daemon') { await runDaemon({ stateDir: stateDir ?? defaultStateDir(), executable: process.env.PI_REMOTE_PI_BIN ?? 'pi' }); return; }
   if (command === 'bridge') { await bridge(stateDir); return; }
-  if (!['home', 'new', 'ls', 'attach', 'kill', 'rpc', 'watch', 'restart-daemon'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
+  if (!['home', 'new', 'ls', 'attach', 'resume', 'kill', 'rpc', 'watch', 'restart-daemon'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
   const local = options.flags.has('--local');
   const host = selectHost({ host: options.values.get('--host'), local, defaultHost: local ? undefined : defaultHost() });
-  const maxPositionals = command === 'rpc' ? 2 : ['attach', 'kill', 'watch'].includes(command) ? 1 : 0;
+  const maxPositionals = command === 'rpc' ? 2 : ['attach', 'resume', 'kill', 'watch'].includes(command) ? 1 : 0;
   if (options.positionals.length > maxPositionals) throw new Error(`Too many arguments. Use --host HOST to select a host. See --help.`);
   if (!local && !host) throw new Error(`No host. Use --host HOST, set PI_REMOTE_HOST, add {"host": "HOST"} to ${configPath()}, or use --local.`);
   const factory = () => options.flags.has('--local') ? connectCompatibleLocal(stateDir) : connectCompatibleSsh({ host: host!, remoteBin: options.values.get('--remote-bin'), stateDir });
@@ -255,13 +267,47 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     }
     let slotId: string | undefined;
     let createCwd: string | undefined;
+    let resume: ResumeChoice | undefined;
+    const cwdDefault = options.values.get('--cwd') ?? (local ? undefined : defaultCwd());
     if (command === 'home') {
-      const choice = await pickHome(connection, { host, cwd: options.values.get('--cwd') ?? (local ? undefined : defaultCwd()) });
-      if (!choice) return;
-      if (choice.kind === 'attach') slotId = choice.slotId; else createCwd = choice.cwd;
+      // Esc in the resume finder returns to the home picker.
+      while (!slotId && !createCwd && !resume) {
+        const choice = await pickHome(connection, { host, cwd: cwdDefault });
+        if (!choice) return;
+        if (choice.kind === 'attach') slotId = choice.slotId;
+        else if (choice.kind === 'new') createCwd = choice.cwd;
+        else {
+          // Nothing to resume, or an old daemon, is not fatal here: say why and go back.
+          try { resume = await pickResume(connection, { host, cwd: cwdDefault, sessionDir: sessionDirArg(options.piArgs) }); }
+          catch (error) { console.error(errorText(error)); }
+        }
+      }
+    }
+    if (command === 'resume') {
+      const id = options.positionals.shift();
+      if (id !== undefined) resume = resumeSlot(selectSlot(await connection.request('list'), id));
+      else {
+        if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Specify a stopped slot number from ls --all; selection needs a local terminal.');
+        resume = await pickResume(connection, { host, cwd: cwdDefault, sessionDir: sessionDirArg(options.piArgs) });
+        if (!resume) return;
+      }
+    }
+    const headless = options.flags.has('--no-attach') || !process.stdin.isTTY || !process.stdout.isTTY;
+    if (resume?.kind === 'attach') {
+      slotId = resume.slotId;
+      if (command === 'resume' && headless) { console.log(slotId); return; }
+      if (command === 'resume') console.error('That session is still open; attaching to its slot.');
+    } else if (resume) {
+      const opened = await openSession(connection, resume, options.piArgs);
+      slotId = opened.slotId;
+      if (opened.existing) console.error(`Another slot opened that session first${headless ? '' : '; attaching to it'}.`);
+      if (headless) {
+        console.log(options.flags.has('--json') && opened.slot ? JSON.stringify(opened.slot, null, 2) : slotId);
+        return;
+      }
     }
     if (command === 'new' || createCwd) {
-      const cwd = createCwd ?? options.values.get('--cwd') ?? (local ? undefined : defaultCwd());
+      const cwd = createCwd ?? cwdDefault;
       if (!cwd) throw new Error(local ? 'new --local requires --cwd with a directory' : `new requires a remote directory. Use --cwd DIRECTORY, set PI_REMOTE_CWD, or add {"cwd": "DIRECTORY"} to ${configPath()}.`);
       const slot = await connection.request('create', { cwd, args: options.piArgs, sessionPath: options.values.get('--session') });
       slotId = slot.id;
@@ -271,7 +317,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       }
     } else slotId ??= await resolveSlot(connection, options.positionals.shift(), command === 'attach', { host });
     if (command === 'kill') { await connection.request('kill', { slotId }); console.log(`Stopped ${slotId}`); return; }
-    if (!['home', 'new', 'attach', 'rpc', 'watch'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
+    if (!['home', 'new', 'attach', 'resume', 'rpc', 'watch'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
     const snapshot = await connection.request('attach', { slotId, protocol: PROTOCOL_VERSION, piVersion: PI_VERSION,
       ...(usesTerminalUi(command, options.flags) ? { filterTranscript: true } : {}),
     });

@@ -57,7 +57,10 @@ export interface DaemonMethods {
    * Version fields are retained for callers that send legacy attachment metadata. */
   attach: { params: { slotId: string; protocol?: number; piVersion?: string; filterTranscript?: boolean }; result: Snapshot };
   snapshot: { params: { slotId: string; historyCursor?: HistoryCursor }; result: Snapshot };
-  sessions: { params: { slotId: string; side?: boolean }; result: SessionInfo[] };
+  /** Stored sessions for a slot's workspace, or for `cwd` without a slot (with an optional
+   * `--session-dir` value). `summary` leaves allMessagesText empty. Daemons before resume
+   * require slotId. */
+  sessions: { params: ({ slotId: string; cwd?: never; sessionDir?: never } | { cwd: string; sessionDir?: string; slotId?: never }) & { side?: boolean; summary?: boolean }; result: SessionInfo[] };
   restart_daemon: { params: { force?: boolean }; result: RestartDaemonResult };
   restart: { params: { slotId: string; force?: boolean }; result: SlotInfo };
   rpc: { params: { slotId: string; command: RecordValue }; result: unknown };
