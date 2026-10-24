@@ -35,8 +35,8 @@ pi-remote new --cwd /remote/project
 Remote Pi loads its normal settings, credentials, providers, extension factories, skills, and trusted project resources. Deployment copies application files, not your local Pi configuration.
 
 ```sh
-# List running slots: number, status, session name, workspace, clients, age,
-# and short UUID. Add --all to include stopped slots, --json for scripts.
+# A read-only attach: print the attach picker's header and rows without
+# opening it. Add --all to include stopped slots, --json for scripts.
 pi-remote ls
 
 # Attach by number, full UUID, or unique nonnumeric UUID prefix.

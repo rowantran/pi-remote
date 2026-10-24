@@ -23,6 +23,8 @@ Everyday commands:
     the default directory. Without a terminal, print this help.
   pi-remote new [--cwd REMOTE_DIRECTORY] [--host HOST] [--no-attach] [-- PI_OPTIONS...]
   pi-remote ls [--host HOST] [--all] [--json]
+    A read-only attach: print the attach picker's header and rows without
+    opening it. --all adds stopped slots; --json prints the slot data.
   pi-remote attach [--host HOST] [SLOT]
   pi-remote kill [--host HOST] SLOT
   pi-remote restart-daemon [--host HOST] [--force]
