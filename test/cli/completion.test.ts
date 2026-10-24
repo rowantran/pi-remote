@@ -127,10 +127,10 @@ test('host comes only from --host, then the default; --local ignores both', () =
 });
 
 test('commands accept unambiguous prefixes; internal commands need exact names', () => {
-  const cases: [string, string][] = [['n', 'new'], ['ne', 'new'], ['a', 'attach'], ['k', 'kill'], ['l', 'ls'], ['rp', 'rpc'], ['re', 'restart-daemon'], ['w', 'watch'], ['c', 'completion'], ['compl', 'completion'], ['h', 'help'], ['v', 'version'], ['complete', 'complete'], ['fs', 'fs'], ['daemon', 'daemon'], ['bridge', 'bridge']];
+  const cases: [string, string][] = [['n', 'new'], ['ne', 'new'], ['a', 'attach'], ['k', 'kill'], ['l', 'ls'], ['r', 'resume'], ['resu', 'resume'], ['rp', 'rpc'], ['rest', 'restart-daemon'], ['w', 'watch'], ['c', 'completion'], ['compl', 'completion'], ['h', 'help'], ['v', 'version'], ['complete', 'complete'], ['fs', 'fs'], ['daemon', 'daemon'], ['bridge', 'bridge']];
   for (const [input, command] of cases) assert.equal(resolveCommand(input), command, input);
   for (const input of ['d', 'b', 'f', 'x', 'newer', '']) assert.throws(() => resolveCommand(input), /Unknown command/, input);
-  assert.throws(() => resolveCommand('r'), /Ambiguous command 'r': rpc, restart-daemon/);
+  assert.throws(() => resolveCommand('re'), /Ambiguous command 're': resume, restart-daemon/);
   assert.deepEqual(matchCommand('zz').candidates, []);
 });
 
@@ -275,6 +275,13 @@ test('slot completion respects default/explicit hosts and numeric versus UUID pr
   }
   const remote = fakeRemote();
   assert.deepEqual((await completeWords(['attach', '--host', 'host', 'abc'], { connect: remote.connect })).map(item => item.value), ['abcdefff-b']);
+});
+
+test('resume completion offers only stopped slots with a saved session', async () => {
+  const saved = { ...slot(40, 'abcdefff-c', 'exited'), sessionFile: '/s.jsonl' };
+  const connect = async () => ({ request: async () => [...slots, saved, slot(41, 'abcdefff-d', 'exited')] as any, close() {} });
+  assert.deepEqual((await completeWords(['resume', ''], { connect, defaultHost: 'default' })).map(item => item.value), ['40']);
+  assert.deepEqual((await completeWords(['r', ''], { connect, defaultHost: 'default' })).map(item => item.value), ['40']);
 });
 
 test('completion does not contact remote hosts for unrelated tokens, missing hosts, or forwarded Pi flags', async () => {

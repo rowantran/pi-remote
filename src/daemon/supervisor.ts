@@ -15,7 +15,7 @@ import { PiProcess, type PiLaunch } from './pi-process.js';
 import { remoteSessionEnv } from '../protocol/remote-session.js';
 import { socketPath } from '../protocol/paths.js';
 import type { FileMethod, MethodResult, SessionInfo } from '../protocol/methods.js';
-import { sessionDirArg, sideSessionDir, withSessionDir } from './side-sessions.js';
+import { defaultSessionDir, sessionDirArg, sideSessionDir, withSessionDir } from './side-sessions.js';
 import { PI_VERSION, PROTOCOL_VERSION, errorText, type CreateOptions, type HistoryCursor, type LiveState, type RecordValue, type Request, type SlotInfo, type Snapshot, type RemoteEvent, type ServerRecord } from '../protocol/types.js';
 
 // SessionManager returns Dates; JSON serialization produces the protocol's ISO strings.
@@ -734,7 +734,7 @@ export class Supervisor {
       if (request.method === 'hello') {
         if (params.protocol !== PROTOCOL_VERSION || params.piVersion !== PI_VERSION) throw new Error(`Version mismatch: daemon protocol ${PROTOCOL_VERSION}, Pi ${PI_VERSION}`);
         peer.verified = true;
-        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, release: RELEASE, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'transcript_filtering', ACTIVITY_CAPABILITY] } satisfies MethodResult<'hello'>;
+        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, release: RELEASE, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'transcript_filtering', ACTIVITY_CAPABILITY, 'sessions_by_cwd'] } satisfies MethodResult<'hello'>;
       } else {
         if (!peer.verified) throw new Error('Send hello with matching versions first');
         if (peer.activity && request.method !== 'watch_activity') throw new Error('Activity watchers are read-only; use a separate connection');
@@ -809,11 +809,23 @@ export class Supervisor {
             break;
           }
           case 'sessions': {
-            const slot = this.slot(params.slotId);
-            const { SessionManager } = await import('@earendil-works/pi-coding-agent');
             if (params.side !== undefined && typeof params.side !== 'boolean') throw new Error('side must be a boolean');
-            const dir = params.side ? sideSessionDir(slot.cwd, { ...process.env, ...this.options.env }) : sessionDirArg(slot.args);
-            data = await SessionManager.list(slot.cwd, dir === undefined ? undefined : resolve(slot.cwd, expandHome(dir))) satisfies SessionInfoSource[];
+            if (params.summary !== undefined && typeof params.summary !== 'boolean') throw new Error('summary must be a boolean');
+            if ((params.slotId === undefined) === (params.cwd === undefined)) throw new Error('Give exactly one of slotId or cwd');
+            if (params.sessionDir !== undefined && (params.cwd === undefined || typeof params.sessionDir !== 'string' || !params.sessionDir)) throw new Error('sessionDir must be a nonempty string and needs cwd');
+            // A slot supplies its workspace and any --session-dir. A bare directory (resume
+            // without a slot) takes the same --session-dir as sessionDir. Both otherwise use
+            // the default directory that Pi started by this daemon would use, so `resume`
+            // and `/resume` in a new slot list the same sessions.
+            const slot = params.slotId === undefined ? undefined : this.slot(params.slotId);
+            const cwd = slot ? slot.cwd : await realpath(expandHome(string(params.cwd, 'cwd')));
+            if (!slot && !(await stat(cwd)).isDirectory()) throw new Error('cwd must be a directory');
+            const { SessionManager } = await import('@earendil-works/pi-coding-agent');
+            const env = { ...process.env, ...this.options.env };
+            const dir = params.side ? sideSessionDir(cwd, env) : (slot ? sessionDirArg(slot.args) : params.sessionDir) ?? defaultSessionDir(cwd, env);
+            const sessions = await SessionManager.list(cwd, resolve(cwd, expandHome(dir))) satisfies SessionInfoSource[];
+            // Pickers only need the first message. The full text can be megabytes over SSH.
+            data = params.summary ? sessions.map(session => ({ ...session, allMessagesText: '' })) : sessions;
             break;
           }
           case 'restart_daemon': {

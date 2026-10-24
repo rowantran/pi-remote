@@ -17,6 +17,9 @@ import { hostname } from 'node:os';
 import { posix } from 'node:path';
 import { remoteSessionEnv } from '../protocol/remote-session.js';
 import { REMOTE_ICON, detachMessage, sideParentLabel, stoppedMessage } from './session-labels.js';
+import { FuzzyPicker, type PickerItem, type PickerOptions } from './fuzzy-picker.js';
+import { sessionItems, sessionPickerOptions } from './session-table.js';
+import { paint } from './table.js';
 import { attachInvocation, formatInvocation, ghosttyLauncher, resolveSplitDirection, type AttachContext, type GhosttyLauncher, type SplitDirection } from './side-launcher.js';
 import { RemoteAutocompleteProvider, transformPromptWithAttachments } from './editor-completion.js';
 import {
@@ -26,7 +29,7 @@ import {
 import {
   type Component, Container, Editor, type Focusable, fuzzyFilter, getCellDimensions, getKeybindings, Input, isKeyRelease, Key,
   Loader, matchesKey, ProcessTerminal, ScrollView, SelectList, type SelectItem, setKeybindings, Spacer,
-  Text, type Terminal, type TerminalColors, type TerminalColorScheme, TruncatedText, truncateToWidth, VStack,
+  stripTerminalSequences, Text, type Terminal, type TerminalColors, type TerminalColorScheme, TruncatedText, truncateToWidth, VStack,
 } from '@earendil-works/pi-tui';
 import {
   errorText, PI_VERSION, PROTOCOL_VERSION,
@@ -1075,6 +1078,29 @@ export class RemoteTui {
     });
   }
 
+  /** Show a shared FuzzyPicker in place of the editor, like `choose` but with the same
+   * rows as the matching CLI picker. Browser hosts get their native chooser instead. */
+  private pick<T>(items: PickerItem<T>[], options: PickerOptions): Promise<T | undefined> {
+    if (!items.length) { this.notify(`No choices available: ${options.title}`); return Promise.resolve(undefined); }
+    if (this.detached || !this.connected) return Promise.resolve(undefined);
+    if (this.options.externalInput?.choose) {
+      const text = (value: string) => stripTerminalSequences(value).trim();
+      return this.chooseExternal(options.title, items.map((item, index) => ({ value: String(index),
+        label: text(item.cells?.[0] ?? item.label ?? ''), description: (item.cells?.slice(1) ?? [item.detail ?? '']).map(text).filter(Boolean).join(' · ') })))
+        .then(value => value === undefined ? undefined : items[Number(value)]?.value);
+    }
+    return new Promise(resolve => {
+      const picker = new FuzzyPicker(items, { ...options, maxVisible: Math.min(options.maxVisible ?? 10, 8) });
+      let finished = false;
+      const done = (value?: T) => {
+        if (finished) return; finished = true; this.localDialog = undefined;
+        this.syncBottom(); resolve(value);
+      };
+      picker.onSelect = value => done(value); picker.onCancel = () => done();
+      this.localDialog = { component: picker, cancel: () => done() }; this.syncBottom();
+    });
+  }
+
   private choose(title: string, items: SelectItem[]): Promise<string | undefined> {
     if (!items.length) { this.notify(`No choices available: ${title}`); return Promise.resolve(undefined); }
     if (this.detached || !this.connected) return Promise.resolve(undefined);
@@ -1311,10 +1337,26 @@ export class RemoteTui {
         const side = args === '--side';
         if (side) await this.requireSideSlots();
         if (!valid()) return true;
-        const sessions = await this.connection.request('sessions', { slotId: this.slotId, ...(side ? { side: true } : {}) });
+        // The same rows as `pi-remote resume`: slots mark sessions open elsewhere.
+        const [sessions, listed] = await Promise.all([
+          this.connection.request('sessions', { slotId: this.slotId, summary: true, ...(side ? { side: true } : {}) }),
+          // Slot marks are a convenience; a failed list must not block resuming.
+          this.connection.request('list').catch(() => []),
+        ]);
+        const slots: SlotInfo[] = Array.isArray(listed) ? listed : [];
         if (!valid()) return true;
-        const sessionPath = await this.choose(side ? 'Resume a side conversation' : 'Resume a remote session', sessions.map(session => ({ value: session.path, label: session.name ?? session.firstMessage ?? session.id, description: `${session.messageCount} messages · ${session.path}` })));
-        if (sessionPath !== undefined && valid()) {
+        const p = paint(true);
+        const subtitle = [this.options.host, this.view.snapshot.slot.cwd].filter(Boolean).join(' · ');
+        const choice = await this.pick(sessionItems(sessions, slots, p, { currentSlotId: this.slotId }),
+          sessionPickerOptions(p, subtitle, side ? 'Resume a side conversation' : 'Resume a session'));
+        if (choice?.openIn && choice.openIn !== this.slotId) {
+          const owner = slots.find(slot => slot.id === choice.openIn);
+          const reference = owner?.number ?? choice.openIn;
+          this.notify(`That session is open in slot ${reference}. One session never runs in two slots: detach, then run pi-remote attach ${reference}.`);
+          return true;
+        }
+        if (choice && valid()) {
+          const sessionPath = choice.path;
           const data = await this.rpc({ type: 'switch_session', sessionPath });
           if (data?.cancelled) this.notify('Session switch cancelled.'); else await this.refresh();
         }
