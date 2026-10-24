@@ -2,7 +2,7 @@ import { createServer, type Server, type Socket } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { mkdir, readFile, realpath, rename, rm, stat, writeFile, chmod, lstat } from 'node:fs/promises';
-import { homedir, hostname } from 'node:os';
+import { availableParallelism, freemem, homedir, hostname, loadavg, totalmem, uptime } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -30,6 +30,7 @@ const RPC_COMMANDS = new Set([...QUERY_COMMANDS, ...SESSION_CHANGES, 'prompt', '
 
 /** The installed code this daemon runs: a deployed release directory, or a source checkout. */
 const RELEASE = realpathSync(fileURLToPath(new URL('../..', import.meta.url)));
+const DAEMON_STARTED_AT = new Date().toISOString();
 const BUSY = 'Remote Pi is busy. Confirm reload to interrupt running work and discard queued prompts.';
 
 /** `reopen` marks a slot that was running when `restart_daemon` stopped the daemon. The next
@@ -734,7 +735,7 @@ export class Supervisor {
       if (request.method === 'hello') {
         if (params.protocol !== PROTOCOL_VERSION || params.piVersion !== PI_VERSION) throw new Error(`Version mismatch: daemon protocol ${PROTOCOL_VERSION}, Pi ${PI_VERSION}`);
         peer.verified = true;
-        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, release: RELEASE, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'transcript_filtering', ACTIVITY_CAPABILITY, 'sessions_by_cwd'] } satisfies MethodResult<'hello'>;
+        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, release: RELEASE, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'transcript_filtering', ACTIVITY_CAPABILITY, 'sessions_by_cwd', 'host_status'] } satisfies MethodResult<'hello'>;
       } else {
         if (!peer.verified) throw new Error('Send hello with matching versions first');
         if (peer.activity && request.method !== 'watch_activity') throw new Error('Activity watchers are read-only; use a separate connection');
@@ -754,6 +755,12 @@ export class Supervisor {
             return;
           }
           case 'list': data = [...this.slots.values()].map(slot => this.info(slot)) satisfies MethodResult<'list'>; break;
+          case 'ping': data = {} satisfies MethodResult<'ping'>; break;
+          case 'status': data = {
+            pid: process.pid, release: RELEASE, startedAt: DAEMON_STARTED_AT, piVersion: PI_VERSION, nodeVersion: process.version,
+            host: { hostname: hostname(), platform: process.platform, arch: process.arch, uptimeSeconds: Math.round(uptime()), loadavg: loadavg(),
+              cpus: availableParallelism(), totalMemory: totalmem(), freeMemory: freemem() },
+          } satisfies MethodResult<'status'>; break;
           case 'complete_path': case 'read_attachment': case 'filesystem_metadata': {
             const { serveFileRequest } = await import('./files.js');
             const cwd = params.slotId ? this.slot(params.slotId).cwd : params.cwd;

@@ -130,7 +130,7 @@ async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {
     if (verify) {
       const response = await peer.request('hello', hello);
       assert.deepEqual({protocol: response.protocol, piVersion: response.piVersion, pid: response.pid}, { ...hello, pid: process.pid });
-      assert.deepEqual(response.capabilities, ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'transcript_filtering', 'activity_stream', 'sessions_by_cwd']);
+      assert.deepEqual(response.capabilities, ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'transcript_filtering', 'activity_stream', 'sessions_by_cwd', 'host_status']);
     }
     return peer;
   };
@@ -873,6 +873,20 @@ test('sessions lists a directory without a slot, never creates it, and can omit 
   await assert.rejects(peer.request('sessions', {}), /exactly one of slotId or cwd/);
   await assert.rejects(peer.request('sessions', { cwd: path }), /must be a directory/);
   await assert.rejects(peer.request('sessions', { cwd: workspace, summary: 'yes' }), /summary must be a boolean/);
+});
+
+test('ping does no work and status reports daemon and host facts', { timeout: 10_000 }, async t => {
+  const { peer } = await setup(t);
+  assert.deepEqual(await peer.request('ping', {}), {});
+  const status = await peer.request('status', {});
+  assert.equal(status.pid, process.pid);
+  assert.equal(status.piVersion, '1.0.4');
+  assert.equal(status.nodeVersion, process.version);
+  assert.equal(status.host.hostname, hostname());
+  assert.ok(Date.parse(status.startedAt) <= Date.now());
+  assert.equal(status.host.loadavg.length, 3);
+  assert.ok(status.host.cpus >= 1 && status.host.totalMemory >= status.host.freeMemory && status.host.uptimeSeconds > 0);
+  assert.equal(typeof status.release, 'string');
 });
 
 test('successful mutating RPC stays successful when its follow-up get_state fails', { timeout: 10_000 }, async t => {

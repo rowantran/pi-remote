@@ -1,6 +1,7 @@
 import type { SlotInfo } from '../protocol/types.js';
 import type { PickerItem } from './fuzzy-picker.js';
 import { sideParentLabel } from './session-labels.js';
+import { styleLatency } from './host-status.js';
 import { paint, plainText, layoutTable, type Column, type Paint } from './table.js';
 
 export type NumberedSlot = SlotInfo & { number?: number };
@@ -71,10 +72,13 @@ export function formatSlotList(slots: NumberedSlot[], hidden = 0, p: Paint = pai
   return lines.join('\n');
 }
 
-/** The line above `ls` and the subtitle of the slot pickers: host and slot counts. */
-export function listSummary(host: string, slots: readonly SlotInfo[]): string {
+/** The line above `ls` and the subtitle of the slot pickers: host, round trip, and slot
+ * counts, for example `devbox · 38 ms · 3 running · 2 stopped`. Dim, with colored latency. */
+export function listSummary(host: string, slots: readonly SlotInfo[], options: { latencyMs?: number; paint?: Paint } = {}): string {
+  const p = options.paint ?? paint(false);
   const running = slots.filter(slot => slot.status !== 'exited').length;
-  return `${plainText(host)} · ${running} running · ${slots.length - running} stopped`;
+  const latency = options.latencyMs === undefined ? '' : `${styleLatency(options.latencyMs, p)}${p.dim(' · ')}`;
+  return `${p.dim(`${plainText(host)} · `)}${latency}${p.dim(`${running} running · ${slots.length - running} stopped`)}`;
 }
 
 /** Slot picker rows: the same cells and order as `ls`, searchable by every field. */

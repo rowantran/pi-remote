@@ -20,6 +20,7 @@ import { REMOTE_ICON, detachMessage, sideParentLabel, stoppedMessage } from './s
 import { FuzzyPicker, type PickerItem, type PickerOptions } from './fuzzy-picker.js';
 import { sessionItems, sessionPickerOptions } from './session-table.js';
 import { paint } from './table.js';
+import { Pinger, daemonStatus, formatDuration, formatLatency, latencyLevel, statusPanelRows, styleLatency, type DaemonState } from './host-status.js';
 import { attachInvocation, formatInvocation, ghosttyLauncher, resolveSplitDirection, type AttachContext, type GhosttyLauncher, type SplitDirection } from './side-launcher.js';
 import { RemoteAutocompleteProvider, transformPromptWithAttachments } from './editor-completion.js';
 import {
@@ -51,6 +52,8 @@ function keyDisplayText(action: string): string {
 const accent = (text: string) => `\x1b[36m${text}\x1b[39m`;
 const muted = (text: string) => `\x1b[2m${text}\x1b[22m`;
 const errorColor = (text: string) => `\x1b[31m${text}\x1b[39m`;
+/** Recent daemon round trips kept for the footer and the status panel. */
+const LATENCY_SAMPLES = 20;
 /** Pi's interactive mode waits this long for terminal color replies before it falls back. */
 const TERMINAL_COLOR_TIMEOUT_MS = 100;
 const RELOAD_BUSY_ERROR = 'Remote Pi is busy. Confirm reload to interrupt running work and discard queued prompts.';
@@ -65,8 +68,9 @@ Esc Esc (empty editor, idle): tree-style fork picker, unless local doubleEscapeA
 /side [prompt]: fork the saved conversation into a side slot and open a local Ghostty split.
 /resume --side: browse stored side conversations, which are hidden from normal /resume.
 Ctrl+O: expand/collapse tool output. Ctrl+T: show/hide thinking.
+Ctrl+S /status: live round-trip latency, connection, daemon, and remote host details.
 PageUp/PageDown: transcript scroll. Ctrl+End or the Jump to latest pill: follow output. Ctrl+Shift+F: transcript search.
-/detach /help /model /new /fork /resume /session /copy /name <name> /compact [instructions]
+/detach /help /model /new /fork /resume /session /status /copy /name <name> /compact [instructions]
 /quit stops the remote Pi process for this slot, then closes the client.
 /reload restarts remote Pi in the same slot/session; confirm to discard running work and queued prompts.
 /reload-ui reloads only local presentation; it does not restart remote Pi or the daemon.
@@ -132,6 +136,8 @@ export interface TuiOptions {
   externalInput?: ExternalInput;
   /** A display host may cache verified snapshots locally. It must never feed them back to Pi. */
   onSnapshot?: (snapshot: Snapshot) => void;
+  /** Measure the daemon round trip this often for the footer; off when unset. */
+  latencyIntervalMs?: number;
 }
 
 /** Exported for terminal-adapter tests; uses only the public pi-tui API. */
@@ -200,6 +206,11 @@ export class RemoteTui {
   private sideSplit: SplitDirection = 'auto';
   private sidePending = false;
   private sessionFlowPending = 0;
+  private latencySamples: number[] = [];
+  private pinger?: Pinger;
+  private pinging = false;
+  private connectedAt = Date.now();
+  private reconnects = 0;
 
   constructor(private connection: RemoteConnection, private slotId: string, snapshot: Snapshot,
     terminal: Terminal = new ProcessTerminal(), private options: TuiOptions = {}) {
@@ -325,7 +336,7 @@ export class RemoteTui {
         return result;
       },
       completePath: prefix => this.connection.request('complete_path', { slotId: this.slotId, prefix }),
-      localCommands: ['attach', 'clear-attachments', 'detach', 'help', 'model', 'new', 'fork', 'tree', 'side', 'resume', 'session', 'copy', 'name', 'compact', 'thinking', 'export', 'reload', 'reload-ui', 'theme', 'tool-call', 'paste', 'editor', 'quit'].map(name => ({ name })),
+      localCommands: ['attach', 'clear-attachments', 'detach', 'help', 'model', 'new', 'fork', 'tree', 'side', 'resume', 'session', 'status', 'copy', 'name', 'compact', 'thinking', 'export', 'reload', 'reload-ui', 'theme', 'tool-call', 'paste', 'editor', 'quit'].map(name => ({ name })),
     });
     this.editor.setAutocompleteProvider(this.completion);
     // Like Pi, learn whether the terminal is light or dark before building themed content.
@@ -590,6 +601,7 @@ export class RemoteTui {
       if (this.connection.onReconnect) this.unsubscribe.push(this.connection.onReconnect(snapshot => {
         if (this.detached) return;
         this.connected = true; this.generation++;
+        this.connectedAt = Date.now(); this.reconnects++; this.latencySamples = [];
         this.localDialog?.cancel();
         this.resetSnapshotFlight();
         const processChanged = snapshot.slot.status === 'starting'
@@ -669,12 +681,15 @@ export class RemoteTui {
           if (matchesKey(data, Key.ctrl('p'))) { void this.rpc({ type: 'cycle_model' }).then(() => this.refresh()).catch(error => this.notify(errorText(error))); return { consume: true }; }
           if (matchesKey(data, Key.shift('tab'))) { void this.rpc({ type: 'cycle_thinking_level' }).then(() => this.refresh()).catch(error => this.notify(errorText(error))); return { consume: true }; }
           if (this.presentation?.hasShortcut(data)) { void this.presentation.shortcut(data); return { consume: true }; }
+          // After adapter shortcuts, so a trusted local adapter can claim the key.
+          if (matchesKey(data, Key.ctrl('s'))) { void this.showStatus(); return { consume: true }; }
         }
         if (this.options.externalInput && this.activeRemote) return { consume: true };
         return undefined;
       }));
       try {
         this.syncBottom(); this.tui.start();
+        this.startLatencySampler();
       } catch (error) {
         this.finish = undefined; this.detach(); reject(error);
       }
@@ -1032,6 +1047,70 @@ export class RemoteTui {
     for (const message of followUp) this.bottom.addChild(new TruncatedText(dim(`Follow-up: ${safeText(message)}`), 1, 0));
     this.bottom.addChild(new TruncatedText(dim(`↳ ${keyDisplayText('app.message.dequeue')} to edit all queued messages`), 1, 0));
   }
+  /** Sample the daemon round trip on a timer while connected. Opt-in: tests and
+   * hosts that do not show the footer leave it off. */
+  private startLatencySampler(): void {
+    const interval = this.options.latencyIntervalMs;
+    if (!interval) return;
+    void this.sampleLatency();
+    const timer = setInterval(() => void this.sampleLatency(), interval);
+    timer.unref?.();
+    this.unsubscribe.push(() => clearInterval(timer));
+  }
+
+  private async sampleLatency(): Promise<void> {
+    if (this.pinging || this.detached || !this.connected) return;
+    this.pinging = true;
+    const generation = this.generation;
+    try {
+      const ms = await (this.pinger ??= new Pinger(this.connection)).ping();
+      // A sample that spans a disconnect or reconnect measures neither connection.
+      if (generation !== this.generation || this.detached) return;
+      this.latencySamples = [...this.latencySamples, ms].slice(-LATENCY_SAMPLES);
+      this.tui.requestRender();
+    } catch { /* The disconnect handler reports transport loss. */ }
+    finally { this.pinging = false; }
+  }
+
+  /** The /status panel. It pings every second while open, so the latency is live. */
+  private async showStatus(): Promise<void> {
+    if (this.localDialog || this.activeRemote || this.detached) return;
+    let daemon: DaemonState = this.connected ? 'loading' : undefined;
+    let closed = false;
+    const lines = new DynamicLines(() => this.statusLines(daemon));
+    const close = () => {
+      if (closed) return;
+      closed = true; clearInterval(timer);
+      if (this.localDialog?.component === component) { this.localDialog = undefined; this.syncBottom(); }
+      this.tui.requestRender();
+    };
+    const component = new Dialog(lines, 'Connection status', 'Live · Esc, Enter, or Ctrl+S closes · Ctrl+D detaches', data => {
+      if (matchesKey(data, Key.enter) || matchesKey(data, Key.ctrl('s')) || data === 'q') close();
+    });
+    this.localDialog = { component, cancel: close };
+    this.syncBottom();
+    const timer = setInterval(() => { void this.sampleLatency(); this.tui.requestRender(); }, 1000);
+    timer.unref?.();
+    void this.sampleLatency();
+    if (!this.connected) return;
+    try { daemon = await daemonStatus(this.connection); } catch (error) { daemon = { error: errorText(error) }; }
+    if (!closed) this.tui.requestRender();
+  }
+
+  private statusLines(daemon: DaemonState): string[] {
+    const slot = this.view.snapshot.slot;
+    const started = Date.parse(slot.createdAt);
+    return statusPanelRows({
+      host: this.options.host ?? hostname(), connected: this.connected, samples: this.latencySamples, daemon,
+      connection: `connected ${formatDuration((Date.now() - this.connectedAt) / 1000)}${this.reconnects ? ` · ${this.reconnects} reconnect${this.reconnects === 1 ? '' : 's'}` : ''}`,
+      extra: [
+        ['slot', [slot.number === undefined ? this.slotId.slice(0, 8) : `#${slot.number}`, slot.status, `${slot.clients} client${slot.clients === 1 ? '' : 's'} attached`,
+          ...(Number.isFinite(started) ? [`started ${formatDuration((Date.now() - started) / 1000)} ago`] : [])].join(' · ')],
+        ['workspace', safeText(slot.cwd)],
+      ],
+    }, paint(true));
+  }
+
   private footer(): string {
     const s = this.view.snapshot;
     const status = !this.connected ? 'DISCONNECTED — remote work continues' : s.slot.status === 'exited' ? 'EXITED' : s.slot.status === 'starting' ? 'Starting' : s.live.compacting ? 'Compacting' : s.live.busy ? 'Working' : 'Ready';
@@ -1045,11 +1124,19 @@ export class RemoteTui {
     const window = s.state.model?.contextWindow;
     const cost = messages.reduce((total, message) => total + (message.usage?.cost?.total ?? 0), 0);
     const statuses = s.ui.filter(record => record.method === 'setStatus' && record.statusText).map(record => safeText(record.statusText));
-    return muted([status, s.state.sessionName ?? s.slot.sessionName ?? this.slotId, sideParentLabel(s.slot),
-      this.options.host ? `${REMOTE_ICON} ${this.options.host}` : undefined, s.slot.cwd,
+    const host = this.options.host ? `${REMOTE_ICON} ${this.options.host}` : undefined;
+    const parts = [status, s.state.sessionName ?? s.slot.sessionName ?? this.slotId, sideParentLabel(s.slot),
+      host, s.slot.cwd,
       s.state.model?.id ?? assistant?.model, s.state.thinkingLevel,
       context !== undefined ? `${context.toLocaleString()} tokens${window ? ` / ${Math.round(context / window * 100)}%` : ''}` : undefined,
-      cost ? `$${cost.toFixed(3)} (message usage)` : undefined, ...statuses].filter(Boolean).map(value => safeText(value).replace(/\n/g, ' ')).join(' · '));
+      cost ? `$${cost.toFixed(3)} (message usage)` : undefined, ...statuses].filter(Boolean).map(value => safeText(value!).replace(/\n/g, ' '));
+    // The latest round trip follows the host; slow links are colored.
+    const latency = this.connected ? this.latencySamples.at(-1) : undefined;
+    const hostIndex = host === undefined ? -1 : parts.indexOf(safeText(host));
+    if (latency !== undefined && hostIndex >= 0) {
+      parts[hostIndex] += ` ${latencyLevel(latency) === 'ok' ? formatLatency(latency) : styleLatency(latency, paint(true))}`;
+    }
+    return muted(parts.join(' · '));
   }
 
   private chooseExternal(title: string, items: SelectItem[]): Promise<string | undefined> {
@@ -1363,6 +1450,7 @@ export class RemoteTui {
         return true;
       }
       case '/quit': await this.quitSlot(); return true;
+      case '/status': await this.showStatus(); return true;
       case '/session': this.notify(JSON.stringify(await this.rpc({ type: 'get_session_stats' }), null, 2)); return true;
       case '/copy': {
         const result = await this.rpc({ type: 'get_last_assistant_text' });
@@ -1525,7 +1613,8 @@ export async function runTui(connection: RemoteConnection, slotId: string, initi
   Object.assign(process.env, remoteSessionEnv({ host, slotId, slotNumber: initialSnapshot.slot.number }));
   const hideThinkingBlock = options.hideThinkingBlock ?? await readPiHideThinkingBlock();
   const doubleEscapeAction = options.doubleEscapeAction ?? await readPiDoubleEscapeAction();
-  const client = new RemoteTui(connection, slotId, initialSnapshot, new ProcessTerminal(), { ...options, host, hideThinkingBlock, doubleEscapeAction });
+  const client = new RemoteTui(connection, slotId, initialSnapshot, new ProcessTerminal(), { ...options, host, hideThinkingBlock, doubleEscapeAction,
+    latencyIntervalMs: options.latencyIntervalMs ?? 5_000 });
   // Start input and outstanding startup dialogs before any trusted extension factory can await.
   const finished = client.run();
   void client.initialize();

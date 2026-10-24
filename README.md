@@ -65,6 +65,7 @@ pi-remote new --cwd /remote/project --session /remote/session.jsonl
 
 # Explicitly stop a remote Pi process. Ordinary detach never does this.
 pi-remote kill 1
+
 ```
 
 From an attached client, `/quit` does the same as `pi-remote kill` for the current slot, then closes the client and prints `Stopped slot NUMBER / UUID. Resume it with: pi-remote resume NUMBER`. If Pi is running, compacting, running a shell command, or has queued prompts, `/quit` asks for confirmation first, because stopping Pi interrupts that work. The session file stays on disk; `pi-remote resume NUMBER` opens it in a new slot to continue. The stopped slot stays in `pi-remote ls --all`; plain `pi-remote ls` hides stopped slots and prints how many it hid.
@@ -98,6 +99,30 @@ Enter opens the chosen session in a **new slot** and attaches to it. `-- PI_OPTI
 `pi-remote resume SLOT` skips the picker and reopens that stopped slot's session, in any directory. If the slot is still running, it attaches. `--no-attach` prints the slot UUID without opening the UI. Slot completion after `pi-remote resume ` offers stopped slots with a saved session. Pi saves a session after its first response, so a slot stopped before that has nothing to resume.
 
 Listing without a slot needs a daemon from this release; an older daemon reports that you should deploy and run `pi-remote restart-daemon`.
+
+### Connection status
+
+`pi-remote ls` (on a terminal) and the home and attach pickers start with the same summary line: host, the round trip of the list request, and slot counts, for example `devbox · 38 ms · 3 running · 2 stopped`. Latency is green below 150 ms, yellow below 400 ms, and red above. Piped `ls` output contains only the list.
+
+**Ctrl+S** opens the status panel, in the home and attach pickers and in an attached slot (also `/status`). The panel is the same everywhere:
+
+```text
+  host      devbox · connected 1h 12m · 1 reconnect
+  latency   38 ms min 35 ms · avg 40 ms · max 52 ms · 12 samples
+  slot      #3 · running · 1 client attached · started 2h ago
+  workspace /home/me/project
+  daemon    pid 12345 · up 3d 4h · release 2f1c9e0
+  versions  Pi 1.0.4 · Node v22.19.0
+  machine   devbox · linux x64 · up 12d 3h
+  load      0.42 0.38 0.30 · 8 CPUs
+  memory    5.2 GB free of 31 GB
+```
+
+It pings the daemon every second while open, so latency and host load are live. In an attached slot it shows the slot and its workspace, connection age, and reconnects; in a picker it shows the SSH connection time instead. Esc, Enter, or Ctrl+S closes it in a slot; Ctrl+S hides it in a picker. A trusted local adapter that claims Ctrl+S keeps it.
+
+In the attached UI, the footer also shows the latest round trip after the host name (`devbox 38 ms`), measured every 5 seconds, and colors it when the link is slow.
+
+Round trips use the daemon's `ping` method, which does no work. Daemon and host facts need a daemon from this release; an older daemon still shows latency (timed with `list`) and says to deploy and run `pi-remote restart-daemon`.
 
 ### Session names
 
@@ -206,6 +231,7 @@ For zsh or bash, put `pi-remote` on `PATH` with `npm link`, then install the mat
 | `/resume` | Pick a stored remote session in the slot's workspace; Pi switches to it. Same picker and rows as `pi-remote resume` |
 | `/resume --side` | Pick a stored side conversation in the workspace; Pi switches to it |
 | `/session` | Show authoritative remote usage and session statistics |
+| Ctrl+S / `/status` | Live connection panel: latency, connection age, reconnects, slot, daemon, and host load and memory |
 | `/copy` | Copy the last assistant text to the **local** clipboard |
 | `/name NAME` | Set the current session name |
 | `/compact [instructions]` | Ask remote Pi to compact |
