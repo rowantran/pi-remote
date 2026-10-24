@@ -35,15 +35,19 @@ pi-remote new --cwd /remote/project
 Remote Pi loads its normal settings, credentials, providers, extension factories, skills, and trusted project resources. Deployment copies application files, not your local Pi configuration.
 
 ```sh
-# List running slots with their short numbers and session names.
-# Add --all to include stopped slots.
+# A read-only attach: print the attach picker's header and rows without
+# opening it. Add --all to include stopped slots, --json for scripts.
 pi-remote ls
 
 # Attach by number, full UUID, or unique nonnumeric UUID prefix.
 pi-remote attach 1
 
-# Omit the slot: attach to the only active slot, or open a local picker.
+# Omit the slot: attach to the only active slot, or open a searchable picker.
 pi-remote attach
+
+# No command: one searchable picker to attach to a running slot or start a
+# new session in the default directory.
+pi-remote
 
 # Create without opening the UI.
 pi-remote new --cwd /remote/project --no-attach
@@ -68,9 +72,15 @@ Use `--host HOST` with any command to select another SSH host, for example `pi-r
 
 Every command also accepts an unambiguous prefix: `pi-remote n --cwd /remote/project` runs `new`, `pi-remote a 1` runs `attach`, `pi-remote k 1` runs `kill`, and `pi-remote l` runs `ls`. The internal commands `bridge`, `daemon`, `complete`, and `fs` need their full names.
 
+### Picking a session
+
+Run `pi-remote` with no command to open the home picker. It lists active slots with exactly the rows of `pi-remote ls`: number, status, session name (side slots indented under their parent), workspace, attached clients, age, and the first 8 characters of the UUID, with any slot error on the line below. Its header is the same summary line that `ls` prints on a terminal (`devbox · 3 running · 1 stopped`). Type to filter: the search is fuzzy over the session name, number, and directory, and typing a slot number such as `3` or `#3` puts that slot first. Use ↑/↓ (or Ctrl+P/Ctrl+N) to move, Enter to open, and Esc, Ctrl+C, or Ctrl+D to cancel. The last row, **+ New session**, starts a slot in the default directory (`--cwd`, `PI_REMOTE_CWD`, or the config file) and attaches to it. Options such as `--host` work as with other commands: `pi-remote --host otherbox`.
+
+`pi-remote attach` without a slot opens the same picker, limited to active slots, when more than one is active. The picker draws below your prompt and erases itself when you choose or cancel; it never clears the screen or scrollback. Without a terminal, `pi-remote` prints help and `attach` asks for a slot number.
+
 ### Session names
 
-`pi-remote ls`, the attach picker, and slot completion show each slot's Pi session name. This is Pi's own session name: the one `/name` sets and `/resume` shows. Set it with `/name NAME` in the attached UI.
+`pi-remote ls`, the pickers, and slot completion show each slot's Pi session name. This is Pi's own session name: the one `/name` sets and `/resume` shows. Set it with `/name NAME` in the attached UI.
 
 The attached terminal's window/tab title follows native Pi's format: `π - SESSION NAME - DIRECTORY`, or `π - DIRECTORY` for an unnamed session. `DIRECTORY` is the remote workspace's basename, not the local directory. The title follows session renames, refreshes, and reconnects. The phone/browser tab uses the same title. Extensions can still set a custom title; a remote extension's title stays in effect until replaced or remote Pi restarts.
 
