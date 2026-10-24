@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
-import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import test, { type TestContext } from 'node:test';
@@ -163,30 +162,23 @@ test('slot resolver only lists and returns UUID; no picker or mutations for expl
   assert.deepEqual(calls, ['list', 'list']);
 });
 
-test('readline picker shows metadata and accepts a stable number without an RPC', async () => {
-  const input = Object.assign(new PassThrough(), { isTTY: true });
-  const output = Object.assign(new PassThrough(), { isTTY: true });
-  let text = '';
-  output.on('data', chunk => { text += chunk; });
-  const selected = pickSlot(slots.slice(0, 2), { input, output });
-  input.write('3\n');
-  assert.equal(await selected, 'abcdefff-b');
-  assert.match(text, /19  running · Fix quoted paths · \/remote\/project with spaces/);
-  assert.match(text, /3  starting/);
-  input.destroy(); output.destroy();
+test('slot picker searches rows and returns the chosen UUID without an RPC', async () => {
+  const rendered: string[] = [];
+  const selected = await pickSlot(slots.slice(0, 2), { isTTY: true, host: 'devbox', run: async picker => {
+    rendered.push(...picker.render(120));
+    for (const key of '#3') picker.handleInput(key);
+    return picker.selectedValue();
+  } });
+  assert.equal(selected, 'abcdefff-b');
+  const text = rendered.join('\n');
+  assert.match(text, /Attach to a slot.*devbox · 2 running · 0 stopped/);
+  assert.match(text, /19  ● running   Fix quoted paths  \/remote\/project with spaces/);
+  assert.match(text, /3  ● starting  Fix quoted paths/);
 });
 
-test('picker keeps non-TTY failures and cancels on empty input or EOF', async () => {
-  await assert.rejects(pickSlot(slots, { input: new PassThrough(), output: new PassThrough() }), /local terminal/);
-  for (const answer of ['\n', '\u0004', '\u0003']) {
-    const input = Object.assign(new PassThrough(), { isTTY: true });
-    const output = Object.assign(new PassThrough(), { isTTY: true });
-    output.resume();
-    const selection = pickSlot(slots, { input, output });
-    input.write(answer);
-    await assert.rejects(selection, /cancelled/);
-    input.destroy(); output.destroy();
-  }
+test('slot picker keeps non-TTY failures and reports cancellation', async () => {
+  await assert.rejects(pickSlot(slots, { isTTY: false }), /local terminal/);
+  await assert.rejects(pickSlot(slots, { isTTY: true, run: async () => undefined }), /cancelled/);
 });
 
 test('completion context preserves spaces, equals-form prefixes, and stops at remote Pi arguments', () => {
@@ -518,7 +510,7 @@ test('CLI ls displays short numbers and resolves numeric rpc slots to UUIDs befo
   const fixture = await fakeSsh(t);
   const cli = [...nodeModuleArgs(import.meta.url, '../../src/cli/main')];
   const listing = await exec(process.execPath, [...cli, 'l', '--host', 'alias'], { env: fixture.env, cwd: root });
-  assert.match(listing.stdout, /^\s*19  1234abcd-a  running/);
+  assert.match(listing.stdout, /^\s*19  ● running   Fix quoted paths  \/remote\/project with spaces  \d+d  1234abcd$/m);
   const json = await exec(process.execPath, [...cli, 'ls', '--host', 'alias', '--json'], { env: fixture.env, cwd: root });
   assert.equal(JSON.parse(json.stdout)[0].number, 19);
   await writeFile(fixture.log, '');

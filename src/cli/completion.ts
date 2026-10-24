@@ -8,6 +8,9 @@ import { defaultCwd as configuredDefaultCwd, defaultHost as configuredDefaultHos
 import { nodeModuleArgs } from '../protocol/node-entry.js';
 import type { RemoteConnection, SlotInfo } from '../protocol/types.js';
 import { sideParentLabel } from '../tui/session-labels.js';
+import { numberSlots, slotNumber, type NumberedSlot } from '../tui/slot-table.js';
+
+export { numberSlots, slotNumber, type NumberedSlot };
 
 export const VALUE_OPTIONS = ['--host', '--remote-bin', '--state-dir', '--cwd', '--session', '--ui-extension', '--ui-config', '--theme'] as const;
 export const BOOLEAN_OPTIONS = ['--local', '--json', '--no-attach', '--no-reconnect', '--no-bell', '--all', '--force', '--help'] as const;
@@ -35,19 +38,10 @@ export function resolveCommand(input: string): string {
   if (candidates.length > 1) throw new Error(`Ambiguous command '${input}': ${candidates.join(', ')}. See --help.`);
   throw new Error(`Unknown command '${input}'. See --help.`);
 }
-export type NumberedSlot = SlotInfo & { number?: number };
 export interface CompletionItem { value: string; label: string; directory: boolean }
 export interface PathCompletion { items: CompletionItem[]; truncated: boolean }
 export type CompletionShell = 'fish' | 'zsh' | 'bash';
 
-/** Old daemons only append slots and retain exited entries, so insertion order
- * supplies the same short reference until the new daemon persists numbers. */
-export function numberSlots(slots: NumberedSlot[]): NumberedSlot[] {
-  return slots.map((slot, index) => ({ ...slot, number: slotNumber(slot) ?? index + 1 }));
-}
-export function slotNumber(slot: NumberedSlot): number | undefined {
-  return Number.isSafeInteger(slot.number) && slot.number! > 0 ? slot.number : undefined;
-}
 export function slotLabel(slot: SlotInfo): string {
   return `${slot.status} · ${slot.sessionName || '(unnamed)'}${sideParentLabel(slot) ? ` · ${sideParentLabel(slot)}` : ''} · ${slot.cwd}`;
 }

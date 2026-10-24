@@ -1,8 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
-import { createInterface } from 'node:readline/promises';
-import type { Readable, Writable } from 'node:stream';
-import { BOOLEAN_OPTIONS, VALUE_OPTIONS, completionScript, resolveCommand, runCompletionCommand, selectHost, slotLabel, slotNumber, numberSlots, type NumberedSlot } from './completion.js';
+import { BOOLEAN_OPTIONS, VALUE_OPTIONS, completionScript, resolveCommand, runCompletionCommand, selectHost, slotNumber, numberSlots, type NumberedSlot } from './completion.js';
 import { runDaemon } from '../daemon/supervisor.js';
 import { defaultStateDir } from '../protocol/paths.js';
 import { configPath, defaultCwd, defaultHost } from './config.js';
@@ -12,14 +10,21 @@ import { connectCompatibleLocal } from './connections.js';
 import { ReconnectingConnection } from '../client/reconnect.js';
 import { releaseName, restartDaemon } from '../client/restart-daemon.js';
 import { PI_VERSION, PROTOCOL_VERSION, type SlotInfo, type Snapshot, type RemoteConnection } from '../protocol/types.js';
-import { sideParentLabel } from '../tui/session-labels.js';
 import type { AttachContext } from '../tui/side-launcher.js';
+import { FuzzyPicker, runPicker, type PickerItem } from '../tui/fuzzy-picker.js';
+import { formatSlotList, listSummary, slotColumns, slotItems } from '../tui/slot-table.js';
+import { terminalPaint } from '../tui/table.js';
 
 const HELP = `pi-remote — local terminal UI, persistent remote Pi RPC processes
 
 Everyday commands:
+  pi-remote [--host HOST]
+    Open a searchable picker: attach to a running slot, or start a new one in
+    the default directory. Without a terminal, print this help.
   pi-remote new [--cwd REMOTE_DIRECTORY] [--host HOST] [--no-attach] [-- PI_OPTIONS...]
   pi-remote ls [--host HOST] [--all] [--json]
+    A read-only attach: print the attach picker's header and rows without
+    opening it. --all adds stopped slots; --json prints the slot data.
   pi-remote attach [--host HOST] [SLOT]
   pi-remote kill [--host HOST] SLOT
   pi-remote restart-daemon [--host HOST] [--force]
@@ -70,7 +75,7 @@ Configuration:
   The bell defaults to on; --no-bell overrides the config.
 
 SLOT is a stable number from ls, a full UUID, or a unique UUID prefix.
-attach without SLOT opens a local picker when several active slots exist.
+attach without SLOT opens a searchable picker when several active slots exist.
 --local ignores the host and directory defaults. Remote ~ and relative completion paths use
 remote home; --session completion uses --cwd, or the default directory.
 Quote remote '~' paths so your shell does not expand them to LOCAL home.
@@ -132,58 +137,58 @@ export function selectSlot(slots: NumberedSlot[], id: string): NumberedSlot {
   return candidates[0];
 }
 
-/** Local, pre-TUI selection. It returns a UUID and never sends an RPC. */
-export async function pickSlot(slots: NumberedSlot[], io: { input?: Readable & { isTTY?: boolean }; output?: Writable & { isTTY?: boolean } } = {}): Promise<string> {
-  slots = numberSlots(slots);
-  const input = io.input ?? process.stdin, output = io.output ?? process.stdout;
-  if (!input.isTTY || !output.isTTY) throw new Error('Specify a slot number or UUID from ls; selection needs a local terminal.');
-  const safe = (value: string) => value.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
-  output.write('Active remote slots:\n');
-  for (const slot of slots) output.write(`  ${slotNumber(slot) ?? slot.id}  ${safe(slotLabel(slot))}\n`);
-  const readline = createInterface({ input, output, terminal: true });
-  const abort = new AbortController();
-  const cancel = () => abort.abort();
-  readline.once('SIGINT', cancel);
-  readline.once('close', cancel);
-  try {
-    const answer = (await readline.question('Attach to slot (number or UUID; empty cancels): ', { signal: abort.signal })).trim();
-    if (!answer) throw new Error('Selection cancelled.');
-    return selectSlot(slots, answer).id;
-  } catch (error) {
-    if (abort.signal.aborted) throw new Error('Selection cancelled.');
-    throw error;
-  } finally { readline.close(); readline.off('SIGINT', cancel); readline.off('close', cancel); }
+export type RunPicker = <T>(picker: FuzzyPicker<T>) => Promise<T | undefined>;
+export interface PickerIo { isTTY?: boolean; host?: string; run?: RunPicker }
+const interactive = (io: PickerIo) => io.isTTY ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+
+/** Local, pre-TUI selection with the same rows as `ls`. It returns a UUID and never sends an RPC. */
+export async function pickSlot(slots: NumberedSlot[], io: PickerIo = {}, all: NumberedSlot[] = slots): Promise<string> {
+  if (!interactive(io)) throw new Error('Specify a slot number or UUID from ls; selection needs a local terminal.');
+  const p = terminalPaint();
+  const picker = new FuzzyPicker(slotItems(slots, p), {
+    title: 'Attach to a slot', subtitle: listSummary(io.host ?? 'local', all), action: 'attach', empty: 'No slots match.', columns: slotColumns(p), paint: p,
+  });
+  const chosen = await (io.run ?? runPicker)(picker);
+  if (chosen === undefined) throw new Error('Selection cancelled.');
+  return chosen;
 }
 
-export async function resolveSlot(connection: Pick<RemoteConnection, 'request'>, id: string | undefined, allowPicker = false): Promise<string> {
+export type HomeChoice = { kind: 'attach'; slotId: string } | { kind: 'new'; cwd: string };
+
+/** Rows of the bare `pi-remote` picker: active slots as in `ls`, then actions. */
+export function homeItems(slots: NumberedSlot[], cwd?: string, p = terminalPaint(), now = Date.now()): PickerItem<HomeChoice>[] {
+  const items: PickerItem<HomeChoice>[] = slotItems(slots.filter(slot => slot.status !== 'exited'), p, now)
+    .map(item => ({ ...item, value: { kind: 'attach', slotId: item.value } }));
+  if (cwd) items.push({ value: { kind: 'new', cwd }, marker: p.accent('+'), label: 'New session', detail: cwd, search: 'new session', pinned: true });
+  return items;
+}
+
+/** The bare `pi-remote` picker. Undefined means the user cancelled. */
+export async function pickHome(connection: Pick<RemoteConnection, 'request'>, options: PickerIo & { cwd?: string }): Promise<HomeChoice | undefined> {
+  const slots = numberSlots(await connection.request('list'));
+  const p = terminalPaint();
+  const items = homeItems(slots, options.cwd, p);
+  if (!items.length) throw new Error(`No active slots. Create one with new --cwd DIRECTORY, or add {"cwd": "DIRECTORY"} to ${configPath()}.`);
+  const active = items.some(item => item.value.kind === 'attach');
+  return (options.run ?? runPicker)(new FuzzyPicker(items, {
+    title: 'pi-remote', subtitle: listSummary(options.host ?? 'local', slots),
+    action: 'open', empty: active ? 'No active slots match.' : 'No active slots yet.', columns: slotColumns(p), paint: p,
+  }));
+}
+
+export async function resolveSlot(connection: Pick<RemoteConnection, 'request'>, id: string | undefined, allowPicker = false, io: PickerIo = {}): Promise<string> {
   const slots = numberSlots(await connection.request('list'));
   if (id !== undefined) return selectSlot(slots, id).id;
   const active = slots.filter(slot => slot.status !== 'exited');
   if (active.length === 1) return active[0].id;
-  if (allowPicker && active.length > 1) return pickSlot(active);
+  if (allowPicker && active.length > 1) return pickSlot(active, io, slots);
   throw new Error(active.length ? 'Specify a slot number or UUID from ls.' : 'No active slots. Create one with new --cwd DIRECTORY.');
 }
-/** Stopped slots are hidden unless --all is given; say how many so they are not lost. */
-export function formatSlotList(slots: NumberedSlot[], hidden = 0): string {
-  const ordered: { slot: NumberedSlot; depth: number }[] = [];
-  const seen = new Set<string>();
-  const visit = (slot: NumberedSlot, depth: number) => {
-    if (seen.has(slot.id)) return;
-    seen.add(slot.id); ordered.push({ slot, depth });
-    for (const child of slots) if (child.parentSlotId === slot.id) visit(child, depth + 1);
-  };
-  const ids = new Set(slots.map(slot => slot.id));
-  for (const slot of slots) if (!slot.parentSlotId || !ids.has(slot.parentSlotId)) visit(slot, 0);
-  for (const slot of slots) visit(slot, 0); // Malformed cycles must not hide entries.
-  const lines = ordered.map(({ slot, depth }) => `${'  '.repeat(depth)}${String(slotNumber(slot) ?? '-').padStart(3)}  ${slot.id}  ${slot.status.padEnd(7)}  ${slot.clients} client(s)  ${slot.sessionName ?? '(unnamed)'}${sideParentLabel(slot) ? ` (${sideParentLabel(slot)})` : ''}  ${slot.cwd}${slot.error ? `\n  ${slot.error}` : ''}`);
-  if (!slots.length) lines.push(hidden ? 'No active slots. Create one with new --cwd DIRECTORY.' : 'No slots. Create one with new --cwd DIRECTORY.');
-  if (hidden) lines.push(`${hidden} stopped slot${hidden === 1 ? '' : 's'} hidden. Use ls --all to show ${hidden === 1 ? 'it' : 'them'}.`);
-  return lines.join('\n');
-}
+export { formatSlotList };
 
 /** Only interactive attach/new request transcript filtering; watch/rpc stay raw. */
 export function usesTerminalUi(command: string, flags: ReadonlySet<string>, stdinIsTTY = Boolean(process.stdin.isTTY), stdoutIsTTY = Boolean(process.stdout.isTTY)): boolean {
-  return stdinIsTTY && stdoutIsTTY && (command === 'attach' || (command === 'new' && !flags.has('--no-attach')));
+  return stdinIsTTY && stdoutIsTTY && (command === 'attach' || command === 'home' || (command === 'new' && !flags.has('--no-attach')));
 }
 
 /** Only a live terminal UI owns recovery. Headless commands end on disconnect. */
@@ -197,8 +202,11 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     const { serveMain } = await import('../web/server/main.js');
     await serveMain(args.slice(1)); return;
   }
-  const first = args[0] ?? 'help';
-  const command = first === '--help' || first === '-h' || first === '--version' ? first : resolveCommand(first);
+  const first = args[0];
+  // Bare `pi-remote`, optionally with options such as --host, opens the home picker.
+  const home = first === undefined || (first.startsWith('-') && !['--help', '-h', '--version'].includes(first));
+  if (home && !(process.stdin.isTTY && process.stdout.isTTY)) { console.log(HELP); return; }
+  const command = home ? 'home' : first === '--help' || first === '-h' || first === '--version' ? first : resolveCommand(first);
   if (command === 'help' || command === '--help' || command === '-h') { console.log(HELP); return; }
   if (command === '--version' || command === 'version') { console.log(`pi-remote 0.2.0 (Pi ${PI_VERSION}, protocol ${PROTOCOL_VERSION})`); return; }
   if (command === 'fs') {
@@ -211,12 +219,12 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   }
   if (command === 'completion') { process.stdout.write(await completionScript(args[1] ?? '')); return; }
   if (command === 'complete') { await runCompletionCommand(args.slice(1)); return; }
-  const options = parseOptions(args.slice(1));
+  const options = parseOptions(home ? args : args.slice(1));
   if (options.flags.has('--help')) { console.log(HELP); return; }
   const stateDir = options.values.get('--state-dir');
   if (command === 'daemon') { await runDaemon({ stateDir: stateDir ?? defaultStateDir(), executable: process.env.PI_REMOTE_PI_BIN ?? 'pi' }); return; }
   if (command === 'bridge') { await bridge(stateDir); return; }
-  if (!['new', 'ls', 'attach', 'kill', 'rpc', 'watch', 'restart-daemon'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
+  if (!['home', 'new', 'ls', 'attach', 'kill', 'rpc', 'watch', 'restart-daemon'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
   const local = options.flags.has('--local');
   const host = selectHost({ host: options.values.get('--host'), local, defaultHost: local ? undefined : defaultHost() });
   const maxPositionals = command === 'rpc' ? 2 : ['attach', 'kill', 'watch'].includes(command) ? 1 : 0;
@@ -237,12 +245,23 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       const all = numberSlots(await connection.request('list'));
       const slots = options.flags.has('--all') ? all : all.filter(slot => slot.status !== 'exited');
       if (options.flags.has('--json')) console.log(JSON.stringify(slots, null, 2));
-      else console.log(formatSlotList(slots, all.length - slots.length));
+      else {
+        const p = terminalPaint();
+        // On a terminal, the same summary line as the pickers; pipes get only the list.
+        if (process.stdout.isTTY) console.log(p.dim(listSummary(host ?? 'local', all)));
+        console.log(formatSlotList(slots, all.length - slots.length, p));
+      }
       return;
     }
-    let slotId: string;
-    if (command === 'new') {
-      const cwd = options.values.get('--cwd') ?? (local ? undefined : defaultCwd());
+    let slotId: string | undefined;
+    let createCwd: string | undefined;
+    if (command === 'home') {
+      const choice = await pickHome(connection, { host, cwd: options.values.get('--cwd') ?? (local ? undefined : defaultCwd()) });
+      if (!choice) return;
+      if (choice.kind === 'attach') slotId = choice.slotId; else createCwd = choice.cwd;
+    }
+    if (command === 'new' || createCwd) {
+      const cwd = createCwd ?? options.values.get('--cwd') ?? (local ? undefined : defaultCwd());
       if (!cwd) throw new Error(local ? 'new --local requires --cwd with a directory' : `new requires a remote directory. Use --cwd DIRECTORY, set PI_REMOTE_CWD, or add {"cwd": "DIRECTORY"} to ${configPath()}.`);
       const slot = await connection.request('create', { cwd, args: options.piArgs, sessionPath: options.values.get('--session') });
       slotId = slot.id;
@@ -250,9 +269,9 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         console.log(options.flags.has('--json') ? JSON.stringify(slot, null, 2) : slot.id);
         return;
       }
-    } else slotId = await resolveSlot(connection, options.positionals.shift(), command === 'attach');
+    } else slotId ??= await resolveSlot(connection, options.positionals.shift(), command === 'attach', { host });
     if (command === 'kill') { await connection.request('kill', { slotId }); console.log(`Stopped ${slotId}`); return; }
-    if (!['new', 'attach', 'rpc', 'watch'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
+    if (!['home', 'new', 'attach', 'rpc', 'watch'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
     const snapshot = await connection.request('attach', { slotId, protocol: PROTOCOL_VERSION, piVersion: PI_VERSION,
       ...(usesTerminalUi(command, options.flags) ? { filterTranscript: true } : {}),
     });
