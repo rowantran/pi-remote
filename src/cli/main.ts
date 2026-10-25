@@ -15,7 +15,7 @@ import { FuzzyPicker, runPicker, type PickerItem } from '../tui/fuzzy-picker.js'
 import { formatSlotList, listSummary, slotColumns, slotItems } from '../tui/slot-table.js';
 import { terminalPaint } from '../tui/table.js';
 import { openSession, pickResume, resumeSlot, type ResumeChoice } from './resume.js';
-import { sessionDirArg } from '../daemon/side-sessions.js';
+import { sessionDirArg } from '../daemon/session-dirs.js';
 
 const HELP = `pi-remote — local terminal UI, persistent remote Pi RPC processes
 

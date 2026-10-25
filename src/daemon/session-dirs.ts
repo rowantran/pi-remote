@@ -1,6 +1,9 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
+/** Where Pi keeps sessions for a workspace: the default and side-session directories,
+ * and the --session-dir option that overrides the default. */
+
 /** Match Pi getAgentDir(): a nonempty override expands ~, otherwise ~/.pi/agent.
  * Resolve relative overrides from the child's cwd, not the daemon's cwd. */
 function workspaceDir(kind: 'sessions' | 'side-sessions', cwd: string, env: NodeJS.ProcessEnv): string {

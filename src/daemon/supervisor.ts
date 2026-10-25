@@ -15,7 +15,7 @@ import { PiProcess, type PiLaunch } from './pi-process.js';
 import { remoteSessionEnv } from '../protocol/remote-session.js';
 import { socketPath } from '../protocol/paths.js';
 import type { FileMethod, MethodResult, SessionInfo } from '../protocol/methods.js';
-import { defaultSessionDir, sessionDirArg, sideSessionDir, withSessionDir } from './side-sessions.js';
+import { defaultSessionDir, sessionDirArg, sideSessionDir, withSessionDir } from './session-dirs.js';
 import { PI_VERSION, PROTOCOL_VERSION, errorText, type CreateOptions, type HistoryCursor, type LiveState, type RecordValue, type Request, type SlotInfo, type Snapshot, type RemoteEvent, type ServerRecord } from '../protocol/types.js';
 
 // SessionManager returns Dates; JSON serialization produces the protocol's ISO strings.
@@ -734,7 +734,7 @@ export class Supervisor {
       if (request.method === 'hello') {
         if (params.protocol !== PROTOCOL_VERSION || params.piVersion !== PI_VERSION) throw new Error(`Version mismatch: daemon protocol ${PROTOCOL_VERSION}, Pi ${PI_VERSION}`);
         peer.verified = true;
-        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, release: RELEASE, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'transcript_filtering', ACTIVITY_CAPABILITY, 'sessions_by_cwd'] } satisfies MethodResult<'hello'>;
+        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, release: RELEASE, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'transcript_filtering', ACTIVITY_CAPABILITY] } satisfies MethodResult<'hello'>;
       } else {
         if (!peer.verified) throw new Error('Send hello with matching versions first');
         if (peer.activity && request.method !== 'watch_activity') throw new Error('Activity watchers are read-only; use a separate connection');

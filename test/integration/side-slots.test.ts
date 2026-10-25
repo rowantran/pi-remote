@@ -10,7 +10,7 @@ import { Connection } from '../../src/client/connection.js';
 import { Supervisor, type DaemonOptions } from '../../src/daemon/supervisor.js';
 import { socketPath } from '../../src/protocol/paths.js';
 import { PI_VERSION, PROTOCOL_VERSION, type RecordValue, type SlotInfo } from '../../src/protocol/types.js';
-import { sessionDirArg, sideSessionDir, withSessionDir } from '../../src/daemon/side-sessions.js';
+import { sessionDirArg, sideSessionDir, withSessionDir } from '../../src/daemon/session-dirs.js';
 
 const fixture = fileURLToPath(new URL('../fixtures/fixture-pi.mjs', import.meta.url));
 async function until<T>(read: () => Promise<T>, predicate: (value: T) => boolean, timeout = 4000): Promise<T> {

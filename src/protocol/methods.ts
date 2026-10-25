@@ -58,8 +58,8 @@ export interface DaemonMethods {
   attach: { params: { slotId: string; protocol?: number; piVersion?: string; filterTranscript?: boolean }; result: Snapshot };
   snapshot: { params: { slotId: string; historyCursor?: HistoryCursor }; result: Snapshot };
   /** Stored sessions for a slot's workspace, or for `cwd` without a slot (with an optional
-   * `--session-dir` value). `summary` leaves allMessagesText empty. Daemons before resume
-   * require slotId. */
+   * `--session-dir` value). `summary` leaves allMessagesText empty. Older daemons
+   * require slotId; clients recognize their error. */
   sessions: { params: ({ slotId: string; cwd?: never; sessionDir?: never } | { cwd: string; sessionDir?: string; slotId?: never }) & { side?: boolean; summary?: boolean }; result: SessionInfo[] };
   restart_daemon: { params: { force?: boolean }; result: RestartDaemonResult };
   restart: { params: { slotId: string; force?: boolean }; result: SlotInfo };
