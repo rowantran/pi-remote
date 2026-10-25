@@ -48,7 +48,7 @@ type Requester = Pick<RemoteConnection, 'request'>;
 const unknownMethod = (error: unknown) => error instanceof Error && /^Unknown daemon method:/.test(error.message);
 
 /**
- * Time one daemon round trip. `ping` does no work; daemons before host_status lack it,
+ * Time one daemon round trip. `ping` does no work; older daemons lack it,
  * so fall back to `list` (a small read) and remember that for this connection.
  */
 export class Pinger {
@@ -66,7 +66,7 @@ export class Pinger {
   }
 }
 
-/** Daemon facts, or undefined from a daemon before host_status. */
+/** Daemon facts, or undefined from an older daemon without `status`. */
 export async function daemonStatus(connection: Requester): Promise<DaemonStatus | undefined> {
   try { return await connection.request('status'); }
   catch (error) { if (unknownMethod(error)) return undefined; throw error; }

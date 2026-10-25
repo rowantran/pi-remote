@@ -67,7 +67,8 @@ type EmptyResult = Record<string, never>;
 export interface DaemonMethods {
   hello: { params: { protocol: number; piVersion: string }; result: HelloResult };
   list: { params: Record<string, never>; result: SlotInfo[] };
-  /** Smallest round trip, for latency measurement. Daemons before host_status lack it. */
+  /** Smallest round trip, for latency measurement. Older daemons lack it and `status`;
+   * clients recognize their "Unknown daemon method" error. */
   ping: { params: Record<string, never>; result: EmptyResult };
   status: { params: Record<string, never>; result: DaemonStatus };
   /** Read-only, all-slot lifecycle stream. Not an attachment and never a slot client. */
