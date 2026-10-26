@@ -87,10 +87,10 @@ test('slot pickers show exactly the ls rows, in ls order, with errors as notes',
   assert.deepEqual([formatAge(NOW - 5_000, NOW), formatAge(NOW - 300_000, NOW), formatAge(NOW - 7_200_000, NOW), formatAge(NOW - 3 * 86_400_000, NOW), formatAge('', NOW)], ['5s', '5m', '2h', '3d', '']);
 });
 
-test('home picker lists active slots and offers a new session only with a directory', () => {
+test('home picker lists active slots and offers new and resume rows only with a directory', () => {
   const slots = [slot(1, 'running', 'main'), slot(2, 'exited', 'old'), slot(3, 'starting')];
   assert.deepEqual(homeItems(slots, '~/project').map(item => item.value), [
-    { kind: 'attach', slotId: 'id-1' }, { kind: 'attach', slotId: 'id-3' }, { kind: 'new', cwd: '~/project' },
+    { kind: 'attach', slotId: 'id-1' }, { kind: 'attach', slotId: 'id-3' }, { kind: 'new', cwd: '~/project' }, { kind: 'resume' },
   ]);
   assert.ok(homeItems(slots, '~/project').at(-1)!.pinned);
   assert.equal(homeItems(slots).length, 2);

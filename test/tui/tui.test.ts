@@ -9,6 +9,8 @@ import type { GhosttySplitOptions } from '../../src/tui/side-launcher.js';
 import type { RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../../src/protocol/types.js';
 import { RemoteTui, type TuiOptions } from '../../src/tui/tui.js';
 import { detachMessage, stoppedMessage } from '../../src/tui/session-labels.js';
+import { sessionItems } from '../../src/tui/session-table.js';
+import { paint } from '../../src/tui/table.js';
 import { activeBranch, applyAssistantDelta, RemoteView, restoredQueueText, safeText, toolText, transcriptMessages } from '../../src/tui/view.js';
 
 function snapshot(overrides: Partial<Snapshot> = {}): Snapshot {
@@ -457,8 +459,8 @@ test('working status remains above a remote dialog instead of below the footer',
 test('detach message includes the slot number when known', () => {
   assert.equal(detachMessage('uuid', 3), 'Detached from slot 3 / uuid');
   assert.equal(detachMessage('uuid'), 'Detached from slot uuid');
-  assert.equal(stoppedMessage('uuid', 3), 'Stopped slot 3 / uuid');
-  assert.equal(stoppedMessage('uuid'), 'Stopped slot uuid');
+  assert.equal(stoppedMessage('uuid', 3), 'Stopped slot 3 / uuid. Resume it with: pi-remote resume 3');
+  assert.equal(stoppedMessage('uuid'), 'Stopped slot uuid. Resume it with: pi-remote resume uuid');
 });
 
 test('remote_slot_restart clears live/UI state but keeps cached history and increasing sequence', () => {
@@ -1624,13 +1626,46 @@ test('/resume --side explicitly selects the side-session catalogue, while /resum
   const { connection, submit } = launch(t);
   connection.handler = method => method === 'hello' ? { capabilities: ['side_slots'] } : [];
   submit('/resume --side'); await flush();
-  assert.deepEqual(connection.requests[1], { method: 'sessions', params: { slotId: 'slot', side: true } });
+  const sessions = () => connection.requests.filter(request => request.method === 'sessions').map(request => request.params);
+  assert.deepEqual(sessions(), [{ slotId: 'slot', summary: true, side: true }]);
   submit('/resume'); await flush();
-  assert.deepEqual(connection.requests.at(-1), { method: 'sessions', params: { slotId: 'slot' } });
+  assert.deepEqual(sessions().at(-1), { slotId: 'slot', summary: true });
 });
 
 test('side footers show their parent slot rather than a session entry parentId', t => {
   const initial = snapshot(); initial.slot.parentSlotId = 'parent-uuid'; initial.slot.parentSlotNumber = 3;
   const { ui } = launch(t, initial);
   assert.match(screen(ui), /side of #3/);
+});
+
+test('/resume shows the same rows as pi-remote resume and never opens a session twice', async t => {
+  const now = new Date().toISOString();
+  const stored = [
+    { path: '/s/mine.jsonl', id: 'mine', cwd: '/remote', name: 'current work', created: now, modified: now, messageCount: 3, firstMessage: 'hello', allMessagesText: '' },
+    { path: '/s/other.jsonl', id: 'other', cwd: '/remote', created: now, modified: now, messageCount: 1, firstMessage: 'fix the\nflaky test', allMessagesText: '' },
+    { path: '/s/old.jsonl', id: 'old', cwd: '/remote', created: now, modified: now, messageCount: 7, firstMessage: 'old', allMessagesText: '' },
+  ];
+  const slots = [
+    { id: 'slot', number: 1, cwd: '/remote', createdAt: now, status: 'running', clients: 1, sessionFile: '/s/mine.jsonl' },
+    { id: 'busy', number: 2, cwd: '/remote', createdAt: now, status: 'running', clients: 0, sessionFile: '/s/other.jsonl' },
+    { id: 'gone', number: 4, cwd: '/remote', createdAt: now, status: 'exited', clients: 0, sessionFile: '/s/old.jsonl' },
+  ];
+  const connection = new FakeConnection();
+  connection.handler = method => method === 'sessions' ? stored : method === 'list' ? slots : snapshot();
+  const { ui, terminal, submit } = launch(t, snapshot(), connection, { host: 'devbox' });
+  submit('/resume'); await flush(); await flush();
+  const text = screen(ui);
+  assert.match(text, /Resume a session  devbox · \/remote/);
+  assert.match(text, /current work\s+3 msgs\s+0s\s+● this slot/);
+  assert.match(text, /fix the flaky test\s+1 msg\s+0s\s+● open in #2/);
+  assert.match(text, /old\s+7 msgs\s+0s\s+○ stopped #4/);
+  // The CLI picker builds its rows from the same function.
+  const cli = sessionItems(stored, slots as any, paint(false), { currentSlotId: 'slot' }).map(item => item.cells!.join(' '));
+  assert.deepEqual(cli.map(row => row.replace(/\s+/g, ' ')), ['current work 3 msgs 0s ● this slot', 'fix the flaky test 1 msg 0s ● open in #2', 'old 7 msgs 0s ○ stopped #4']);
+  terminal.input('\x1b[B'); terminal.input('\r'); await flush();
+  assert.equal(connection.requests.filter(request => request.params?.command?.type === 'switch_session').length, 0);
+  assert.match(screen(ui), /open in slot 2.*pi-remote attach 2/s);
+  submit('/resume'); await flush(); await flush();
+  terminal.input('4'); terminal.input('\r'); await flush();
+  assert.deepEqual(connection.requests.filter(request => request.params?.command?.type === 'switch_session').map(request => request.params!.command.sessionPath), ['/s/old.jsonl']);
 });
