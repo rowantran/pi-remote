@@ -25,6 +25,24 @@ export interface HelloResult {
   capabilities?: string[];
 }
 
+/** Read-only facts about the daemon and its machine, for `pi-remote status`. */
+export interface DaemonStatus {
+  pid: number;
+  release: string;
+  /** ISO time the daemon process started. */
+  startedAt: string;
+  piVersion: string;
+  nodeVersion: string;
+  host: {
+    hostname: string; platform: string; arch: string;
+    uptimeSeconds: number;
+    /** 1, 5, and 15 minute load averages. */
+    loadavg: number[];
+    cpus: number;
+    totalMemory: number; freeMemory: number;
+  };
+}
+
 export interface RestartDaemonResult {
   accepted: boolean;
   pid: number;
@@ -49,6 +67,10 @@ type EmptyResult = Record<string, never>;
 export interface DaemonMethods {
   hello: { params: { protocol: number; piVersion: string }; result: HelloResult };
   list: { params: Record<string, never>; result: SlotInfo[] };
+  /** Smallest round trip, for latency measurement. Older daemons lack it and `status`;
+   * clients recognize their "Unknown daemon method" error. */
+  ping: { params: Record<string, never>; result: EmptyResult };
+  status: { params: Record<string, never>; result: DaemonStatus };
   /** Read-only, all-slot lifecycle stream. Not an attachment and never a slot client. */
   watch_activity: { params: Record<string, never>; result: { slots: ActivitySnapshot[] } };
   create: { params: CreateOptions; result: SlotInfo };

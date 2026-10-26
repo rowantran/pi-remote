@@ -28,7 +28,7 @@ export interface PickerItem<T> {
 
 export interface PickerOptions {
   title: string;
-  /** Dim text after the title, for example the host and slot counts. */
+  /** Text after the title, for example `listSummary()`. Trusted: callers sanitize and style it. */
   subtitle?: string;
   placeholder?: string;
   /** Shown when no normal row matches the query. */
@@ -40,6 +40,8 @@ export interface PickerOptions {
   /** Rows of the list shown at once. */
   maxVisible?: number;
   paint?: Paint;
+  /** Ctrl+S toggles these lines under the title, refreshed every `intervalMs` while shown. */
+  details?: { title: string; load: () => Promise<string[]>; intervalMs?: number };
 }
 
 /**
@@ -54,8 +56,14 @@ export class FuzzyPicker<T> implements Component, Focusable {
   private scroll = 0;
   /** Rows of the list shown at once; hosts lower it to fit their screen. */
   maxVisible: number;
+  /** Screen lines available; the list gives up rows while the details panel is open. */
+  maxHeight?: number;
   onSelect?: (value: T) => void;
   onCancel?: () => void;
+  /** Called when content changes without input, so the host can render. */
+  onChange?: () => void;
+  private detailLines?: string[];
+  private detailTimer?: ReturnType<typeof setInterval>;
 
   constructor(private readonly items: PickerItem<T>[], private readonly options: PickerOptions) {
     this.paint = options.paint ?? paint(true);
@@ -81,8 +89,9 @@ export class FuzzyPicker<T> implements Component, Focusable {
 
   handleInput(data: string): void {
     const rows = this.rows();
-    if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl('c')) || matchesKey(data, Key.ctrl('d'))) { this.onCancel?.(); return; }
-    if (matchesKey(data, Key.enter)) { const row = rows[this.selected]; if (row) this.onSelect?.(row.value); return; }
+    if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl('c')) || matchesKey(data, Key.ctrl('d'))) { this.dispose(); this.onCancel?.(); return; }
+    if (matchesKey(data, Key.enter)) { const row = rows[this.selected]; if (row) { this.dispose(); this.onSelect?.(row.value); } return; }
+    if (this.options.details && matchesKey(data, Key.ctrl('s'))) { this.toggleDetails(); return; }
     const page = this.visibleCount();
     if (matchesKey(data, Key.up) || matchesKey(data, Key.ctrl('p'))) this.selected = Math.max(this.selected - 1, 0);
     else if (matchesKey(data, Key.down) || matchesKey(data, Key.ctrl('n'))) this.selected = Math.min(this.selected + 1, rows.length - 1);
@@ -98,7 +107,38 @@ export class FuzzyPicker<T> implements Component, Focusable {
 
   invalidate(): void { this.input.invalidate(); }
 
-  private visibleCount(): number { return Math.max(this.maxVisible, 1); }
+  get detailsOpen(): boolean { return this.detailTimer !== undefined; }
+
+  /** Show or hide the details panel. While shown it reloads on a timer. */
+  toggleDetails(): void {
+    const details = this.options.details;
+    if (!details) return;
+    if (this.detailTimer) { this.dispose(); this.detailLines = undefined; this.onChange?.(); return; }
+    this.detailLines = [this.paint.dim('  loading…')];
+    let loading = false;
+    const load = () => {
+      if (loading) return;
+      loading = true;
+      void details.load().then(lines => { if (this.detailTimer) { this.detailLines = lines; this.onChange?.(); } }, () => {})
+        .finally(() => { loading = false; });
+    };
+    this.detailTimer = setInterval(load, details.intervalMs ?? 1000);
+    this.detailTimer.unref?.();
+    load();
+    this.onChange?.();
+  }
+
+  /** Stop the details timer. Choosing or cancelling does this; hosts call it on teardown. */
+  dispose(): void {
+    if (this.detailTimer) clearInterval(this.detailTimer);
+    this.detailTimer = undefined;
+  }
+
+  private visibleCount(): number {
+    const panel = this.detailLines ? this.detailLines.length + 3 : 0;
+    const fit = this.maxHeight === undefined ? this.maxVisible : Math.floor((this.maxHeight - 8 - panel) / 2);
+    return Math.max(Math.min(this.maxVisible, fit), 1);
+  }
 
   render(width: number): string[] {
     const p = this.paint;
@@ -109,8 +149,12 @@ export class FuzzyPicker<T> implements Component, Focusable {
     if (this.selected >= this.scroll + visible) this.scroll = this.selected - visible + 1;
     this.scroll = Math.min(this.scroll, Math.max(rows.length - visible, 0));
 
-    const title = p.bold(plainText(this.options.title)) + (this.options.subtitle ? p.dim(`  ${plainText(this.options.subtitle)}`) : '');
-    const lines = [truncateToWidth(title, width), ...this.input.render(width), ''];
+    const title = p.bold(plainText(this.options.title)) + (this.options.subtitle ? `  ${this.options.subtitle}` : '');
+    const lines = [truncateToWidth(title, width)];
+    if (this.detailLines && this.options.details) {
+      lines.push('', p.accent(plainText(this.options.details.title)), ...this.detailLines.map(line => truncateToWidth(line, width)), '');
+    }
+    lines.push(...this.input.render(width), '');
 
     // Lay out every normal row, not only matches, so columns stay put while typing.
     const normal = this.items.filter(item => !item.pinned);
@@ -128,7 +172,8 @@ export class FuzzyPicker<T> implements Component, Focusable {
       if (item.note) lines.push(truncateToWidth(`    ${p.dim(plainText(item.note))}`, width));
     });
     if (rows.length > visible) lines.push(p.dim(`  ${this.selected + 1}/${rows.length}`));
-    lines.push('', truncateToWidth(p.dim(`type to search · ↑/↓ move · enter ${this.options.action ?? 'select'} · esc cancel`), width));
+    const details = this.options.details ? ` · ctrl+s ${this.detailsOpen ? 'hide status' : 'status'}` : '';
+    lines.push('', truncateToWidth(p.dim(`type to search · ↑/↓ move · enter ${this.options.action ?? 'select'} · esc cancel${details}`), width));
     return lines;
   }
 }
@@ -146,12 +191,15 @@ export async function runPicker<T>(picker: FuzzyPicker<T>, terminal: Terminal = 
       const { hardwareCursorRow } = tui.captureRenderState();
       terminal.write(`${hardwareCursorRow > 0 ? `\x1b[${hardwareCursorRow}A` : ''}\r\x1b[J`);
       tui.stop({ preserveScreen: true });
+      picker.dispose();
       resolve(value);
     };
     picker.onSelect = value => finish(value);
     picker.onCancel = () => finish();
+    picker.onChange = () => tui.requestRender();
     // The picker must fit on screen: lines scrolled off the top could not be erased.
     // Rows can carry a note line, so allow two lines per row.
+    picker.maxHeight = terminal.rows;
     picker.maxVisible = Math.max(Math.min(picker.maxVisible, Math.floor((terminal.rows - 8) / 2)), 1);
     tui.addChild(picker);
     tui.setFocus(picker);

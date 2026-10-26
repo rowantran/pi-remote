@@ -1669,3 +1669,75 @@ test('/resume shows the same rows as pi-remote resume and never opens a session 
   terminal.input('4'); terminal.input('\r'); await flush();
   assert.deepEqual(connection.requests.filter(request => request.params?.command?.type === 'switch_session').map(request => request.params!.command.sessionPath), ['/s/old.jsonl']);
 });
+
+const daemonFacts = {
+  pid: 4242, release: '/home/me/.local/share/pi-remote/releases/abc1234', startedAt: new Date(Date.now() - 3 * 3_600_000).toISOString(),
+  piVersion: '1.0.4', nodeVersion: 'v22.19.0',
+  host: { hostname: 'devbox', platform: 'linux', arch: 'x64', uptimeSeconds: 90_000, loadavg: [0.5, 0.25, 0.125], cpus: 8, totalMemory: 32 * 1024 ** 3, freeMemory: 8 * 1024 ** 3 },
+};
+
+test('footer shows the latest daemon round trip after the host and colors slow links', async t => {
+  const connection = new FakeConnection();
+  let delay = 0;
+  connection.handler = async method => { if (method === 'ping') await new Promise(resolve => setTimeout(resolve, delay)); return {}; };
+  const { ui } = launch(t, snapshot(), connection, { host: 'devbox', latencyIntervalMs: 60_000 });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.match(screen(ui), /devbox \d+(\.\d)? ms ·/);
+  assert.ok(connection.requests.some(request => request.method === 'ping'));
+  delay = 170;
+  await (ui as any).sampleLatency();
+  ui.tui.renderNow();
+  assert.match(ui.tui.getScreenLines().join('\n'), /\x1b\[33m1\d\d ms\x1b\[39m/);
+});
+
+test('latency sampling is opt-in and falls back to list on daemons without ping', async t => {
+  const quiet = launch(t, snapshot(), new FakeConnection(), { host: 'devbox' });
+  await flush();
+  assert.ok(!quiet.connection.requests.some(request => request.method === 'ping'));
+  const connection = new FakeConnection();
+  connection.handler = method => { if (method === 'ping') throw new Error('Unknown daemon method: ping'); return method === 'list' ? [] : {}; };
+  const { ui } = launch(t, snapshot(), connection, { host: 'devbox', latencyIntervalMs: 60_000 });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  await (ui as any).sampleLatency();
+  assert.deepEqual(connection.requests.filter(request => ['ping', 'list'].includes(request.method)).map(request => request.method), ['ping', 'list', 'list']);
+  assert.match(screen(ui), /devbox \d+(\.\d)? ms/);
+});
+
+test('Ctrl+S and /status open a live connection panel with daemon and host details', async t => {
+  const connection = new FakeConnection();
+  connection.handler = method => method === 'status' ? daemonFacts : {};
+  const { ui, terminal, submit } = launch(t, snapshot({ slot: { id: 'slot', number: 3, cwd: '/remote/project', createdAt: new Date(Date.now() - 7_200_000).toISOString(), status: 'running', clients: 1 } }), connection, { host: 'devbox' });
+  terminal.input('\x13');
+  await flush(); await flush();
+  const text = screen(ui);
+  assert.match(text, /Connection status/);
+  assert.match(text, /host\s+devbox · connected/);
+  assert.match(text, /latency\s+\d+(\.\d)? ms min .* · 1 sample/);
+  assert.match(text, /slot\s+#3 · running · 1 client attached · started 2h ago/);
+  assert.match(text, /workspace\s+\/remote\/project/);
+  assert.match(text, /daemon\s+pid 4242 · up 3h · release abc1234/);
+  assert.match(text, /machine\s+devbox · linux x64 · up 1d 1h/);
+  assert.match(text, /load\s+0\.50 0\.25 0\.13 · 8 CPUs/);
+  assert.match(text, /memory\s+8\.0 GB free of 32 GB/);
+  terminal.input('\x1b');
+  await flush();
+  assert.doesNotMatch(screen(ui), /Connection status/);
+  submit('/status');
+  await flush(); await flush();
+  assert.match(screen(ui), /Connection status/);
+  terminal.input('\r');
+  await flush();
+  assert.doesNotMatch(screen(ui), /Connection status/);
+  assert.equal(connection.requests.filter(request => request.method === 'status').length, 2);
+});
+
+test('status panel explains an older daemon without host details', async t => {
+  const connection = new FakeConnection();
+  connection.handler = method => { if (method === 'status' || method === 'ping') throw new Error(`Unknown daemon method: ${method}`); return method === 'list' ? [] : {}; };
+  const { ui, terminal } = launch(t, snapshot(), connection, { host: 'devbox' });
+  terminal.input('\x13');
+  await flush(); await flush();
+  const text = screen(ui);
+  assert.match(text, /daemon\s+details need a newer daemon: deploy/);
+  assert.match(text, /slot\s+slot · running · 1 client attached\s*$/m);
+});
