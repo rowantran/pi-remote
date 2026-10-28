@@ -306,7 +306,7 @@ Existing deployed daemons must be upgraded before they support `/reload`; instal
 
 Automatic reconnect applies after a terminal client has attached successfully. It retries transport connections with backoff, obtains a fresh snapshot, and resumes display of the same slot. It does not create a replacement process or repeat prompts, shell commands, dialog answers, session changes, or reload requests. Missing/exited slots and incompatible versions stop recovery. Draft text and pending local attachments remain in the same open client, not in durable storage.
 
-While disconnected, a warning above the footer shows the latest connection error and retry delay. It updates in place instead of printing raw SSH output, remains visible with custom footers, and disappears after successful reattachment. Recovery also repaints the screen to clear stray terminal output.
+While disconnected, a warning above the footer shows the latest connection error and retry delay. It updates in place instead of printing raw SSH output, remains visible with custom footers, and disappears after successful reattachment. A disconnect does not add the built-in footer above a custom footer. Recovery also repaints the screen to clear stray terminal output.
 
 Local notices stay beside the message they followed, so later messages push them up rather than leaving them at the transcript's bottom. Startup notices appear before the conversation. Successful reconnect removes old connection notices and adds one current reattachment notice; unrelated warnings remain. Notices are display-only, bounded to 50, and cleared when the slot's session changes or their message or tool row is no longer in the displayed history.
 
