@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
-import type { RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../../src/protocol/types.js';
+import type { ConnectionRetry, RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../../src/protocol/types.js';
 import { ReconnectingConnection } from '../../src/client/reconnect.js';
 
 function deferred<T>() {
@@ -320,7 +320,9 @@ for (const message of ['Slot not found', 'Slot is not running', 'Daemon restarte
     second.autoAttach = false;
     const { connection, count } = await attached(t, first, second);
     const notices: string[] = [];
+    const retries: ConnectionRetry[] = [];
     connection.onDisconnect(error => notices.push(error.message));
+    connection.onRetry(retry => retries.push(retry));
     first.drop();
     await tick(t, 10);
     second.calls[0].result.reject(new Error(message));
@@ -330,6 +332,10 @@ for (const message of ['Slot not found', 'Slot is not running', 'Daemon restarte
     assert.equal(second.closes, 1);
     assert.deepEqual(second.calls.map(value => value.method), ['attach']);
     assert.equal(notices.at(-1), message);
+    assert.equal(connection.reconnecting, false);
+    connection.onRetry(retry => retries.push(retry));
+    await settle();
+    assert.deepEqual(retries, [], 'permanent attach errors never emit retries');
     await assert.rejects(connection.request('create'), error => (error as Error).message === message);
   });
 }
@@ -369,10 +375,14 @@ for (const message of ['Version mismatch: daemon protocol 2, Pi 0.0.0', 'Daemon 
   test(`a handshake error '${message}' is terminal`, async t => {
     const first = new FakeConnection();
     const { connection, count } = await attached(t, first, new Error(message));
+    const retries: ConnectionRetry[] = [];
+    connection.onRetry(retry => retries.push(retry));
     first.drop();
     await tick(t, 10);
     await tick(t, 1000);
     assert.equal(count(), 2);
+    assert.equal(connection.reconnecting, false);
+    assert.deepEqual(retries, []);
     await assert.rejects(connection.request('list'), error => (error as Error).message === message);
   });
 }
@@ -381,8 +391,14 @@ test('temporary factory failures back off to the maximum; a handshake timeout is
   const first = new FakeConnection();
   const second = new FakeConnection();
   const temporary = new Error('Timed out waiting for the daemon version handshake; remote work was not stopped');
-  const { connection, count } = await attached(t, first, temporary, new Error('ECONNREFUSED'), new Error('Network unavailable'), second);
+  const refused = new Error('ECONNREFUSED'), unavailable = new Error('Network unavailable');
+  const { connection, count } = await attached(t, first, temporary, refused, unavailable, second);
+  const retries: ConnectionRetry[] = [];
+  connection.onRetry(retry => retries.push(retry));
+  assert.equal(connection.reconnecting, false);
   first.drop();
+  assert.equal(connection.reconnecting, true);
+  assert.equal(retries.length, 0);
   await tick(t, 9); assert.equal(count(), 1);
   await tick(t, 1); assert.equal(count(), 2);
   await tick(t, 19); assert.equal(count(), 2);
@@ -394,6 +410,15 @@ test('temporary factory failures back off to the maximum; a handshake timeout is
   const snapshots: number[] = [];
   connection.onReconnect(value => snapshots.push(value.seq));
   assert.deepEqual(snapshots, [0]);
+  assert.equal(connection.reconnecting, false);
+  assert.deepEqual(retries, [
+    { attempt: 1, error: temporary, nextDelayMs: 20 },
+    { attempt: 2, error: refused, nextDelayMs: 40 },
+    { attempt: 3, error: unavailable, nextDelayMs: 40 },
+  ]);
+  connection.onRetry(retry => retries.push(retry));
+  await tick(t, 1000);
+  assert.equal(retries.length, 3, 'success clears the latest retry and stops notifications');
 });
 
 test('late subscriptions receive the recovered snapshot and its bounded event backlog in order', async t => {
@@ -567,6 +592,121 @@ test('default retry delays are one second through ten seconds, capped at ten sec
   connection.close();
   await tick(t, 100_000);
   assert.equal(count, expected);
+});
+
+test('failed recovery attaches and already-dead replacements emit one retry each', async t => {
+  const first = new FakeConnection(), second = new FakeConnection(), dead = new FakeConnection(), fourth = new FakeConnection();
+  second.autoAttach = false;
+  const earlyFailure = new Error('replacement died before subscription');
+  dead.drop(earlyFailure);
+  const { connection, count } = await attached(t, first, second, dead, fourth);
+  const retries: ConnectionRetry[] = [];
+  connection.onRetry(retry => retries.push(retry));
+  first.drop();
+  await tick(t, 10);
+  const attachFailure = new Error('SSH died during recovery attach');
+  second.drop(attachFailure);
+  await settle();
+  assert.deepEqual(retries, [{ attempt: 1, error: attachFailure, nextDelayMs: 20 }]);
+  await tick(t, 20);
+  assert.deepEqual(retries, [
+    { attempt: 1, error: attachFailure, nextDelayMs: 20 },
+    { attempt: 2, error: earlyFailure, nextDelayMs: 40 },
+  ]);
+  await tick(t, 40);
+  assert.equal(count(), 4);
+  assert.equal(connection.reconnecting, false);
+  assert.equal(retries.length, 2);
+});
+
+test('late retry subscriptions replay only the latest failure, after the disconnect microtask, and support unsubscribe', async t => {
+  const first = new FakeConnection(), second = new FakeConnection(), third = new FakeConnection();
+  const failure1 = new Error('first temporary failure'), failure2 = new Error('latest temporary failure');
+  const { connection } = await attached(t, first, failure1, failure2, second, failure1, third);
+  const early: ConnectionRetry[] = [];
+  const offEarly = connection.onRetry(retry => early.push(retry));
+  first.drop();
+  await tick(t, 10);
+  offEarly();
+  await tick(t, 20);
+  assert.equal(early.length, 1);
+  const cancelled: ConnectionRetry[] = [];
+  connection.onRetry(retry => cancelled.push(retry))();
+  const order: string[] = [];
+  const late: ConnectionRetry[] = [];
+  connection.onDisconnect(() => order.push('disconnect'));
+  const offLate = connection.onRetry(retry => { order.push('retry'); late.push(retry); });
+  assert.deepEqual(late, [], 'replay must not be synchronous');
+  await settle();
+  assert.deepEqual(order, ['disconnect', 'retry']);
+  assert.deepEqual(late, [{ attempt: 2, error: failure2, nextDelayMs: 40 }]);
+  assert.deepEqual(cancelled, []);
+  offLate();
+  await tick(t, 40);
+  const afterRecovery: ConnectionRetry[] = [];
+  connection.onRetry(retry => afterRecovery.push(retry));
+  await settle();
+  assert.deepEqual(afterRecovery, []);
+  second.drop();
+  const newDrop: ConnectionRetry[] = [];
+  connection.onRetry(retry => newDrop.push(retry));
+  await settle();
+  assert.deepEqual(newDrop, [], 'a new drop must not replay the prior recovery failure');
+  await tick(t, 10);
+  assert.deepEqual(newDrop, [{ attempt: 1, error: failure1, nextDelayMs: 20 }]);
+  assert.deepEqual(afterRecovery, newDrop);
+  await tick(t, 20);
+  assert.equal(connection.reconnecting, false);
+});
+
+for (const ending of ['close', 'terminal'] as const) {
+  test(`${ending} suppresses queued retry replay and future notifications`, async t => {
+    const first = new FakeConnection(), pending = new FakeConnection();
+    pending.autoAttach = false;
+    const { connection, count } = await attached(t, first, new Error('temporary failure'), pending);
+    first.drop();
+    await tick(t, 10);
+    await tick(t, 20);
+    const retries: ConnectionRetry[] = [];
+    connection.onRetry(retry => retries.push(retry));
+    if (ending === 'close') connection.close();
+    else pending.drop(new Error('Version mismatch: daemon protocol 2'));
+    await settle();
+    assert.equal(connection.reconnecting, false);
+    connection.onRetry(retry => retries.push(retry));
+    await tick(t, 1000);
+    assert.deepEqual(retries, []);
+    assert.equal(count(), 3);
+  });
+}
+
+test('closing from a retry listener stops later listeners and cancels the next attempt', async t => {
+  const first = new FakeConnection();
+  const { connection, count } = await attached(t, first, new Error('temporary failure'));
+  const retries: ConnectionRetry[] = [];
+  connection.onRetry(retry => { retries.push(retry); connection.close(); });
+  connection.onRetry(() => assert.fail('retry listener called after close'));
+  first.drop();
+  await tick(t, 10);
+  assert.equal(retries.length, 1);
+  assert.equal(connection.reconnecting, false);
+  await tick(t, 1000);
+  assert.equal(count(), 2);
+});
+
+test('a factory rejection after close never emits a retry', async t => {
+  const first = new FakeConnection();
+  const opening = deferred<RemoteConnection>();
+  const { connection, count } = await attached(t, first, () => opening.promise);
+  const retries: ConnectionRetry[] = [];
+  connection.onRetry(retry => retries.push(retry));
+  first.drop();
+  await tick(t, 10);
+  connection.close();
+  opening.reject(new Error('late factory failure'));
+  await tick(t, 1000);
+  assert.deepEqual(retries, []);
+  assert.equal(count(), 2);
 });
 
 test('initial factory failure is not retried and invalid backoff options fail before opening', async () => {

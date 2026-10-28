@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer, type Socket } from 'node:net';
 import { join } from 'node:path';
-import { PassThrough } from 'node:stream';
+import { PassThrough, type Readable, type Writable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import test, { type TestContext } from 'node:test';
 import { Connection, handshake, connectSsh } from '../../src/client/connection.js';
@@ -120,6 +120,127 @@ test('SSH rejects unsafe hosts before spawning a process', async () => {
   for (const host of ['', '-oProxyCommand=bad', 'host name', 'host\ncommand']) {
     await assert.rejects(connectSsh({ host }), /SSH host alias/);
   }
+});
+
+async function fakeSsh(t: TestContext, source: string): Promise<void> {
+  const dir = await temporaryDir(t);
+  const script = join(dir, 'ssh.mjs');
+  await writeFile(script, source);
+  await writeFile(join(dir, 'ssh'), `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(script)} "$@"\n`, { mode: 0o700 });
+  const previous = process.env.PATH;
+  process.env.PATH = `${dir}:${previous ?? ''}`;
+  t.after(() => { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous; });
+}
+const sshHello = `import { createInterface } from 'node:readline';
+createInterface({ input: process.stdin }).on('line', line => {
+  const request = JSON.parse(line);
+  if (request.method === 'hello') {
+    process.stderr.write('SSH banner and host-key warning\\n');
+    process.stdout.write(JSON.stringify({ type: 'result', id: request.id, success: true, data: ${JSON.stringify(hello)} }) + '\\n');
+    return;
+  }
+`;
+
+test('a noisy successful SSH handshake never writes to local stderr', { timeout: 5000 }, async t => {
+  await fakeSsh(t, `${sshHello}
+    process.stderr.write('SSH diagnostic during a request\\n');
+    process.stdout.write(JSON.stringify({ type: 'result', id: request.id, success: true, data: [] }) + '\\n');
+  });`);
+  const writes = t.mock.method(process.stderr, 'write', () => true);
+  const connection = await connectSsh({ host: 'fake' });
+  t.after(() => connection.close());
+  assert.deepEqual(await connection.request('list'), []);
+  await delay(20);
+  connection.close();
+  assert.equal(writes.mock.callCount(), 0);
+});
+
+test('SSH handshake failure retains bounded stderr even when stdout ends before the diagnostic', { timeout: 5000 }, async t => {
+  await fakeSsh(t, `process.stdin.resume();
+    process.stdout.end();
+    setTimeout(() => {
+      process.stderr.write('discarded-prefix' + 'x'.repeat(10_000) + '\\nssh: Permission denied\\n', () => process.exit(255));
+    }, 30);`);
+  const writes = t.mock.method(process.stderr, 'write', () => true);
+  const scheduled = t.mock.method(globalThis, 'setTimeout');
+  const cleared = t.mock.method(globalThis, 'clearTimeout');
+  await assert.rejects(connectSsh({ host: 'fake' }), (error: Error) => {
+    assert.match(error.message, /SSH exited \(code=255, signal=null\)/);
+    assert.match(error.message, /ssh: Permission denied/);
+    assert.doesNotMatch(error.message, /discarded-prefix/);
+    assert.ok(error.message.length < 8500, 'diagnostics must remain bounded');
+    assert.equal(error.message.split('ssh: Permission denied').length, 2, 'diagnostic is not duplicated');
+    return true;
+  });
+  const grace = scheduled.mock.calls.find(call => call.arguments[1] === 1000)?.result;
+  assert.ok(grace, 'stdout EOF starts the pre-handshake diagnostic grace timer');
+  assert.ok(cleared.mock.calls.some(call => call.arguments[0] === grace), 'SSH exit clears the grace timer');
+  assert.equal(writes.mock.callCount(), 0);
+});
+
+test('established SSH EOF immediately rejects pending work and later mutations without writes', { timeout: 5000 }, async t => {
+  await fakeSsh(t, `process.stderr.write('discarded-prefix' + 'x'.repeat(10_000) + '\\n\\u001b[31mssh: current diagnostic\\u001b[0m\\n');
+  ${sshHello}
+    process.stdout.end();
+    setTimeout(() => process.stderr.write('ssh: delayed diagnostic\\n', () => process.exit(255)), 200);
+  });`);
+  const writes = t.mock.method(process.stderr, 'write', () => true);
+  const connection = await connectSsh({ host: 'fake' });
+  t.after(() => connection.close());
+  // Let the startup stderr arrive before triggering EOF on the established transport.
+  await delay(20);
+  const { input, output } = connection as unknown as { input: Readable; output: Writable };
+  const outbound = t.mock.method(output, 'write');
+  const ended = once(input, 'end');
+  const disconnected = new Promise<Error>(resolve => connection.onDisconnect(resolve));
+  const pending = assert.rejects(connection.request('list'), /SSH output closed[^]*not retried/);
+  await ended;
+  const rejected = assert.rejects(connection.request('rpc', { slotId: 'slot', command: { type: 'prompt', message: 'do not send after EOF' } }), (error: Error) => {
+    assert.match(error.message, /SSH output closed/);
+    assert.doesNotMatch(error.message, /in-flight command/);
+    return true;
+  });
+  assert.equal(outbound.mock.callCount(), 1, 'only the request made before EOF was written');
+  await Promise.all([pending, rejected]);
+  const error = await disconnected;
+  // Presentation code, not the transport, is responsible for removing control codes.
+  assert.ok(error.message.includes('\u001b[31mssh: current diagnostic\u001b[0m'));
+  assert.doesNotMatch(error.message, /discarded-prefix|delayed diagnostic/);
+  assert.ok(error.message.length < 8500, 'captured diagnostics remain bounded');
+  assert.equal(writes.mock.callCount(), 0);
+});
+
+test('established SSH process exit disconnects even when a descendant holds stdout open', { timeout: 5000 }, async t => {
+  await fakeSsh(t, `import { spawn } from 'node:child_process';
+  ${sshHello}
+    spawn(process.execPath, ['-e', 'setTimeout(() => {}, 500)'], { stdio: ['ignore', 1, 2] }).unref();
+    process.exit(23);
+  });`);
+  const writes = t.mock.method(process.stderr, 'write', () => true);
+  const connection = await connectSsh({ host: 'fake' });
+  t.after(() => connection.close());
+  const { input, output } = connection as unknown as { input: Readable; output: Writable };
+  const outbound = t.mock.method(output, 'write');
+  const disconnected = new Promise<Error>(resolve => connection.onDisconnect(resolve));
+  const pending = assert.rejects(connection.request('list'), /SSH exited \(code=23, signal=null\)[^]*not retried/);
+  const error = await disconnected;
+  assert.equal(input.readableEnded, false, 'disconnect must not wait for the descendant to close stdout');
+  await assert.rejects(connection.request('rpc', { slotId: 'slot', command: { type: 'prompt' } }), /SSH exited \(code=23, signal=null\)/);
+  assert.equal(outbound.mock.callCount(), 1, 'process exit must prevent further mutation writes');
+  await pending;
+  assert.match(error.message, /SSH exited \(code=23, signal=null\)/);
+  assert.equal(writes.mock.callCount(), 0);
+});
+
+test('pre-handshake SSH stdout EOF has a bounded wait when the process remains alive', { timeout: 5000 }, async t => {
+  await fakeSsh(t, `process.stdin.resume();
+    process.stderr.write('ssh: bridge stdout closed\\n');
+    process.stdout.end();
+    setInterval(() => {}, 10_000);
+  `);
+  const writes = t.mock.method(process.stderr, 'write', () => true);
+  await assert.rejects(connectSsh({ host: 'fake' }), /SSH output closed[^]*ssh: bridge stdout closed/);
+  assert.equal(writes.mock.callCount(), 0);
 });
 
 test('private state directory is created as 0700 and existing unsafe modes are unchanged', async t => {

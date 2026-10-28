@@ -54,11 +54,15 @@ export interface Snapshot {
   presentation?: { models?: RecordValue[]; stats?: RecordValue; gitBranch?: string; homeDir?: string; [key: string]: any };
 }
 export interface CreateOptions { cwd?: string; args?: string[]; sessionPath?: string; parentSlotId?: string; prompt?: string; expectedParentSessionId?: string }
+/** A failed recovery attempt and the delay before the next attempt. */
+export interface ConnectionRetry { attempt: number; error: Error; nextDelayMs: number }
 export interface RemoteConnection {
+  readonly reconnecting?: boolean;
   request<M extends DaemonMethod>(method: M, ...args: RequestArgs<M>): Promise<MethodResult<M>>;
   onEvent(listener: (event: RemoteEvent) => void): () => void;
   onDisconnect(listener: (error: Error) => void): () => void;
   onReconnect?(listener: (snapshot: Snapshot) => void): () => void;
+  onRetry?(listener: (retry: ConnectionRetry) => void): () => void;
   close(): void;
 }
 export function errorText(error: unknown): string {

@@ -34,7 +34,7 @@ import {
 } from '@earendil-works/pi-tui';
 import {
   errorText, PI_VERSION, PROTOCOL_VERSION,
-  type RecordValue, type RemoteConnection, type RemoteEvent, type SlotInfo, type Snapshot,
+  type ConnectionRetry, type RecordValue, type RemoteConnection, type RemoteEvent, type SlotInfo, type Snapshot,
 } from '../protocol/types.js';
 import {
   DIALOG_METHODS, HistoryMismatchError, RemoteView, restoredQueueText, safeText, transcriptMessages,
@@ -150,6 +150,8 @@ export class RemoteTui {
   private root: VStack;
   private transcriptScroll: ScrollView;
   private connected = true;
+  private connectionError?: Error;
+  private retryStatus?: ConnectionRetry;
   private detached = false;
   /** True after /quit stopped the remote Pi process; the client then closed. */
   private quit = false;
@@ -601,6 +603,7 @@ export class RemoteTui {
       if (this.connection.onReconnect) this.unsubscribe.push(this.connection.onReconnect(snapshot => {
         if (this.detached) return;
         this.connected = true; this.generation++;
+        this.connectionError = undefined; this.retryStatus = undefined;
         this.connectedAt = Date.now(); this.reconnects++; this.latencySamples = [];
         this.localDialog?.cancel();
         this.resetSnapshotFlight();
@@ -620,6 +623,8 @@ export class RemoteTui {
         this.answering.clear();
         this.transcript.invalidate(); this.syncBottom(); this.observeSnapshot();
         this.notify('Reattached. Remote history restored; no submitted commands were replayed.', 'connection');
+        // SSH or another external writer may have changed cells outside the renderer's cache.
+        this.tui.requestRender(true);
         void this.refreshPresentationData();
       }));
       // ReconnectingConnection drains its backlog from onEvent; install snapshot replacement first.
@@ -627,11 +632,17 @@ export class RemoteTui {
       this.unsubscribe.push(this.connection.onDisconnect(error => {
         if (this.detached) return;
         this.connected = false; this.generation++;
+        this.connectionError = error; this.retryStatus = undefined;
         this.resetSnapshotFlight();
         this.lastEscapeTime = undefined;
         this.localDialog?.cancel(); // A local selection must not survive into a different snapshot.
         // Do not resolve remote dialogs, clear the queue, abort, or replay requests.
-        this.notify(`Connection lost: ${errorText(error)}. Remote work and dialogs remain active. ${this.connection.onReconnect ? 'Reconnecting automatically.' : 'Run attach again to reconnect.'} No commands will be replayed. Ctrl+D detaches.`, 'connection');
+        this.transcript.clearConnectionNotices();
+        this.syncBottom();
+      }));
+      if (this.connection.onRetry) this.unsubscribe.push(this.connection.onRetry(status => {
+        if (this.detached || this.connected) return;
+        this.retryStatus = status;
         this.syncBottom();
       }));
       this.unsubscribe.push(this.tui.addInputListener(data => {
@@ -1029,12 +1040,31 @@ export class RemoteTui {
     if (this.pendingAttachments.length) this.bottom.addChild(new Text(muted(`Attached: ${this.pendingAttachments.map(file => safeText(file.path)).join(', ')} · /clear-attachments to remove`), 0, 0));
     this.bottom.addChild(control);
     widget('belowEditor');
+    if (!this.connected) this.addConnectionWarning();
     if (this.presentation?.footer) {
       if (!this.connected || this.view.snapshot.slot.status !== 'running') this.bottom.addChild(new Text(this.footer(), 0, 0));
       else if (sideParentLabel(this.view.snapshot.slot)) this.bottom.addChild(new Text(muted(sideParentLabel(this.view.snapshot.slot)!), 0, 0));
       this.bottom.addChild(this.presentation.footer);
     } else this.bottom.addChild(new DynamicLines(() => [this.footer()]));
     this.tui.setFocus(control); this.tui.requestRender();
+  }
+
+  /** One renderer-owned warning, replaced on each retry and removed on reattachment. */
+  private addConnectionWarning(): void {
+    // SSH diagnostics can include multiple lines and terminal controls. Keep the last useful
+    // line for display; the transport retains the full bounded diagnostic in its Error.
+    const error = this.retryStatus?.error ?? this.connectionError;
+    const diagnostic = safeText(errorText(error ?? 'Transport closed'))
+      .replace(/\s*The result of an in-flight command may be unknown; it was not retried\.$/, '');
+    const reason = diagnostic.split('\n').map(line => line.trim()).filter(Boolean).at(-1) ?? 'Transport closed';
+    const summary = truncateToWidth(reason.replace(/\s+/g, ' '), 240, '…');
+    const host = this.options.host ? ` (${safeText(this.options.host).replace(/\s+/g, ' ')})` : '';
+    const recovering = this.connection.reconnecting ?? Boolean(this.connection.onReconnect);
+    const retry = recovering && this.retryStatus
+      ? `Attempt ${this.retryStatus.attempt} failed; retrying in ${this.retryStatus.nextDelayMs / 1000}s.`
+      : recovering ? 'Reconnecting automatically.' : 'Run attach again to reconnect.';
+    this.bottom.addChild(new Text(this.localTheme.fg('warning', `⚠ Connection lost${host}: ${summary}`), 0, 0));
+    this.bottom.addChild(new Text(muted(`${retry} Remote work continues. No commands replayed. Ctrl+D detaches.`), 0, 0));
   }
 
   /** Mirror Pi's pending-messages container: spacer, dim one-line entries, then the dequeue hint. */

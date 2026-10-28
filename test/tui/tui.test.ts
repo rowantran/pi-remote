@@ -4,10 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import type { Terminal } from '@earendil-works/pi-tui';
-import { getCellDimensions, Loader, setCellDimensions, stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
+import { getCellDimensions, Loader, setCellDimensions, stripTerminalSequences, Text, visibleWidth } from '@earendil-works/pi-tui';
 import type { GhosttySplitOptions } from '../../src/tui/side-launcher.js';
-import type { RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../../src/protocol/types.js';
+import type { ConnectionRetry, RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../../src/protocol/types.js';
 import { RemoteTui, type TuiOptions } from '../../src/tui/tui.js';
+import { ReconnectingConnection } from '../../src/client/reconnect.js';
 import { detachMessage, stoppedMessage } from '../../src/tui/session-labels.js';
 import { sessionItems } from '../../src/tui/session-table.js';
 import { paint } from '../../src/tui/table.js';
@@ -66,9 +67,14 @@ class FakeConnection implements RemoteConnection {
   disconnect() { for (const listener of this.disconnects) listener(new Error('network lost')); }
 }
 class ReconnectingFakeConnection extends FakeConnection {
+  reconnecting?: boolean;
   reconnected?: (snapshot: Snapshot) => void;
+  retry?: (status: ConnectionRetry) => void;
   onReconnect(listener: (snapshot: Snapshot) => void) {
     this.reconnected = listener; return () => { this.reconnected = undefined; };
+  }
+  onRetry(listener: (status: ConnectionRetry) => void) {
+    this.retry = listener; return () => { this.retry = undefined; };
   }
 }
 function backgroundNotice(timestamp: number): RecordValue {
@@ -340,6 +346,106 @@ test('starting-slot refresh preserves MCP warnings while learning the initial se
   ready.seq = 4; ready.state = { sessionId: 'next-session', sessionFile: '/remote/next-session.jsonl' };
   connection.emit(event(4, { type: 'remote_refresh' })); await flush();
   assert.doesNotMatch(rows(), /MCP_STARTUP_WARNING/);
+});
+
+test('connection warning updates in place, survives custom footers, and clears on reconnect', async t => {
+  for (const customFooter of [false, true]) await t.test(customFooter ? 'custom footer' : 'default footer', async t => {
+    const connection = new ReconnectingFakeConnection();
+    const { ui, terminal, finished } = launch(t, snapshot(), connection, {
+      host: 'devbox', appearance: 'dark', theme: 'dark',
+      presentationConfig: '/nonexistent/pi-remote-warning-test.json',
+      presentationFactories: customFooter ? [pi => {
+        pi.on('session_start', (_event, ctx) => ctx.ui.setFooter(() => new Text('CUSTOM_FOOTER', 0, 0)));
+      }] : [],
+    });
+    await ui.initialize();
+    ui.setDraft('preserved local draft');
+    connection.emit(event(1, { type: 'remote_warning', message: 'UNRELATED_WARNING' }));
+    connection.disconnect();
+    let output = screen(ui);
+    assert.match(output, /⚠ Connection lost \(devbox\): network lost/);
+    assert.match(output, /Reconnecting automatically/);
+    if (customFooter) assert.match(output, /CUSTOM_FOOTER/);
+    const retry = connection.retry!;
+    retry({ attempt: 1, error: new Error('SSH exited\nfirst failure'), nextDelayMs: 2000 });
+    output = screen(ui);
+    assert.match(output, /first failure/);
+    assert.match(output, /Attempt 1 failed; retrying in 2s/);
+    assert.equal((output.match(/⚠ Connection lost/g) ?? []).length, 1);
+    retry({ attempt: 2, error: new Error('SSH exited\n\x1b[2J\x00Operation timed out\r\n The result of an in-flight command may be unknown; it was not retried.'), nextDelayMs: 4000 });
+    output = screen(ui);
+    assert.match(output, /Operation timed out/);
+    assert.match(output, /Attempt 2 failed; retrying in 4s/);
+    assert.doesNotMatch(output, /first failure|SSH exited|Attempt 1/);
+    assert.equal((output.match(/⚠ Connection lost/g) ?? []).length, 1);
+    const warning = ui.tui.getScreenLines().find(row => row.includes('⚠ Connection lost'))!;
+    assert.match(warning, /\x1b\[/, 'warning is styled by the TUI');
+    assert.doesNotMatch(warning, /\x1b\[2J|\x00/, 'diagnostics cannot execute terminal controls');
+    assert.equal(ui.editor.getExpandedText(), 'preserved local draft');
+    const render = t.mock.method(ui.tui, 'requestRender');
+    connection.reconnected?.(snapshot({ seq: 1 }));
+    output = screen(ui);
+    assert.doesNotMatch(output, /Connection lost|timed out|retrying|Attempt 2/);
+    assert.match(output, /Reattached\./);
+    assert.match(output, /UNRELATED_WARNING/);
+    assert.ok(render.mock.calls.some(call => call.arguments[0] === true), 'reconnection forces a full repaint');
+    // A stale callback must not recreate the warning after recovery or detachment.
+    retry({ attempt: 3, error: new Error('STALE_RETRY'), nextDelayMs: 8000 });
+    assert.doesNotMatch(screen(ui), /STALE_RETRY/);
+    ui.detach(); await finished;
+    assert.equal(connection.retry, undefined, 'retry subscription is removed');
+    const writes = terminal.output;
+    retry({ attempt: 4, error: new Error('DETACHED_RETRY'), nextDelayMs: 10000 });
+    assert.equal(terminal.output, writes);
+  });
+});
+
+test('real recovery delivers retry diagnostics to a late TUI and clears them after reattaching', async t => {
+  const first = new FakeConnection(); first.handler = () => snapshot();
+  const second = new FakeConnection(); second.handler = method => method === 'attach' ? snapshot({ seq: 2 }) : {};
+  const recovery = deferred<RemoteConnection>();
+  let calls = 0;
+  const connection = await ReconnectingConnection.connect(async () => {
+    if (++calls === 1) return first;
+    if (calls === 2) throw new Error('SSH exited\nssh: connect to host devbox port 22: Operation timed out');
+    return recovery.promise;
+  }, { minDelayMs: 0, maxDelayMs: 1 });
+  t.after(() => connection.close());
+  await connection.request('attach', { slotId: 'slot' });
+  const failed = new Promise<void>(resolve => connection.onRetry(() => resolve()));
+  first.disconnect(); await failed;
+  const terminal = new FakeTerminal();
+  const ui = new RemoteTui(connection, 'slot', snapshot(), terminal, { host: 'devbox' });
+  ui.run(); t.after(() => ui.detach());
+  ui.setDraft('keep my draft');
+  await flush();
+  assert.match(screen(ui), /Operation timed\s+out/);
+  assert.match(screen(ui), /Attempt 1 failed/);
+  const reattached = new Promise<void>(resolve => connection.onReconnect(() => resolve()));
+  recovery.resolve(second); await reattached;
+  const output = screen(ui);
+  assert.match(output, /Reattached\./);
+  assert.doesNotMatch(output, /Connection lost|timed out|Attempt 1/);
+  assert.equal(ui.editor.getExpandedText(), 'keep my draft');
+  assert.equal(first.requests.length, 1, 'only the initial attach was sent before losing the connection');
+  assert.equal(second.requests.filter(request => request.method === 'attach').length, 1);
+  assert.ok(second.requests.every(request => request.method !== 'rpc' || String(request.params?.command?.type).startsWith('get_')),
+    'recovery never replays a prompt or another mutation');
+});
+
+test('connection warning stays bounded and distinguishes terminal errors from retries', async t => {
+  const connection = new ReconnectingFakeConnection();
+  const { ui } = launch(t, snapshot(), connection);
+  connection.disconnect();
+  connection.retry?.({ attempt: 1, error: new Error('x'.repeat(16000)), nextDelayMs: 2000 });
+  let output = screen(ui);
+  assert.ok(output.length < 2000, 'large diagnostics do not overwhelm the editor');
+  connection.reconnecting = false;
+  for (const listener of connection.disconnects) listener(new Error('Slot not found'));
+  output = screen(ui);
+  assert.match(output, /Slot not found/);
+  assert.match(output, /Run attach again to reconnect/);
+  assert.doesNotMatch(output, /retrying|Reconnecting automatically|Attempt 1/);
 });
 
 test('repeated reconnects clear obsolete connection notices, preserve warnings and do not replay commands', async t => {
