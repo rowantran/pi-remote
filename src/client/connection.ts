@@ -16,10 +16,11 @@ export class Connection implements RemoteConnection {
   private error?: Error;
   private closed = false;
   private detachInput: () => void;
-  private onEnd = () => this.fail(new Error('Disconnected. Remote work continues; attach again to restore the screen.'));
-  private onClose = () => this.fail(new Error('Connection closed'));
+  private onEnd = () => this.onInputClosed ? this.onInputClosed() : this.fail(new Error('Disconnected. Remote work continues; attach again to restore the screen.'));
+  private onClose = () => this.onInputClosed ? this.onInputClosed() : this.fail(new Error('Connection closed'));
   private onError = (error: Error) => this.fail(error);
-  constructor(private input: Readable, private output: Writable, private stop: () => void) {
+  constructor(private input: Readable, private output: Writable, private stop: () => void,
+    private onInputClosed?: () => void) {
     this.detachInput = readJsonl(input, record => {
       if (this.error || this.closed) return;
       if (record.type === 'result') {
@@ -120,9 +121,25 @@ export async function connectSsh(options: SshOptions): Promise<Connection> {
   const command = `${remotePath(options.remoteBin ?? '~/.local/share/pi-remote/bin/pi-remote')} bridge${options.stateDir ? ` --state-dir ${shellQuote(options.stateDir)}` : ''}`;
   const child = spawn('ssh', ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3', options.host, command], { stdio: ['pipe', 'pipe', 'pipe'] });
   let diagnostics = '';
-  child.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk.toString()).slice(-8192); process.stderr.write(chunk); });
+  // SSH banners, host-key warnings, and diagnostics must never write over the TUI.
+  child.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk.toString()).slice(-8192); });
   let killTimer: NodeJS.Timeout | undefined;
+  let eofTimer: NodeJS.Timeout | undefined;
+  let handshakeComplete = false;
+  let transportEnded = false;
+  const transportError = () => new Error(`${child.exitCode !== null || child.signalCode !== null
+    ? `SSH exited (code=${child.exitCode}, signal=${child.signalCode})`
+    : 'SSH output closed. Remote work continues; attach again to restore the screen.'}${diagnostics ? `\n${diagnostics}` : ''}`);
+  const onTransportEnd = () => {
+    transportEnded = true;
+    // Once established, EOF or process exit must block new writes immediately.
+    if (handshakeComplete) { connection.disconnect(transportError()); return; }
+    // During negotiation only, let SSH close and drain its diagnostic stderr first.
+    eofTimer ??= setTimeout(() => connection.disconnect(transportError()), 1000);
+    eofTimer.unref();
+  };
   const connection = new Connection(child.stdout, child.stdin, () => {
+    clearTimeout(eofTimer);
     child.stdin.destroy();
     child.stdout.resume();
     if (child.exitCode !== null || child.signalCode !== null || !child.pid) return;
@@ -130,12 +147,24 @@ export async function connectSsh(options: SshOptions): Promise<Connection> {
     // This deadline affects only the local SSH transport, never a daemon or Pi slot.
     killTimer = setTimeout(() => child.kill('SIGKILL'), 2000);
     killTimer.unref();
-  });
+  }, onTransportEnd);
   const onError = (error: Error) => connection.disconnect(new Error(`Could not start SSH: ${error.message}`));
-  const onExit = (code: number | null, signal: NodeJS.Signals | null) => connection.disconnect(new Error(`SSH exited (code=${code}, signal=${signal})${diagnostics ? `\n${diagnostics}` : ''}`));
   child.once('error', onError);
-  child.once('exit', onExit);
-  child.once('close', () => { clearTimeout(killTimer); child.off('error', onError); child.off('exit', onExit); });
-  try { await handshake(connection); return connection; }
+  child.once('exit', onTransportEnd);
+  child.once('close', (code, signal) => {
+    clearTimeout(killTimer);
+    clearTimeout(eofTimer);
+    child.off('error', onError);
+    child.off('exit', onTransportEnd);
+    connection.disconnect(new Error(`SSH exited (code=${code}, signal=${signal})${diagnostics ? `\n${diagnostics}` : ''}`));
+  });
+  try {
+    await handshake(connection);
+    handshakeComplete = true;
+    // EOF/exit may arrive alongside the successful hello, before this continuation.
+    if (transportEnded) { const error = transportError(); connection.disconnect(error); throw error; }
+    return connection;
+  }
   catch (error: any) { connection.close(); throw new Error(`${error.message}${diagnostics && !error.message.includes(diagnostics) ? `\n${diagnostics}` : ''}`); }
+  finally { clearTimeout(eofTimer); }
 }

@@ -1,4 +1,4 @@
-import type { RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../protocol/types.js';
+import type { ConnectionRetry, RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../protocol/types.js';
 import type { DaemonMethod, MethodResult, RequestArgs } from '../protocol/methods.js';
 
 export interface ReconnectOptions { minDelayMs?: number; maxDelayMs?: number }
@@ -32,6 +32,8 @@ export class ReconnectingConnection implements RemoteConnection {
   private events = new Set<(event: RemoteEvent) => void>();
   private disconnects = new Set<(error: Error) => void>();
   private reconnects = new Set<(snapshot: Snapshot) => void>();
+  private retries = new Set<(retry: ConnectionRetry) => void>();
+  private latestRetry?: ConnectionRetry;
   private backlog: RemoteEvent[] = [];
   private backlogBytes = 0;
   private draining = false;
@@ -58,6 +60,8 @@ export class ReconnectingConnection implements RemoteConnection {
     if (wrapper.state !== 'connected') throw wrapper.error;
     return wrapper;
   }
+
+  get reconnecting(): boolean { return this.state === 'recovering'; }
 
   async request<M extends DaemonMethod>(method: M, ...args: RequestArgs<M>): Promise<MethodResult<M>> {
     const params = (args[0] ?? {}) as RecordValue;
@@ -117,6 +121,18 @@ export class ReconnectingConnection implements RemoteConnection {
     return () => { this.reconnects.delete(listener); };
   }
 
+  /** Late subscribers receive only the latest failed attempt, while still recovering. */
+  onRetry(listener: (retry: ConnectionRetry) => void): () => void {
+    if (this.state !== 'closed' && this.state !== 'terminal') {
+      this.retries.add(listener);
+      const retry = this.latestRetry;
+      if (this.state === 'recovering' && retry) queueMicrotask(() => {
+        if (this.retries.has(listener) && this.state === 'recovering' && this.latestRetry === retry) this.call(listener, retry);
+      });
+    }
+    return () => { this.retries.delete(listener); };
+  }
+
   /** Detach only this client; cancel recovery without stopping the remote slot. */
   close(): void {
     if (this.state === 'closed') return;
@@ -130,6 +146,8 @@ export class ReconnectingConnection implements RemoteConnection {
     this.events.clear();
     this.disconnects.clear();
     this.reconnects.clear();
+    this.retries.clear();
+    this.latestRetry = undefined;
     this.recoveredSnapshot = undefined;
   }
 
@@ -156,8 +174,10 @@ export class ReconnectingConnection implements RemoteConnection {
 
   private lost(generation: Generation, error: Error): void {
     if (this.current !== generation) return;
+    if (this.state === 'connected') this.latestRetry = undefined;
     this.error = error;
     this.state = this.slotId && !this.exited && !incompatible(error) && !unavailableSlot(error) ? 'recovering' : 'terminal';
+    if (this.state === 'terminal') { this.latestRetry = undefined; this.retries.clear(); }
     this.release(error);
     this.clearBacklog();
     this.notifyDisconnect(error); // Notify before even scheduling a retry.
@@ -177,6 +197,8 @@ export class ReconnectingConnection implements RemoteConnection {
   private terminal(error: Error): void {
     this.state = 'terminal';
     this.error = error;
+    this.latestRetry = undefined;
+    this.retries.clear();
     this.cancelDelay?.();
     this.release(error);
     this.clearBacklog();
@@ -196,23 +218,26 @@ export class ReconnectingConnection implements RemoteConnection {
     const slotId = this.slotId;
     if (!slotId) return;
     let delay = this.minDelayMs;
+    let attempt = 0;
     while (this.state === 'recovering') {
       await this.wait(delay);
       if (this.state !== 'recovering') return;
+      attempt++;
       delay = Math.min(this.maxDelayMs, Math.max(1, delay * 2));
       let generation: Generation | undefined;
       try {
         const connection = await this.factory();
         if (this.state !== 'recovering') { connection.close(); return; }
         generation = this.install(connection, true);
-        if (this.current !== generation) continue;
+        if (this.current !== generation) throw generation.error ?? new Error('Connection closed');
         const snapshot = await connection.request('attach', { slotId, ...(this.filterTranscript ? { filterTranscript: true } : {}) });
-        if (this.current !== generation || this.state !== 'recovering') continue;
+        if (this.current !== generation || this.state !== 'recovering') throw generation.error ?? new Error('Connection closed');
         this.validateSnapshot(snapshot, slotId);
         this.acceptSnapshot(snapshot);
         this.recoveredSnapshot = snapshot;
         this.state = 'connected';
         this.error = undefined;
+        this.latestRetry = undefined;
         for (const listener of [...this.reconnects]) {
           if (this.current !== generation) break;
           this.call(listener, snapshot);
@@ -230,6 +255,13 @@ export class ReconnectingConnection implements RemoteConnection {
         if (incompatible(failure) || unavailableSlot(failure) || (generation && this.current === generation)) {
           this.terminal(failure);
           return;
+        }
+        const retry: ConnectionRetry = { attempt, error: generation?.error ?? failure, nextDelayMs: delay };
+        this.error = retry.error;
+        this.latestRetry = retry;
+        for (const listener of [...this.retries]) {
+          if (this.state !== 'recovering' || this.latestRetry !== retry) break;
+          if (this.retries.has(listener)) this.call(listener, retry);
         }
       }
     }
