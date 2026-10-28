@@ -4,6 +4,8 @@ import { readJsonl, writeJsonl } from '../protocol/jsonl.js';
 import { errorText, type RecordValue } from '../protocol/types.js';
 
 interface Pending { resolve: (response: RecordValue) => void; reject: (error: Error) => void; timer?: NodeJS.Timeout }
+/** The program and leading arguments that start Pi. The daemon appends `--mode rpc`. */
+export interface Launcher { executable: string; prefixArgs: string[] }
 export interface PiLaunch { executable: string; prefixArgs?: string[]; cwd: string; args: string[]; env?: NodeJS.ProcessEnv }
 
 /** Owns ONLY the public stdio RPC interface. No AgentSession, extensions, or harness internals. */

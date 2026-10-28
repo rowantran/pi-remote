@@ -26,7 +26,7 @@ let created=false;
 const screen=async()=>(await tmux('capture-pane','-p','-S','-100','-t',tmuxName)).stdout;
 async function until(matches:(screen:string)=>boolean){for(let i=0;i<120;i++){const output=await screen();if(matches(output))return output;await sleep(100);}throw new Error(`Terminal condition timed out:\n${await screen()}`);}
 try {
-  const slot=await client.request('create',{cwd:root,args:['--session-dir',`${root}/history`]});slotId=slot.id;
+  const slot=await client.request('create',{cwd:root,sandboxed:false,args:['--session-dir',`${root}/history`]});slotId=slot.id;
   const cli=fileURLToPath(new URL('../../dist/cli/main.js',import.meta.url));
   const command=['node',cli,'attach','--host',host,'1','--state-dir',stateDir,'--ui-extension',adapter,'--ui-config','/tmp/pi-remote-no-ui-config.json','--theme','gruvbox-dark'].map(shellQuote).join(' ');
   await tmux('new-session','-d','-s',tmuxName,'-x','140','-y','45',`exec ${command}`);created=true;

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
-import { configPath, defaultCwd, defaultHost, loadConfig, parseConfig } from '../../src/cli/config.js';
+import { configPath, defaultCwd, defaultHost, launcher, loadConfig, parseConfig } from '../../src/cli/config.js';
 import type { WebConfig } from '../../src/config/client.js';
 
 test('config path follows XDG_CONFIG_HOME and ignores relative values', () => {
@@ -105,4 +105,25 @@ test('missing config means no default cwd; cwd precedence is env then file', asy
   assert.equal(defaultCwd({ XDG_CONFIG_HOME: dir }), '/file/dir');
   assert.equal(defaultCwd({ XDG_CONFIG_HOME: dir, PI_REMOTE_CWD: '' }), '/file/dir');
   assert.equal(defaultCwd({ XDG_CONFIG_HOME: dir, PI_REMOTE_CWD: '/env/dir' }), '/env/dir');
+});
+
+test('launch commands default to the isara sandbox and plain pi; config and PI_REMOTE_PI_BIN override them', () => {
+  const none = () => ({});
+  assert.deepEqual(launcher(true, {}, none), { executable: 'isara', prefixArgs: ['sandbox', 'pi', '--'] });
+  assert.deepEqual(launcher(false, {}, none), { executable: 'pi', prefixArgs: [] });
+  const configured = () => parseConfig('{"launch":{"sandboxed":["sbx","run","--"],"unsandboxed":["/opt/pi"]}}', 'c');
+  assert.deepEqual(launcher(true, {}, configured), { executable: 'sbx', prefixArgs: ['run', '--'] });
+  assert.deepEqual(launcher(false, {}, configured), { executable: '/opt/pi', prefixArgs: [] });
+  assert.deepEqual(launcher(false, { PI_REMOTE_PI_BIN: '/env/pi' }, configured), { executable: '/env/pi', prefixArgs: [] });
+  assert.deepEqual(launcher(true, { PI_REMOTE_PI_BIN: '/env/pi' }, configured), { executable: 'sbx', prefixArgs: ['run', '--'] });
+  // The environment override does not read (or fail on) the config file.
+  assert.deepEqual(launcher(false, { PI_REMOTE_PI_BIN: '/env/pi' }, () => { throw new Error('unread'); }), { executable: '/env/pi', prefixArgs: [] });
+});
+
+test('launch config accepts argv arrays and rejects malformed commands', () => {
+  assert.deepEqual(parseConfig('{"launch":{}}', 'c'), { launch: {} });
+  assert.deepEqual(parseConfig('{"launch":{"sandboxed":["isara","sandbox","pi","--"]}}', 'c').launch, { sandboxed: ['isara', 'sandbox', 'pi', '--'] });
+  for (const launch of ['[]', '"pi"', '{"sandbox":["pi"]}', '{"sandboxed":"isara sandbox pi"}', '{"sandboxed":[]}', '{"unsandboxed":[""]}', '{"unsandboxed":["pi",1]}']) {
+    assert.throws(() => parseConfig(`{"launch":${launch}}`, 'config.json'), /config\.json/, launch);
+  }
 });

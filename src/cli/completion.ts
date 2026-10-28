@@ -13,7 +13,7 @@ import { numberSlots, slotNumber, type NumberedSlot } from '../tui/slot-table.js
 export { numberSlots, slotNumber, type NumberedSlot };
 
 export const VALUE_OPTIONS = ['--host', '--remote-bin', '--state-dir', '--cwd', '--session', '--ui-extension', '--ui-config', '--theme'] as const;
-export const BOOLEAN_OPTIONS = ['--local', '--json', '--no-attach', '--no-reconnect', '--no-bell', '--all', '--force', '--help'] as const;
+export const BOOLEAN_OPTIONS = ['--local', '--json', '--no-attach', '--unsandboxed', '--no-reconnect', '--no-bell', '--all', '--force', '--help'] as const;
 export const COMMANDS = ['new', 'ls', 'attach', 'resume', 'kill', 'watch', 'rpc', 'restart-daemon', 'completion', 'help', 'version'] as const;
 const COMMAND_LABELS: Partial<Record<typeof COMMANDS[number], string>> = {
   resume: 'Reopen a stopped or stored session',

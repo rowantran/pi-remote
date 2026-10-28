@@ -494,7 +494,7 @@ async function fakeSsh(t: TestContext, silent = false) {
 console.error('SSH diagnostic that completion must suppress');
 appendFileSync(${JSON.stringify(join(dir, 'argv.jsonl'))}, JSON.stringify(process.argv.slice(2))+'\\n');
 createInterface({input:process.stdin}).on('line', line => { const request=JSON.parse(line); appendFileSync(${JSON.stringify(log)}, line+'\\n');
-${silent ? 'return;' : `const data=request.method==='hello'?${JSON.stringify({ protocol: PROTOCOL_VERSION, piVersion: PI_VERSION })}:request.method==='list'?${JSON.stringify(slots)}:{items:[{value:'~/two words/',label:'two words',directory:true}],truncated:false}; process.stdout.write(JSON.stringify({type:'result',id:request.id,success:true,data})+'\\n');`}
+${silent ? 'return;' : `const data=request.method==='hello'?${JSON.stringify({ protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, capabilities: ['launch_modes'] })}:request.method==='list'?${JSON.stringify(slots)}:{items:[{value:'~/two words/',label:'two words',directory:true}],truncated:false}; process.stdout.write(JSON.stringify({type:'result',id:request.id,success:true,data})+'\\n');`}
 });`);
   const executable = join(dir, 'ssh');
   await writeFile(executable, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(script)} "$@"\n`);
@@ -555,6 +555,9 @@ test('CLI new takes the default cwd from the XDG config file, with PI_REMOTE_CWD
   await exec(process.execPath, [...cli, 'new', '--no-attach'], { env: { ...fixture.env, PI_REMOTE_CWD: '/from-env' }, cwd: root });
   await exec(process.execPath, [...cli, 'new', '--no-attach', '--cwd', '/from-flag'], { env: { ...fixture.env, PI_REMOTE_CWD: '/from-env' }, cwd: root });
   assert.deepEqual(await creates(), ['~/from-config', '/from-env', '/from-flag']);
+  await exec(process.execPath, [...cli, 'new', '--no-attach', '--unsandboxed'], { env: fixture.env, cwd: root });
+  const modes = (await readFile(fixture.log, 'utf8')).trim().split('\n').map(line => JSON.parse(line)).filter(request => request.method === 'create').map(request => request.params.sandboxed);
+  assert.deepEqual(modes, [true, true, true, false]);
   await assert.rejects(exec(process.execPath, [...cli, 'new', '--local', '--no-attach'], { env: fixture.env, cwd: root }), /new --local requires --cwd/);
 });
 

@@ -110,7 +110,7 @@ test('side refuses missing parent files and invalid options before allocating a 
   const main = await parent();
   await rm(main.sessionFile!);
   await assert.rejects(createSide(main.id), /parent session file is not persisted/);
-  await assert.rejects(peer.request('create', { parentSlotId: main.id, cwd: main.cwd }), /inherit cwd and args/);
+  await assert.rejects(peer.request('create', { parentSlotId: main.id, cwd: main.cwd }), /inherit cwd, args, and launch mode/);
   await assert.rejects(createSide(main.id, ''), /nonempty string/);
   await assert.rejects(peer.request('create', { cwd: main.cwd, prompt: 'oops' }), /requires parentSlotId/);
   await assert.rejects(createSide('missing'), /Slot not found/);

@@ -28,7 +28,7 @@ console.log(`Isolated real-host test: ${host}:${root}`);
 try {
   await exec('scp', ['-q', fileURLToPath(new URL('../fixtures/live-extension.ts', import.meta.url)), `${host}:${root}/extension.ts`]);
   let client = await connect();
-  const slot = await client.request('create', {cwd:root,args:['--session-dir',`${root}/history`,'-e',`${root}/extension.ts`]});
+  const slot = await client.request('create', {cwd:root,sandboxed:false,args:['--session-dir',`${root}/history`,'-e',`${root}/extension.ts`]});
   ownedSlots.push(slot.id);
   const first = await attach(client, slot.id);
   assert.equal(first.slot.pid, slot.pid);
@@ -72,7 +72,7 @@ try {
   assert.ok(statistics.sessionId);
   const models = await rpc(client,slot.id,{type:'get_available_models'});
   assert.ok(models.models.length > 0);
-  await assert.rejects(client.request('create',{cwd:root,sessionPath:answered.state.sessionFile}),/already open/);
+  await assert.rejects(client.request('create',{cwd:root,sandboxed:false,sessionPath:answered.state.sessionFile}),/already open/);
   console.log('PASS public RPC session statistics/model discovery; duplicate session writer rejected');
 
   if (process.env.PI_REMOTE_TEST_MODEL === '1') {
@@ -112,7 +112,7 @@ try {
     assert.match((await rpc(client,slot.id,{type:'get_last_assistant_text'})).text,/PI_REMOTE_MODEL_OK/);
     console.log('PASS model selection, fork prompt restoration, new session isolation, remote session listing and resume');
   }
-  const later = await client.request('create',{cwd:root,args:['--session-dir',`${root}/second-history`]});
+  const later = await client.request('create',{cwd:root,sandboxed:false,args:['--session-dir',`${root}/second-history`]});
   ownedSlots.push(later.id);
   assert.notEqual(later.pid,slot.pid);
   await attach(client,later.id);

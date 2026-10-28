@@ -37,7 +37,7 @@ try {
     return underlying;
   },{minDelayMs:50,maxDelayMs:200});
   connections.push(client);
-  const first=await client.request('create',{cwd:root,args:['--session-dir',`${root}/history`]});slots.push(first.id);
+  const first=await client.request('create',{cwd:root,sandboxed:false,args:['--session-dir',`${root}/history`]});slots.push(first.id);
   const initial=await attach(client,first.id);
   assert.equal(first.number,legacy?undefined:1);
   const other=await connect();await attach(other,first.id);
@@ -68,7 +68,7 @@ try {
   assert.equal((await client.request('read_attachment',{slotId:first.id,path:'executions'})).text,'once');
   assert.equal(sent.filter(type=>type==='bash').length,1,'recovery must never replay a command');
   console.log('PASS live SSH recovery reattached the same Pi PID; in-flight bash completed exactly once');
-  const second=await client.request('create',{cwd:root,args:['--session-dir',`${root}/second-history`]});slots.push(second.id);
+  const second=await client.request('create',{cwd:root,sandboxed:false,args:['--session-dir',`${root}/second-history`]});slots.push(second.id);
   assert.equal(second.number,legacy?undefined:2);
   const selected=await exec(process.execPath,[cli,'rpc','--host',host,'2',...options,JSON.stringify({type:'get_state'})]);
   assert.ok(JSON.parse(selected.stdout).sessionId);
