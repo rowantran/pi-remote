@@ -351,7 +351,7 @@ test('starting-slot refresh preserves MCP warnings while learning the initial se
 test('connection warning updates in place, survives custom footers, and clears on reconnect', async t => {
   for (const customFooter of [false, true]) await t.test(customFooter ? 'custom footer' : 'default footer', async t => {
     const connection = new ReconnectingFakeConnection();
-    const { ui, terminal, finished } = launch(t, snapshot(), connection, {
+    const { ui, terminal, finished } = launch(t, snapshot({ state: { sessionName: 'BUILT_IN_SESSION' } }), connection, {
       host: 'devbox', appearance: 'dark', theme: 'dark',
       presentationConfig: '/nonexistent/pi-remote-warning-test.json',
       presentationFactories: customFooter ? [pi => {
@@ -365,7 +365,10 @@ test('connection warning updates in place, survives custom footers, and clears o
     let output = screen(ui);
     assert.match(output, /⚠ Connection lost \(devbox\): network lost/);
     assert.match(output, /Reconnecting automatically/);
-    if (customFooter) assert.match(output, /CUSTOM_FOOTER/);
+    if (customFooter) {
+      assert.match(output, /CUSTOM_FOOTER/);
+      assert.doesNotMatch(output, /DISCONNECTED|BUILT_IN_SESSION/, 'custom footer must not gain the built-in fallback');
+    } else assert.match(output, /DISCONNECTED[^]*BUILT_IN_SESSION/, 'default footer is unchanged');
     const retry = connection.retry!;
     retry({ attempt: 1, error: new Error('SSH exited\nfirst failure'), nextDelayMs: 2000 });
     output = screen(ui);
@@ -377,6 +380,7 @@ test('connection warning updates in place, survives custom footers, and clears o
     assert.match(output, /Operation timed out/);
     assert.match(output, /Attempt 2 failed; retrying in 4s/);
     assert.doesNotMatch(output, /first failure|SSH exited|Attempt 1/);
+    if (customFooter) assert.doesNotMatch(output, /DISCONNECTED|BUILT_IN_SESSION/, 'retries must not recreate the fallback');
     assert.equal((output.match(/⚠ Connection lost/g) ?? []).length, 1);
     const warning = ui.tui.getScreenLines().find(row => row.includes('⚠ Connection lost'))!;
     assert.match(warning, /\x1b\[/, 'warning is styled by the TUI');
@@ -397,6 +401,30 @@ test('connection warning updates in place, survives custom footers, and clears o
     const writes = terminal.output;
     retry({ attempt: 4, error: new Error('DETACHED_RETRY'), nextDelayMs: 10000 });
     assert.equal(terminal.output, writes);
+  });
+});
+
+test('custom footer keeps connected slot lifecycle status but no disconnected fallback', async t => {
+  for (const status of ['starting', 'exited'] as const) await t.test(status, async t => {
+    const initial = snapshot({ state: { sessionName: 'BUILT_IN_SESSION' } });
+    initial.slot.status = status;
+    const { ui, connection } = launch(t, initial, new FakeConnection(), {
+      appearance: 'dark', theme: 'dark',
+      presentationConfig: '/nonexistent/pi-remote-warning-test.json',
+      presentationFactories: [pi => {
+        pi.on('session_start', (_event, ctx) => ctx.ui.setFooter(() => new Text('CUSTOM_FOOTER', 0, 0)));
+      }],
+    });
+    await ui.initialize();
+    const connected = screen(ui);
+    assert.match(connected, /CUSTOM_FOOTER/);
+    assert.match(connected, /BUILT_IN_SESSION/, 'connected slot lifecycle status remains visible');
+    assert.match(connected, status === 'starting' ? /Starting/ : /EXITED/);
+    connection.disconnect();
+    const disconnected = screen(ui);
+    assert.match(disconnected, /⚠ Connection lost/);
+    assert.match(disconnected, /CUSTOM_FOOTER/);
+    assert.doesNotMatch(disconnected, /DISCONNECTED|BUILT_IN_SESSION/, 'warning replaces the fallback even for non-running slots');
   });
 });
 

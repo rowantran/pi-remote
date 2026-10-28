@@ -1042,7 +1042,8 @@ export class RemoteTui {
     widget('belowEditor');
     if (!this.connected) this.addConnectionWarning();
     if (this.presentation?.footer) {
-      if (!this.connected || this.view.snapshot.slot.status !== 'running') this.bottom.addChild(new Text(this.footer(), 0, 0));
+      // The standalone connection warning replaces the old disconnected-footer fallback.
+      if (this.connected && this.view.snapshot.slot.status !== 'running') this.bottom.addChild(new Text(this.footer(), 0, 0));
       else if (sideParentLabel(this.view.snapshot.slot)) this.bottom.addChild(new Text(muted(sideParentLabel(this.view.snapshot.slot)!), 0, 0));
       this.bottom.addChild(this.presentation.footer);
     } else this.bottom.addChild(new DynamicLines(() => [this.footer()]));
