@@ -47,14 +47,15 @@ export function slotColumns(p: Paint): Column[] {
 }
 const GLYPH: Record<SlotInfo['status'], [string, keyof Paint]> = { running: ['●', 'ok'], starting: ['●', 'warn'], exited: ['○', 'dim'] };
 
-/** One slot's cells. `ls` and the slot pickers both use these, so they show the same facts. */
+/** One slot's cells. `ls` and the slot pickers both use these, so they show the same facts.
+ * Sandboxed is the default, so only unsandboxed slots carry a marker. Old daemons omit the field. */
 export function slotCells(slot: NumberedSlot, depth: number, p: Paint, now = Date.now()): string[] {
   const [glyph, color] = GLYPH[slot.status] ?? ['?', 'dim'];
   const side = sideParentLabel(slot);
   return [
     String(slotNumber(slot) ?? '-'),
     `${p[color](glyph)} ${slot.status}`,
-    `${'  '.repeat(depth)}${plainText(slot.sessionName || '(unnamed)')}${side ? ` (${side})` : ''}`,
+    `${'  '.repeat(depth)}${plainText(slot.sessionName || '(unnamed)')}${side ? ` (${side})` : ''}${slot.sandboxed === false ? ` ${p.warn('unsandboxed')}` : ''}`,
     plainText(slot.cwd),
     slot.clients ? `${slot.clients} client${slot.clients === 1 ? '' : 's'}` : '',
     formatAge(slot.createdAt, now),
@@ -89,7 +90,7 @@ export function slotItems(slots: NumberedSlot[], p: Paint, now = Date.now()): Pi
       value: slot.id,
       cells: slotCells(slot, depth, p, now),
       note: slot.error,
-      search: `#${number ?? ''} ${slot.sessionName ?? ''} ${sideParentLabel(slot) ?? ''} ${slot.cwd} ${slot.status} ${slot.id}`,
+      search: `#${number ?? ''} ${slot.sessionName ?? ''} ${sideParentLabel(slot) ?? ''} ${slot.cwd} ${slot.status} ${slot.sandboxed === false ? 'unsandboxed ' : ''}${slot.id}`,
       exact: number === undefined ? [slot.id] : [String(number), `#${number}`, slot.id],
     };
   });

@@ -23,6 +23,9 @@ export interface SlotInfo {
   status: "starting" | "running" | "exited";
   sessionFile?: string;
   sessionName?: string;
+  /** True when the daemon started Pi with the sandboxed launch command. Daemons without the
+   * launch_modes capability omit it; their slots run unsandboxed. */
+  sandboxed?: boolean;
   error?: string;
   clients: number;
 }
@@ -53,7 +56,9 @@ export interface Snapshot {
   historyComplete?: boolean;
   presentation?: { models?: RecordValue[]; stats?: RecordValue; gitBranch?: string; homeDir?: string; [key: string]: any };
 }
-export interface CreateOptions { cwd?: string; args?: string[]; sessionPath?: string; parentSlotId?: string; prompt?: string; expectedParentSessionId?: string }
+/** `sandboxed` selects the daemon's launch command; omitted means sandboxed. Side slots
+ * inherit their parent's mode and must omit it. */
+export interface CreateOptions { cwd?: string; args?: string[]; sessionPath?: string; sandboxed?: boolean; parentSlotId?: string; prompt?: string; expectedParentSessionId?: string }
 /** A failed recovery attempt and the delay before the next attempt. */
 export interface ConnectionRetry { attempt: number; error: Error; nextDelayMs: number }
 export interface RemoteConnection {

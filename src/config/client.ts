@@ -12,7 +12,13 @@ export interface WebConfig {
   origin?: string;
 }
 
-/** Local client and deployment settings. The remote daemon never reads this file. */
+/** Commands that start Pi, as argv arrays. The daemon appends `--mode rpc` and Pi options. */
+export interface LaunchConfig {
+  sandboxed?: string[];
+  unsandboxed?: string[];
+}
+
+/** Local client and deployment settings. On the remote host, the daemon reads only `launch`. */
 export interface ClientConfig {
   host?: string;
   cwd?: string;
@@ -22,10 +28,12 @@ export interface ClientConfig {
   sideSplit?: SplitDirection;
   /** When absent, deploy does not manage a web service. */
   web?: WebConfig;
+  launch?: LaunchConfig;
 }
 const STRING_KEYS = ['host', 'cwd', 'theme'] as const;
-const KEYS = new Set<string>([...STRING_KEYS, 'extensions', 'bell', 'sideSplit', 'web']);
+const KEYS = new Set<string>([...STRING_KEYS, 'extensions', 'bell', 'sideSplit', 'web', 'launch']);
 const WEB_KEYS = new Set(['allowUsers', 'origin']);
+const LAUNCH_KEYS = new Set(['sandboxed', 'unsandboxed']);
 
 function isExactHttpsOrigin(value: unknown): value is string {
   if (typeof value !== 'string') return false;
@@ -65,6 +73,17 @@ export function parseConfig(text: string, path: string): ClientConfig {
       throw new Error(`'web.allowUsers' in ${path} must contain 1–100 exact, non-wildcard Tailscale logins of at most 256 characters without whitespace or control characters`);
     }
     if (web.origin !== undefined && !isExactHttpsOrigin(web.origin)) throw new Error(`'web.origin' in ${path} must be an exact HTTPS origin without credentials, path, trailing slash, query, or hash`);
+  }
+  if (config.launch !== undefined) {
+    if (!config.launch || typeof config.launch !== 'object' || Array.isArray(config.launch)) throw new Error(`'launch' in ${path} must be a JSON object`);
+    const launch = config.launch as Record<string, unknown>;
+    for (const key of Object.keys(launch)) if (!LAUNCH_KEYS.has(key)) throw new Error(`Unknown key 'launch.${key}' in ${path}`);
+    for (const key of LAUNCH_KEYS) {
+      const command = launch[key];
+      if (command !== undefined && (!Array.isArray(command) || !command.length || command.some(arg => typeof arg !== 'string') || !command[0])) {
+        throw new Error(`'launch.${key}' in ${path} must be a non-empty array of strings, starting with the program`);
+      }
+    }
   }
   return config as ClientConfig;
 }

@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { BOOLEAN_OPTIONS, VALUE_OPTIONS, completionScript, resolveCommand, runCompletionCommand, selectHost, slotNumber, numberSlots, type NumberedSlot } from './completion.js';
 import { runDaemon } from '../daemon/supervisor.js';
 import { defaultStateDir } from '../protocol/paths.js';
-import { configPath, defaultCwd, defaultHost } from './config.js';
+import { configPath, defaultCwd, defaultHost, launcher } from './config.js';
 import { bridge } from '../daemon/bridge.js';
 import { connectCompatibleSsh } from '../client/compat-client.js';
 import { connectCompatibleLocal } from './connections.js';
@@ -17,6 +17,7 @@ import { terminalPaint } from '../tui/table.js';
 import { openSession, pickResume, resumeSlot, type ResumeChoice } from './resume.js';
 import { sessionDirArg } from '../daemon/session-dirs.js';
 import { formatLatency, statusSampler } from '../tui/host-status.js';
+import { createSlot } from '../protocol/launch-modes.js';
 
 const HELP = `pi-remote — local terminal UI, persistent remote Pi RPC processes
 
@@ -24,12 +25,13 @@ Everyday commands:
   pi-remote [--host HOST]
     Open a searchable picker: attach to a running slot, start a new one in the
     default directory, or resume a session. Without a terminal, print this help.
-  pi-remote new [--cwd REMOTE_DIRECTORY] [--host HOST] [--no-attach] [-- PI_OPTIONS...]
+  pi-remote new [--cwd REMOTE_DIRECTORY] [--host HOST] [--no-attach] [--unsandboxed] [-- PI_OPTIONS...]
+    Start Pi in a new slot. Pi runs in the isara sandbox unless --unsandboxed.
   pi-remote ls [--host HOST] [--all] [--json]
     A read-only attach: print the attach picker's header and rows without
     opening it. --all adds stopped slots; --json prints the slot data.
   pi-remote attach [--host HOST] [SLOT]
-  pi-remote resume [--host HOST] [--cwd REMOTE_DIRECTORY] [--no-attach] [SLOT] [-- PI_OPTIONS...]
+  pi-remote resume [--host HOST] [--cwd REMOTE_DIRECTORY] [--no-attach] [--unsandboxed] [SLOT] [-- PI_OPTIONS...]
     The same picker as /resume in a new slot: search the sessions stored for the
     directory and open one in a new slot. With SLOT, reopen that stopped slot's
     session. A session that is still open attaches to its slot instead.
@@ -66,6 +68,7 @@ Options:
   --local              No SSH; run against a daemon on this machine
   --json               Machine-readable list/create output
   --no-attach          Create a slot and print its ID without opening the TUI
+  --unsandboxed        new, resume, and the home picker: start Pi without the sandbox
   --force              restart-daemon: interrupt busy slots
   --ui-extension PATH  Load a local presentation adapter (repeatable)
   --ui-config PATH     Alternate UI config (does not change host/cwd defaults)
@@ -81,6 +84,9 @@ Configuration:
   Host precedence: --host, then PI_REMOTE_HOST, then the config file.
   Directory precedence: --cwd, then PI_REMOTE_CWD, then the config file.
   --ui-config overrides only UI settings; --ui-extension adds trusted adapters.
+  On the remote host, "launch" sets the commands that start Pi (argv arrays):
+    {"launch": {"sandboxed": ["isara", "sandbox", "pi", "--"], "unsandboxed": ["pi"]}}
+  These are the defaults. PI_REMOTE_PI_BIN on the remote host overrides "unsandboxed".
   The bell defaults to on; --no-bell overrides the config.
 
 SLOT is a stable number from ls, a full UUID, or a unique UUID prefix.
@@ -246,7 +252,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const options = parseOptions(home ? args : args.slice(1));
   if (options.flags.has('--help')) { console.log(HELP); return; }
   const stateDir = options.values.get('--state-dir');
-  if (command === 'daemon') { await runDaemon({ stateDir: stateDir ?? defaultStateDir(), executable: process.env.PI_REMOTE_PI_BIN ?? 'pi' }); return; }
+  if (command === 'daemon') { await runDaemon({ stateDir: stateDir ?? defaultStateDir(), launcher: sandboxed => launcher(sandboxed) }); return; }
   if (command === 'bridge') { await bridge(stateDir); return; }
   if (!['home', 'new', 'ls', 'attach', 'resume', 'kill', 'rpc', 'watch', 'restart-daemon'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
   const local = options.flags.has('--local');
@@ -290,6 +296,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     let createCwd: string | undefined;
     let resume: ResumeChoice | undefined;
     const cwdDefault = options.values.get('--cwd') ?? (local ? undefined : defaultCwd());
+    const sandboxed = !options.flags.has('--unsandboxed');
     if (command === 'home') {
       // Esc in the resume finder returns to the home picker.
       while (!slotId && !createCwd && !resume) {
@@ -319,7 +326,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       if (command === 'resume' && headless) { console.log(slotId); return; }
       if (command === 'resume') console.error('That session is still open; attaching to its slot.');
     } else if (resume) {
-      const opened = await openSession(connection, resume, options.piArgs);
+      const opened = await openSession(connection, resume, options.piArgs, sandboxed);
       slotId = opened.slotId;
       if (opened.existing) console.error(`Another slot opened that session first${headless ? '' : '; attaching to it'}.`);
       if (headless) {
@@ -330,7 +337,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (command === 'new' || createCwd) {
       const cwd = createCwd ?? cwdDefault;
       if (!cwd) throw new Error(local ? 'new --local requires --cwd with a directory' : `new requires a remote directory. Use --cwd DIRECTORY, set PI_REMOTE_CWD, or add {"cwd": "DIRECTORY"} to ${configPath()}.`);
-      const slot = await connection.request('create', { cwd, args: options.piArgs, sessionPath: options.values.get('--session') });
+      const slot = await createSlot(connection, { cwd, args: options.piArgs, sessionPath: options.values.get('--session'), sandboxed });
       slotId = slot.id;
       if (options.flags.has('--no-attach') || !process.stdin.isTTY || !process.stdout.isTTY) {
         console.log(options.flags.has('--json') ? JSON.stringify(slot, null, 2) : slot.id);

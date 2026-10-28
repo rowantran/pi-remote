@@ -221,7 +221,9 @@ device paired before tabs existed reopens its last session, which becomes its fi
 
 To start a session from the phone, open **Sessions**, enter a directory on the devbox under **New
 session**, and tap **Start session**. This is the same as `pi-remote new --cwd DIRECTORY`: the
-daemon resolves `~` and checks the directory. The field suggests recent directories, directories of
+daemon resolves `~` and checks the directory. **Sandboxed** is on by default and starts Pi in the
+isara sandbox; turn it off for that session to start plain `pi`, like `--unsandboxed`. The session
+list marks unsandboxed sessions. The field suggests recent directories, directories of
 running sessions, and devbox directory completions. The new session opens as the active tab. The
 request is sent once; if the app cannot confirm the result, refresh the list before trying again
 rather than risk a duplicate session.

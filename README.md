@@ -34,6 +34,8 @@ pi-remote new --cwd /remote/project
 
 Remote Pi loads its normal settings, credentials, providers, extension factories, skills, and trusted project resources. Deployment copies application files, not your local Pi configuration.
 
+By default, the daemon starts Pi in the isara sandbox with `isara sandbox pi --` (the `ipi` alias), so `isara` must be on the remote host's `PATH`. Add `--unsandboxed` to `new`, `resume`, or bare `pi-remote` to start plain `pi`. A slot keeps its mode for its whole life: reloads, side conversations, and daemon restarts use the same command. `ls` and the pickers mark unsandboxed slots. See [launch commands](#launch-commands) to change either command.
+
 ```sh
 # A read-only attach: print the attach picker's header and rows without
 # opening it. Add --all to include stopped slots, --json for scripts.
@@ -157,6 +159,25 @@ The local client reads `$XDG_CONFIG_HOME/pi-remote/config.json`. If `XDG_CONFIG_
 Keep your own trusted adapter at `my-ui.ts` beside `config.json`. The relative path works on both the laptop and devbox when each has those files. Adapters are user-owned files, not part of the pi-remote release; manage them with your dotfiles or copy them separately. See [local presentation](#opt-in-explicitly) before enabling one. Omit `extensions` to use the built-in display, unless you select adapters with `--ui-extension`.
 
 The host comes from the first of these that is set: `--host`, the `PI_REMOTE_HOST` environment variable, then the config file. `--local` ignores all three.
+
+#### Launch commands
+
+The daemon runs on the remote host, so it reads the config file **on the remote host** (the same path, `$XDG_CONFIG_HOME/pi-remote/config.json`, on that machine). It reads only the `launch` key, and reads it again for every launch, so edits apply to the next new slot or reload without a daemon restart. If you share one file between the laptop and the devbox with dotfiles, the laptop client ignores `launch`.
+
+```json
+{
+  "launch": {
+    "sandboxed": ["isara", "sandbox", "pi", "--"],
+    "unsandboxed": ["pi"]
+  }
+}
+```
+
+These are the defaults. Each value is an argv array: the program, then its leading arguments. The daemon appends `--mode rpc` and the Pi options. `PI_REMOTE_PI_BIN` in the daemon's environment overrides `unsandboxed`. Before each new slot or reload, the daemon runs the slot's command with `--version` in the slot's directory and refuses a Pi version other than the required one.
+
+Slots created by a daemon from before launch modes keep running unsandboxed after the update. A sandboxed request to such an old daemon fails before anything starts; deploy the updated daemon first.
+
+The isara sandbox passes only an allowlist of environment variables to Pi. It must forward the `PI_REMOTE_SESSION*` variables (see [detect a pi-remote session](#detect-a-pi-remote-session)), or sandboxed extensions cannot detect pi-remote.
 
 `cwd` is the default remote working directory for `pi-remote new`. It comes from the first of these that is set: `--cwd`, the `PI_REMOTE_CWD` environment variable, then the config file. With a default, `pi-remote new` needs no `--cwd`. The value is a path on the remote host: `~` means the remote home, and the remote daemon checks that the directory exists. The default applies to every host, including one selected with `--host`. `--local` ignores it, so `new --local` still needs `--cwd`. `--session` completion also uses this default as its base when `--cwd` is not given.
 

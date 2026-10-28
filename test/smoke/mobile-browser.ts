@@ -208,12 +208,15 @@ try {
       assert.equal(await activeTab(), slot.id);
       await page.locator('#slots-button').click();
       await page.locator('#new-session-cwd').fill(dir);
+      assert.equal(await page.locator('#new-session-sandboxed').isChecked(), true, 'new sessions are sandboxed by default');
       await page.locator('#create-session').click();
       await page.waitForFunction(original => document.querySelectorAll('#tabs .tab').length === 2
         && document.querySelector<HTMLElement>('#tabs .tab.active')?.dataset.slot !== original
         && document.querySelector('#status')?.textContent === 'Connected', slot.id);
       const created = (await activeTab())!;
-      assert.equal((await control.request('list')).find(item => item.id === created)?.cwd, dir);
+      const createdInfo = (await control.request('list')).find(item => item.id === created);
+      assert.equal(createdInfo?.cwd, dir);
+      assert.equal(createdInfo?.sandboxed, true);
       const watcherSocket = await connect();
       const watcher = new Connection(watcherSocket, watcherSocket, () => watcherSocket.destroy());
       // A listener from the start: Connection would otherwise replay buffered (stale) events to the first one.

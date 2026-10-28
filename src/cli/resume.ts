@@ -1,5 +1,6 @@
 import type { SessionInfo } from '../protocol/methods.js';
 import type { RemoteConnection, SlotInfo } from '../protocol/types.js';
+import { createSlot } from '../protocol/launch-modes.js';
 import { FuzzyPicker, runPicker } from '../tui/fuzzy-picker.js';
 import { sessionItems, sessionPickerOptions } from '../tui/session-table.js';
 import { slotNumber, type NumberedSlot } from '../tui/slot-table.js';
@@ -47,9 +48,9 @@ export function resumeSlot(slot: NumberedSlot): ResumeChoice {
 
 /** Open a stored session in a new slot. If another slot opened it meanwhile, attach
  * there instead; a session must never run in two Pi processes. */
-export async function openSession(connection: Connection, choice: Extract<ResumeChoice, { kind: 'open' }>, args: string[] = []): Promise<{ slotId: string; slot?: SlotInfo; existing: boolean }> {
+export async function openSession(connection: Connection, choice: Extract<ResumeChoice, { kind: 'open' }>, args: string[] = [], sandboxed = true): Promise<{ slotId: string; slot?: SlotInfo; existing: boolean }> {
   try {
-    const slot = await connection.request('create', { cwd: choice.cwd, args, sessionPath: choice.sessionPath });
+    const slot = await createSlot(connection, { cwd: choice.cwd, args, sessionPath: choice.sessionPath, sandboxed });
     return { slotId: slot.id, slot, existing: false };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

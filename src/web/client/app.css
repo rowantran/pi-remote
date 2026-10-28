@@ -30,6 +30,8 @@ input, textarea { display: block; width: 100%; margin-top: 6px; padding: 10px; f
 #slot-list button { text-align: left; overflow-wrap: anywhere; }
 #slot-list button.open { border-color: var(--accent, #89b4fa); }
 #new-session-form h2 { font-size: 16px; margin: 16px 0 0; }
+label.checkbox { display: flex; align-items: center; gap: 8px; }
+label.checkbox input { display: inline-block; width: auto; margin: 0; }
 #new-session-error { color: var(--error, #ffaaaa); margin: 4px 0; }
 #new-session-error:empty { display: none; }
 #tabs { display: flex; gap: 4px; overflow-x: auto; padding: 4px 6px; flex: 0 0 auto; border-bottom: 1px solid var(--border, #333); background: var(--chrome-bg, #202020); scrollbar-width: none; }

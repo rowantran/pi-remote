@@ -135,7 +135,7 @@ async function runScenario(width: number, theme: string) {
     }
   }
   const stockCommand = [...envArgs(sides[0].env), stockBin, ...piArgs, '--session-dir', join(dir, 'stock-sessions'), ...stockExtensions];
-  const createCommand = [remoteBin, 'new', '--local', '--state-dir', state, '--cwd', cwd, '--no-attach', '--json', '--', ...piArgs, '--session-dir', join(dir, 'remote-sessions')];
+  const createCommand = [remoteBin, 'new', '--local', '--state-dir', state, '--cwd', cwd, '--no-attach', '--unsandboxed', '--json', '--', ...piArgs, '--session-dir', join(dir, 'remote-sessions')];
   const created = await exec('env', ['-i', ...Object.entries(sides[1].env).map(([k, v]) => `${k}=${v}`), ...createCommand], { cwd, timeout: 45000, maxBuffer: 1024 * 1024 });
   const slot = JSON.parse(created.stdout);
   const remoteCommand = [...envArgs(sides[1].env), remoteBin, 'attach', '--local', '--state-dir', state, slot.id, '--ui-config', join(dir, 'no-ui-config.json'), '--theme', theme, ...uiExtensions];

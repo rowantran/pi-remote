@@ -10,6 +10,7 @@ import { installTouchScroll } from './touch.js';
 import { Notifications } from './notifications.js';
 import { TranscriptCache, ReadOnlyConnection } from './cache.js';
 import { SessionTabs, slotLabel } from './tabs.js';
+import { createSlot } from '../../protocol/launch-modes.js';
 
 function element<T extends HTMLElement = HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -105,7 +106,7 @@ async function showSlots(): Promise<void> {
   for (const slot of running) {
     const button = document.createElement('button');
     const open = tabs.has(slot.id);
-    button.textContent = `${slotLabel(slot)} · ${slot.cwd}${open ? ' · open' : ''}`;
+    button.textContent = `${slotLabel(slot)} · ${slot.cwd}${slot.sandboxed === false ? ' · unsandboxed' : ''}${open ? ' · open' : ''}`;
     if (open) button.classList.add('open');
     button.addEventListener('click', () => { slotsDialog.close(); openSlot(slot.id); });
     list.append(button);
@@ -116,7 +117,11 @@ async function showSlots(): Promise<void> {
   if (!input.value) input.value = directories[0] ?? '';
   showDirectories(directories);
   element('new-session-error').textContent = '';
-  if (!slotsDialog.open) slotsDialog.showModal();
+  if (!slotsDialog.open) {
+    // Unsandboxed is a per-session choice: each new dialog starts sandboxed again.
+    element<HTMLInputElement>('new-session-sandboxed').checked = true;
+    slotsDialog.showModal();
+  }
 }
 function showDirectories(values: readonly string[]): void {
   const options = element('new-session-dirs');
@@ -142,12 +147,13 @@ async function createSession(): Promise<void> {
   const error = element('new-session-error');
   const button = element<HTMLButtonElement>('create-session');
   const cwd = input.value.trim();
+  const sandboxed = element<HTMLInputElement>('new-session-sandboxed').checked;
   if (!cwd) return;
   creating = true; button.disabled = true; button.textContent = 'Starting…'; error.textContent = '';
   try {
     const conn = await dialogConnection();
     // Sent once. If the result is unknown, the session may exist: never retry automatically.
-    const slot = await conn.request('create', { cwd });
+    const slot = await createSlot(conn, { cwd, sandboxed });
     rememberDirectory(cwd);
     if (slot.status === 'exited') throw new Error(`Pi exited during startup: ${slot.error ?? 'unknown error'}`);
     slotsDialog.close();

@@ -11,7 +11,8 @@ import { readJsonl, writeJsonl } from '../protocol/jsonl.js';
 import { emptyLive, applyLiveEvent, captureLiveSnapshot } from '../protocol/live.js';
 import { filterEvent, filterSnapshot } from '../protocol/transcript-filter.js';
 import { ACTIVITY_CAPABILITY, activitySlot, activitySource, type ActivitySnapshot } from '../protocol/notification-stream.js';
-import { PiProcess, type PiLaunch } from './pi-process.js';
+import { PiProcess, type Launcher, type PiLaunch } from './pi-process.js';
+import { LAUNCH_MODES_CAPABILITY } from '../protocol/launch-modes.js';
 import { remoteSessionEnv } from '../protocol/remote-session.js';
 import { socketPath } from '../protocol/paths.js';
 import type { FileMethod, MethodResult, SessionInfo } from '../protocol/methods.js';
@@ -34,8 +35,10 @@ const DAEMON_STARTED_AT = new Date().toISOString();
 const BUSY = 'Remote Pi is busy. Confirm reload to interrupt running work and discard queued prompts.';
 
 /** `reopen` marks a slot that was running when `restart_daemon` stopped the daemon. The next
- * daemon starts it again from its session file, exactly like /reload. Crashes never set it. */
-interface StoredSlot { id: string; number?: number; parentSlotId?: string; cwd: string; createdAt: string; args: string[]; sessionFile?: string; sessionName?: string; reopen?: boolean }
+ * daemon starts it again from its session file, exactly like /reload. Crashes never set it.
+ * `sandboxed` is fixed at creation. Slots stored before launch modes existed lack it and
+ * were started unsandboxed, so they stay unsandboxed. */
+interface StoredSlot { id: string; number?: number; parentSlotId?: string; cwd: string; createdAt: string; args: string[]; sessionFile?: string; sessionName?: string; sandboxed?: boolean; reopen?: boolean }
 interface Slot extends StoredSlot {
   process?: PiProcess;
   status: 'starting' | 'running' | 'exited';
@@ -64,7 +67,9 @@ interface Slot extends StoredSlot {
   incarnation: number;
 }
 interface Peer { socket: Socket; slotId?: string; activity?: boolean; filterTranscript?: boolean; ready: boolean; verified: boolean; pending: number; attaching: boolean; buffer: RemoteEvent[]; bufferBytes: number }
-export interface DaemonOptions { stateDir: string; executable?: string; prefixArgs?: string[]; env?: NodeJS.ProcessEnv; skipVersionCheck?: boolean; sideIdleGraceMs?: number }
+/** `launcher` selects the command for each launch mode. Without it, `executable` and
+ * `prefixArgs` (default `pi`) start both modes; tests use this seam. */
+export interface DaemonOptions { stateDir: string; executable?: string; prefixArgs?: string[]; launcher?: (sandboxed: boolean) => Launcher; env?: NodeJS.ProcessEnv; skipVersionCheck?: boolean; sideIdleGraceMs?: number }
 function object(value: any, name: string): RecordValue {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Invalid ${name}`);
   return value;
@@ -101,7 +106,7 @@ export class Supervisor {
 
   async start(): Promise<void> {
     await prepareStateDir(this.stateDir);
-    await this.checkVersion();
+    await this.checkVersion(false);
     const reopening: Slot[] = [];
     // Keep the old slots.json array format. A separate high-water mark survives pruning
     // even when every slot was a side slot. Write it before pruning the catalogue.
@@ -123,7 +128,7 @@ export class Supervisor {
         assigned.add(number!);
         this.nextSlotNumber = Math.max(this.nextSlotNumber, number! + 1);
         const { reopen, ...rest } = metadata;
-        const slot: Slot = { ...rest, number, status: 'exited', error: 'Daemon restarted. Work stopped; session history is on disk. Resume explicitly.', live: emptyLive(), ui: new Map(), timers: new Map(), seq: 0, state: {}, changing: false, restarting: false, mutations: 0, incarnation: 0 };
+        const slot: Slot = { ...rest, sandboxed: rest.sandboxed === true, number, status: 'exited', error: 'Daemon restarted. Work stopped; session history is on disk. Resume explicitly.', live: emptyLive(), ui: new Map(), timers: new Map(), seq: 0, state: {}, changing: false, restarting: false, mutations: 0, incarnation: 0 };
         this.slots.set(metadata.id, slot);
         if (reopen && slot.sessionFile) reopening.push(slot);
       }
@@ -158,10 +163,18 @@ export class Supervisor {
     await chmod(socketPath(this.stateDir), 0o600);
   }
 
-  private async checkVersion(): Promise<void> {
+  private launcher(sandboxed: boolean): Launcher {
+    return this.options.launcher?.(sandboxed) ?? { executable: this.options.executable ?? 'pi', prefixArgs: this.options.prefixArgs ?? [] };
+  }
+  /** Run the launch command with --version in the slot's directory, as the launch will. */
+  private async checkVersion(sandboxed: boolean, cwd?: string): Promise<void> {
     if (this.options.skipVersionCheck) return;
-    const { stdout } = await exec(this.options.executable ?? 'pi', [...(this.options.prefixArgs ?? []), '--version'], { env: { ...process.env, ...this.options.env }, timeout: 15_000 });
-    if (stdout.trim() !== PI_VERSION) throw new Error(`Remote Pi version ${stdout.trim()} does not match required ${PI_VERSION}`);
+    const { executable, prefixArgs } = this.launcher(sandboxed);
+    const mode = sandboxed ? 'Sandboxed' : 'Unsandboxed';
+    let stdout: string;
+    try { ({ stdout } = await exec(executable, [...prefixArgs, '--version'], { cwd, env: { ...process.env, ...this.options.env }, timeout: 30_000 })); }
+    catch (error) { throw new Error(`${mode} launch command '${[executable, ...prefixArgs].join(' ')}' failed: ${errorText(error)}`); }
+    if (stdout.trim() !== PI_VERSION) throw new Error(`Remote Pi version ${stdout.trim()} (${mode.toLowerCase()} launch) does not match required ${PI_VERSION}`);
   }
   private connect(socket: Socket) {
     const peer: Peer = { socket, ready: false, verified: false, pending: 0, attaching: false, buffer: [], bufferBytes: 0 };
@@ -186,7 +199,7 @@ export class Supervisor {
     catch { peer.socket.destroy(); }
   }
   private info(slot: Slot): SlotInfo {
-    return { id: slot.id, number: slot.number, parentSlotId: slot.parentSlotId, parentSlotNumber: slot.parentSlotId ? this.slots.get(slot.parentSlotId)?.number : undefined, cwd: slot.cwd, createdAt: slot.createdAt, pid: slot.status !== 'exited' ? slot.process?.child.pid : undefined, status: slot.status, sessionFile: slot.sessionFile, sessionName: slot.sessionName, error: slot.error, clients: [...this.peers].filter(p => p.slotId === slot.id).length };
+    return { id: slot.id, number: slot.number, parentSlotId: slot.parentSlotId, parentSlotNumber: slot.parentSlotId ? this.slots.get(slot.parentSlotId)?.number : undefined, cwd: slot.cwd, createdAt: slot.createdAt, pid: slot.status !== 'exited' ? slot.process?.child.pid : undefined, status: slot.status, sessionFile: slot.sessionFile, sessionName: slot.sessionName, sandboxed: slot.sandboxed === true, error: slot.error, clients: [...this.peers].filter(p => p.slotId === slot.id).length };
   }
   private slot(id: any): Slot {
     const slot = this.slots.get(string(id, 'slotId'));
@@ -295,7 +308,7 @@ export class Supervisor {
   private save(): Promise<void> {
     const stored: StoredSlot[] = [...this.slots.values()]
       .filter(slot => !slot.parentSlotId || slot.status !== 'exited' || this.reopen.has(slot.id))
-      .map(({id,number,parentSlotId,cwd,createdAt,args,sessionFile,sessionName}) => ({id,number,parentSlotId,cwd,createdAt,args,sessionFile,sessionName, ...(this.reopen.has(id) ? { reopen: true } : {})}));
+      .map(({id,number,parentSlotId,cwd,createdAt,args,sessionFile,sessionName,sandboxed}) => ({id,number,parentSlotId,cwd,createdAt,args,sessionFile,sessionName,sandboxed: sandboxed === true, ...(this.reopen.has(id) ? { reopen: true } : {})}));
     const nextSlotNumber = this.nextSlotNumber;
     this.saves = this.saves.catch(() => {}).then(async () => {
       const counter = join(this.stateDir, 'slots-counter.json.tmp');
@@ -330,10 +343,12 @@ export class Supervisor {
     if (options.parentSlotId !== undefined) return this.createSide(options);
     if (options.prompt !== undefined) throw new Error('prompt requires parentSlotId');
     if (options.expectedParentSessionId !== undefined) throw new Error('expectedParentSessionId requires parentSlotId');
-    // A daemon can outlive a Pi upgrade. Check the actual executable for every new slot.
-    await this.checkVersion();
+    if (options.sandboxed !== undefined && typeof options.sandboxed !== 'boolean') throw new Error('sandboxed must be a boolean');
+    const sandboxed = options.sandboxed ?? true;
     const cwd = await realpath(expandHome(string(options.cwd, 'cwd')));
     if (!(await stat(cwd)).isDirectory()) throw new Error('cwd must be a directory');
+    // A daemon can outlive a Pi upgrade. Check the actual launch command for every new slot.
+    await this.checkVersion(sandboxed, cwd);
     const args = options.args ?? [];
     if (!Array.isArray(args) || args.some(arg => typeof arg !== 'string')) throw new Error('args must be strings');
     for (const arg of args) if (RESERVED_ARGS.has(arg.split('=')[0]) || arg === '--') throw new Error(`Use daemon session options instead of ${arg}; credentials belong in the remote Pi configuration`);
@@ -343,7 +358,7 @@ export class Supervisor {
       if (sessionFile) this.reservedPaths.delete(sessionFile);
       throw new Error('Daemon is shutting down');
     }
-    const slot: Slot = { id: randomUUID(), number: this.nextSlotNumber++, cwd, createdAt: new Date().toISOString(), args, sessionFile, status: 'starting', live: emptyLive(), ui: new Map(), timers: new Map(), seq: 0, state: {}, changing: false, restarting: false, mutations: 0, incarnation: 0 };
+    const slot: Slot = { id: randomUUID(), number: this.nextSlotNumber++, cwd, createdAt: new Date().toISOString(), args, sessionFile, sandboxed, status: 'starting', live: emptyLive(), ui: new Map(), timers: new Map(), seq: 0, state: {}, changing: false, restarting: false, mutations: 0, incarnation: 0 };
     this.slots.set(slot.id, slot);
     try {
       this.launch(slot);
@@ -354,7 +369,7 @@ export class Supervisor {
   }
 
   private async createSide(options: CreateOptions): Promise<SlotInfo> {
-    if (options.cwd !== undefined || options.args !== undefined || options.sessionPath !== undefined) throw new Error('Side slots inherit cwd and args; do not supply cwd, args, or sessionPath');
+    if (options.cwd !== undefined || options.args !== undefined || options.sessionPath !== undefined || options.sandboxed !== undefined) throw new Error('Side slots inherit cwd, args, and launch mode; do not supply cwd, args, sessionPath, or sandboxed');
     if (options.prompt !== undefined && (typeof options.prompt !== 'string' || !options.prompt.trim())) throw new Error('prompt must be a nonempty string');
     if (options.expectedParentSessionId !== undefined) string(options.expectedParentSessionId, 'expectedParentSessionId');
     const parent = this.running(options.parentSlotId);
@@ -369,7 +384,7 @@ export class Supervisor {
       if (parent.state.sessionId !== identity.sessionId || parent.sessionFile !== identity.sessionFile) throw new Error('Parent session changed while creating side; no side was launched');
     };
     checkParent();
-    await this.checkVersion();
+    await this.checkVersion(parent.sandboxed === true, parent.cwd);
     checkParent();
     const state = await this.refreshState(parent);
     checkParent();
@@ -389,7 +404,7 @@ export class Supervisor {
     // Final checks and launch are synchronous. Never reserve or mutate the parent's file:
     // stock --fork reads only its persisted history, even when the parent is busy.
     const slot: Slot = { id: randomUUID(), number: this.nextSlotNumber++, parentSlotId: parent.id,
-      cwd: parent.cwd, createdAt: new Date().toISOString(), args: withSessionDir(parent.args, sessionDir),
+      cwd: parent.cwd, createdAt: new Date().toISOString(), args: withSessionDir(parent.args, sessionDir), sandboxed: parent.sandboxed === true,
       status: 'starting', live: emptyLive(), ui: new Map(), timers: new Map(), seq: 0, state: {},
       changing: false, restarting: false, mutations: 0, incarnation: 0, creating: true };
     this.slots.set(slot.id, slot);
@@ -418,7 +433,7 @@ export class Supervisor {
     const incarnation = ++slot.incarnation;
     slot.activityAborted = false; slot.activityRetryError = false;
     slot.initialPrompt = prompt !== undefined ? { message: prompt, incarnation } : undefined;
-    const launch: PiLaunch = { executable: this.options.executable ?? 'pi', prefixArgs: this.options.prefixArgs, cwd: slot.cwd,
+    const launch: PiLaunch = { ...this.launcher(slot.sandboxed === true), cwd: slot.cwd,
       env: { ...this.options.env, ...remoteSessionEnv({ host: hostname(), slotId: slot.id, slotNumber: slot.number }) },
       args: [...slot.args, ...(forkPath ? ['--fork', forkPath] : slot.sessionFile ? ['--session', slot.sessionFile] : [])] };
     slot.process = new PiProcess(launch, event => {
@@ -596,7 +611,7 @@ export class Supervisor {
     let reserved: string | undefined;
     try {
       // Refuse an incompatible executable before touching the currently running process.
-      await this.checkVersion();
+      await this.checkVersion(slot.sandboxed === true, slot.cwd);
       const snapshot = await this.snapshot(slot);
       const state = snapshot.state;
       if (this.isBusy(slot, state) && !force) throw busyError();
@@ -735,7 +750,7 @@ export class Supervisor {
       if (request.method === 'hello') {
         if (params.protocol !== PROTOCOL_VERSION || params.piVersion !== PI_VERSION) throw new Error(`Version mismatch: daemon protocol ${PROTOCOL_VERSION}, Pi ${PI_VERSION}`);
         peer.verified = true;
-        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, release: RELEASE, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'transcript_filtering', ACTIVITY_CAPABILITY] } satisfies MethodResult<'hello'>;
+        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, release: RELEASE, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'transcript_filtering', ACTIVITY_CAPABILITY, LAUNCH_MODES_CAPABILITY] } satisfies MethodResult<'hello'>;
       } else {
         if (!peer.verified) throw new Error('Send hello with matching versions first');
         if (peer.activity && request.method !== 'watch_activity') throw new Error('Activity watchers are read-only; use a separate connection');

@@ -55,6 +55,7 @@
       <h2>New session</h2>
       <label>Directory on the devbox<input id="new-session-cwd" name="cwd" list="new-session-dirs" required maxlength="4096" placeholder="~/project" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="go"></label>
       <datalist id="new-session-dirs"></datalist>
+      <label class="checkbox"><input type="checkbox" id="new-session-sandboxed" checked> Sandboxed</label>
       <p id="new-session-error" role="alert"></p>
       <button type="submit" id="create-session">Start session</button>
     </form>
