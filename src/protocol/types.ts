@@ -66,6 +66,8 @@ export interface RemoteConnection {
   onEvent(listener: (event: RemoteEvent) => void): () => void;
   onDisconnect(listener: (error: Error) => void): () => void;
   onReconnect?(listener: (snapshot: Snapshot) => void): () => void;
+  /** Native attachments only: the new attachment after a reconnect. */
+  onNativeReconnect?(listener: (attachment: import('./methods.js').SlotAttachment) => void): () => void;
   onRetry?(listener: (retry: ConnectionRetry) => void): () => void;
   close(): void;
 }

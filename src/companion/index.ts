@@ -16,7 +16,7 @@ import { createConnection, type Socket } from 'node:net';
 import { hostname } from 'node:os';
 import { appendFileSync } from 'node:fs';
 import {
-  decodeBarrier, diffLines, EDITOR_SECTION, COMPANION_SOCKET_ENV, SECTION_COUNT, sameEditorState,
+  decodeBarrier, decodeSetText, diffLines, EDITOR_SECTION, COMPANION_SOCKET_ENV, SECTION_COUNT, sameEditorState,
   type CompanionMessage, type ControlMessage, type EditorState, type LineDiff,
 } from '../protocol/companion.js';
 
@@ -125,6 +125,12 @@ class Bridge {
   input(data: string): { consume: true } | undefined {
     // Development aid: PI_REMOTE_COMPANION_DEBUG=FILE logs each input with the editor text before it.
     if (process.env.PI_REMOTE_COMPANION_DEBUG) appendFileSync(process.env.PI_REMOTE_COMPANION_DEBUG, `${JSON.stringify({ input: data, text: this.editor?.getText() })}\n`);
+    const text = decodeSetText(data);
+    if (text !== undefined) {
+      this.editor?.setText(text);
+      this.quiescent = false;
+      return { consume: true };
+    }
     const barrier = decodeBarrier(data);
     if (barrier === undefined) { this.quiescent = false; return undefined; }
     // The keys before this barrier were handled synchronously; report the state they produced.
@@ -319,6 +325,15 @@ export default function piRemoteCompanion(pi: ExtensionAPI): void {
     if (message.type === 'prompt') { try { pi.sendUserMessage(message.text); } catch { /* Reported through activity and the screen. */ } }
   }));
   reportActivity(pi, event => bridge.channel.send({ type: 'activity', event }));
+  // pi-remote commands. They act in the client that ran them.
+  pi.registerCommand('detach', {
+    description: 'Close this pi-remote client; Pi keeps running (pi-remote)',
+    handler: async () => { bridge.channel.send({ type: 'clientAction', action: 'detach' }); },
+  });
+  pi.registerCommand('status', {
+    description: 'Show the pi-remote connection status (pi-remote)',
+    handler: async () => { bridge.channel.send({ type: 'clientAction', action: 'status' }); },
+  });
   let unsubscribeInput: (() => void) | undefined;
   pi.on('session_start', (_event, ctx) => {
     if (ctx.mode !== 'tui') return;

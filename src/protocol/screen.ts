@@ -40,7 +40,7 @@ export class ScreenState {
         if (this.history.length > HISTORY_LIMIT) this.history.splice(0, this.history.length - HISTORY_LIMIT);
         break;
       case 'session': this.session = message; break;
-      case 'activity': break;
+      case 'activity': case 'terminal': case 'clientAction': break;
     }
   }
 

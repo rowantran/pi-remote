@@ -103,6 +103,8 @@ export interface DaemonMethods {
   /** Keys for Pi, in order. Makes this client the one that sets Pi's terminal size. */
   input: { params: { slotId: string; data: string }; result: EmptyResult };
   resize: { params: { slotId: string } & ClientTerminal; result: EmptyResult };
+  /** Store a pasted file on the daemon's machine for Pi to read; returns its path. */
+  upload: { params: { slotId: string; name: string; data: string }; result: { path: string } };
   complete_path: { params: FileContext & { prefix: string; directoriesOnly?: boolean }; result: PathCompletionResult };
   read_attachment: { params: FileContext & { path: string }; result: Attachment };
   filesystem_metadata: { params: FileContext; result: FilesystemMetadata };

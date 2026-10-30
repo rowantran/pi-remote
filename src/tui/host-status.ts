@@ -122,7 +122,8 @@ export interface StatusPanel {
   samples: readonly number[];
   /** Rows between latency and the daemon, for example the attached slot. */
   extra?: [string, string][];
-  daemon: DaemonState;
+  /** `null` leaves out the daemon rows, for a client that is not connected through a daemon. */
+  daemon: DaemonState | null;
 }
 
 /**
@@ -139,6 +140,7 @@ export function statusPanelRows(panel: StatusPanel, p: Paint, now = Date.now()):
     ...(panel.extra ?? []),
   ];
   const daemon = panel.daemon;
+  if (daemon === null) return formatRows(rows);
   if (daemon === 'loading') rows.push(['daemon', p.dim('loading…')]);
   else if (daemon && 'error' in daemon) rows.push(['daemon', p.error(plainText(daemon.error))]);
   else if (daemon || panel.connected) rows.push(...daemonRows(daemon, now));
@@ -162,11 +164,18 @@ export function statusSampler(connection: Requester, host: string, extra: [strin
 type PiSessionInfo = Extract<CompanionMessage, { type: 'session' }>;
 
 export interface SlotStatus {
-  /** SSH host the client connected to; undefined when Pi runs on this machine. */
-  sshHost?: string;
-  connectedForSeconds: number;
-  /** Recent round trips to the process that runs Pi, oldest first. */
+  /** Display name of the machine Pi runs on, for example the SSH host. */
+  host: string;
+  /** False while the client reconnects. */
+  connected: boolean;
+  /** For example `connected 2m`. */
+  connection?: string;
+  /** Recent round trips to the daemon, oldest first. */
   samples: readonly number[];
+  /** Daemon facts; `null` when the client does not use a daemon (development). */
+  daemon: DaemonState | null;
+  /** The slot, for example `#3 · running · 2 clients attached`. */
+  slot?: string;
   session?: PiSessionInfo;
   editor: 'local' | 'remote';
   editorKind?: 'default' | 'extension';
@@ -176,40 +185,34 @@ export interface SlotStatus {
   bytes: number;
 }
 
-/** Rows for the status panel: where Pi runs, how fast the link is, and which Pi session this is. */
+/**
+ * The status panel for native slots: the same host, latency and daemon rows as the other
+ * pickers (statusPanelRows), with Pi's own facts about its session and this client's state.
+ */
 export function slotStatusLines(status: SlotStatus, p: Paint): string[] {
   const session = status.session;
   const remote = session?.remote;
-  const stats = latencyStats(status.samples);
-  const rows: [string, string][] = [
-    ['mode', status.sshHost
-      ? `${p.ok('REMOTE')} · Pi runs on ${plainText(status.sshHost)} over SSH`
-      : `${p.warn('LOCAL')} · Pi runs on this machine`],
-    ['host', [
-      session ? plainText(session.hostname) : p.dim('waiting for Pi…'),
-      `connected ${formatDuration(status.connectedForSeconds)}`,
-    ].join(' · ')],
-    ['latency', stats
-      ? `${styleLatency(stats.last, p)} ${p.dim(`min ${formatLatency(stats.min)} · avg ${formatLatency(stats.avg)} · max ${formatLatency(stats.max)} · ${stats.count} sample${stats.count === 1 ? '' : 's'}`)}`
-      : p.dim('measuring…')],
-    ['pi-remote', remote
-      ? `slot ${plainText(remote.slotId ?? '?')} · Pi shows host ${plainText(remote.host ?? '?')}`
-      : p.dim(session ? 'not set: Pi does not know it runs in pi-remote' : 'waiting for Pi…')],
-  ];
+  const extra: [string, string][] = [];
+  if (status.slot) extra.push(['slot', status.slot]);
+  extra.push(['pi-remote', remote
+    ? `Pi runs on ${plainText(session!.hostname)} in slot ${plainText(remote.slotId ?? '?')}`
+    : p.warn(session ? 'Pi does not report a pi-remote session: it may be running locally' : 'waiting for Pi…')]);
   if (session) {
-    rows.push(
+    extra.push(
       ['session', [plainText(session.sessionId ?? 'not saved'), ...(session.sessionName ? [plainText(session.sessionName)] : [])].join(' · ')],
       ['file', plainText(session.sessionFile ?? 'none (session is not saved)')],
       ['workspace', plainText(session.cwd)],
       ['pi', `v${plainText(session.piVersion)} · pid ${session.pid}`],
     );
   }
-  rows.push(
+  extra.push(
     ['editor', status.editor === 'local'
       ? `local · ${status.editorKind === 'extension' ? 'extension editor' : 'Pi default editor'} · ${status.unconfirmedKeys} key${status.unconfirmedKeys === 1 ? '' : 's'} not yet confirmed`
       : p.warn('remote: every key waits for Pi')],
     ['screen', status.layoutKnown ? 'Pi layout recognized' : p.warn('Pi layout not recognized: showing Pi output as one block')],
     ['traffic', `${status.messages} message${status.messages === 1 ? '' : 's'} · ${formatBytes(status.bytes)} received`],
   );
-  return formatRows(rows);
+  return statusPanelRows({
+    host: status.host, connected: status.connected, connection: status.connection, samples: status.samples, extra, daemon: status.daemon,
+  }, p);
 }

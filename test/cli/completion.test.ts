@@ -523,9 +523,9 @@ test('CLI ls displays short numbers and resolves numeric rpc slots to UUIDs befo
   await writeFile(fixture.log, '');
   await exec(process.execPath, [...cli, 'rpc', '--host', 'alias', '19', '{"type":"get_state"}'], { env: fixture.env, cwd: root });
   const requests = (await readFile(fixture.log, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-  assert.deepEqual(requests.map(request => request.method), ['hello', 'list', 'attach', 'rpc']);
-  assert.equal(requests[2].params.slotId, '1234abcd-a');
+  assert.deepEqual(requests.map(request => request.method), ['hello', 'list', 'list', 'attach', 'rpc']);
   assert.equal(requests[3].params.slotId, '1234abcd-a');
+  assert.equal(requests[4].params.slotId, '1234abcd-a');
 });
 
 test('CLI takes the default host from the XDG config file, with PI_REMOTE_HOST and --host taking precedence', { timeout: 15000 }, async t => {

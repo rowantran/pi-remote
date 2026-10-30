@@ -75,7 +75,15 @@ export type CompanionMessage =
    * message_end (role, stop reason, tool names), compaction_start, compaction_end,
    * extension_ui_request (a dialog opened) and remote_dialog_resolved.
    */
-  | { type: 'activity'; event: { type: string; [key: string]: unknown } };
+  | { type: 'activity'; event: { type: string; [key: string]: unknown } }
+  /** A pi-remote command the user ran in Pi (/detach, /status); the client that typed it acts. */
+  | { type: 'clientAction'; action: 'detach' | 'status' }
+  /**
+   * Terminal output Pi wrote to its PTY that only a real terminal can act on: a bell, the
+   * window title, a desktop notification, progress, or a clipboard write (OSC 52). Added by
+   * the host, not the companion. `data` is the escape sequence to write to the local terminal.
+   */
+  | { type: 'terminal'; kind: 'bell' | 'title' | 'notify' | 'progress' | 'clipboard'; data: string };
 
 /** Messages from the host to the companion. */
 export type ControlMessage =
@@ -93,6 +101,17 @@ export function decodeBarrier(data: string): string | undefined {
   if (!data.startsWith(BARRIER_PREFIX) || !data.endsWith(APC_END)) return undefined;
   const id = data.slice(BARRIER_PREFIX.length, -APC_END.length);
   return /^[A-Za-z0-9_-]{1,64}:\d{1,15}$/.test(id) ? id : undefined;
+}
+
+const SET_TEXT_PREFIX = '\x1b_pi-remote:set-text:';
+
+/** Replace the editor text, in order with keys. Used after the client's local external editor. */
+export function encodeSetText(text: string): string { return `${SET_TEXT_PREFIX}${Buffer.from(text, 'utf8').toString('base64')}${APC_END}`; }
+
+export function decodeSetText(data: string): string | undefined {
+  if (!data.startsWith(SET_TEXT_PREFIX) || !data.endsWith(APC_END)) return undefined;
+  const encoded = data.slice(SET_TEXT_PREFIX.length, -APC_END.length);
+  return /^[A-Za-z0-9+/]*={0,2}$/.test(encoded) ? Buffer.from(encoded, 'base64').toString('utf8') : undefined;
 }
 
 export function sameEditorState(a: EditorState, b: EditorState): boolean {
