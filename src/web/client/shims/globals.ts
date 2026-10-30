@@ -18,11 +18,17 @@ const hrtime = (previous?: [number, number]): [number, number] => {
   const seconds = Math.floor(ns / 1e9);
   return [seconds, ns - seconds * 1e9];
 };
+/** Accept (and ignore) only 'exit' listeners; anything else is unavailable, as before. */
+const exitOnly = (name: string) => (event: string, ..._rest: unknown[]) => {
+  if (event !== 'exit') return blocked(name)();
+  return processShim;
+};
 const processShim = {
   env, platform: 'browser', argv: [] as string[], version: '', versions: {} as Record<string, string>,
   cwd: () => '/', exitCode: undefined as number | undefined, pid: 0,
   nextTick: (callback: (...args: any[]) => void, ...args: any[]) => queueMicrotask(() => callback(...args)),
-  on: blocked('process.on'), once: blocked('process.once'), off: blocked('process.off'),
+  // pi-tui 1.4 restores the terminal from a process 'exit' handler. A page has no process exit.
+  on: exitOnly('process.on'), once: exitOnly('process.once'), off: exitOnly('process.off'),
   removeListener: blocked('process.removeListener'), emit: blocked('process.emit'),
   stdout: stream('process.stdout'), stderr: stream('process.stderr'), stdin: stream('process.stdin'),
   hrtime: Object.assign(hrtime, { bigint: () => BigInt(Math.round(performance.now() * 1e6)) }),

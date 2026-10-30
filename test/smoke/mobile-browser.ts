@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
 import { createECDH, randomBytes } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,7 +17,7 @@ import { testProxy } from '../web-browser/proxy.js';
 
 /** Real browser → TLS test proxy → web Unix socket → isolated daemon → deterministic Pi child.
  * No credentials, live daemon, Tailscale configuration, or real model calls are involved. */
-const dir = await mkdtemp('/tmp/pi-phone-smoke-');
+const dir = await mkdtemp(join(await realpath('/tmp'), 'pi-phone-smoke-'));
 const stateDir = join(dir, 'daemon');
 const webState = join(dir, 'web');
 const commandsLog = join(dir, 'commands.jsonl');
