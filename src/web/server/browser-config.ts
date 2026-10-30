@@ -6,8 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { configPath } from '../../config/client.js';
 import type { PresentationConfig } from '../../config/presentation.js';
 
-export interface PresentationMetadata { hash: string; bundleBytes: number; extensions: string[] }
-export interface BrowserConfig { home: string; files: Record<string, string>; presentation?: PresentationMetadata; presentationError?: string }
+/** Theme files and safe settings for the phone's page colors, as virtual files. */
+export interface BrowserConfig { home: string; files: Record<string, string> }
 export const MAX_THEME_BYTES = 128 * 1024;
 const THEME_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 export function validThemeName(value: unknown): value is string { return typeof value === 'string' && THEME_NAME.test(value); }

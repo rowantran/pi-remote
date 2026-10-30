@@ -23,7 +23,7 @@ Options:
   --allow-user LOGIN  Exact Tailscale-User-Login; repeat for each allowed user
   --ui-config PATH    Normal pi-remote config on this server (default XDG config path)
 
-The web client uses this server's configured themes and trusted presentation extensions.
+The web client colors its page with this server's configured theme. Pi renders each session.
 Extension paths resolve on this server. Reload the phone after editing config or source.
 
 The listener is Unix-socket only. Put it behind private Tailscale Serve, never Funnel.
