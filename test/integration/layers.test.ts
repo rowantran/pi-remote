@@ -8,7 +8,7 @@ import ts from 'typescript';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
 const layers: Record<string, string[]> = {
-  config: [], protocol: [], daemon: ['protocol'], client: ['protocol'], tui: ['protocol', 'config'],
+  config: [], protocol: [], companion: ['protocol'], daemon: ['protocol'], client: ['protocol'], tui: ['protocol', 'config'],
   'web/shared': [],
   'web/server': ['daemon', 'client', 'protocol', 'config', 'web/shared'],
   'web/build': ['tui', 'protocol', 'web/shared'],
@@ -53,6 +53,7 @@ test('project references allow composition and reject cross-layer source imports
   assert.equal(build(true), ts.ExitStatus.Success, format());
   for (const [from, to] of [
     ['client', 'tui'], ['daemon', 'client'], ['tui', 'daemon'], ['protocol', 'daemon'],
+    ['companion', 'tui'], ['companion', 'daemon'], ['daemon', 'tui'], ['protocol', 'companion'],
     ['protocol', 'config'], ['config', 'protocol'],
     ['protocol', 'web/shared'], ['config', 'web/shared'], ['daemon', 'web/shared'], ['client', 'web/shared'], ['tui', 'web/shared'],
     ['web/shared', 'config'], ['web/shared', 'protocol'], ['web/shared', 'daemon'], ['web/shared', 'client'], ['web/shared', 'tui'],
