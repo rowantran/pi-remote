@@ -34,9 +34,11 @@ function setup(options: ConstructorParameters<typeof PiScreen>[2] = {}) {
   /** Keys Pi received, without barriers, and the barrier sent after each one. */
   const keys = () => sent.map(data => {
     const index = data.indexOf('\x1b_');
-    return index === -1 ? { key: data } : { key: data.slice(0, index), barrier: decodeBarrier(data.slice(index)) };
+    return index === -1 ? { key: data } : { key: data.slice(0, index), barrier: Number(decodeBarrier(data.slice(index))!.split(':')[1]) };
   });
-  return { client, receive, sent, writes, keys, text: () => client.editor!.getText() };
+  /** This client's barrier for key number `n`. */
+  const barrier = (n: number) => `${decodeBarrier(sent.find(data => data.includes('\x1b_'))!.slice(sent.find(data => data.includes('\x1b_'))!.indexOf('\x1b_')))!.split(':')[0]}:${n}`;
+  return { client, receive, sent, writes, keys, barrier, text: () => client.editor!.getText() };
 }
 
 const flush = () => new Promise<void>(resolve => queueMicrotask(resolve));
@@ -52,31 +54,40 @@ test('editor keys show locally at once and go to Pi with a barrier, in one write
   assert.equal(client.unconfirmedKeys, 2);
 });
 
-test('a matching report confirms keys without changing the local editor', () => {
-  const { client, receive, text } = setup();
+test('a matching report confirms keys without changing the local editor', async () => {
+  const { client, receive, text, barrier } = setup();
   for (const key of 'abc') client.input(key);
-  receive({ type: 'editor', barrier: 2, state: state('ab') });
+  await flush(); receive({ type: 'editor', barrier: barrier(2), state: state('ab') });
   assert.equal(text(), 'abc');
   assert.equal(client.unconfirmedKeys, 1);
 });
 
-test('a different report takes Pi state and replays newer keys', () => {
-  const { client, receive, text } = setup();
+test('a different report takes Pi state and replays newer keys', async () => {
+  const { client, receive, text, barrier } = setup();
   for (const key of 'ab') client.input(key);
   client.input('\r'); // Enter: the local editor clears, like Pi's.
   assert.equal(text(), '');
   for (const key of 'cd') client.input(key);
   // Pi did something the local editor could not know: it restored the text after Enter.
-  receive({ type: 'editor', barrier: 3, state: state('restored') });
+  await flush(); receive({ type: 'editor', barrier: barrier(3), state: state('restored') });
   assert.equal(text(), 'restoredcd');
   assert.equal(client.unconfirmedKeys, 2);
 });
 
-test('a change Pi makes on its own replaces the confirmed local state', () => {
+test('a report after another client\'s keys replaces local state and replays this client\'s keys', async () => {
   const { client, receive, text } = setup();
+  client.input('m');
+  await flush();
+  receive({ type: 'editor', barrier: 'other:7', state: state('theirs') });
+  assert.equal(text(), 'theirsm');
+  assert.equal(client.unconfirmedKeys, 1);
+});
+
+test('a change Pi makes on its own replaces the confirmed local state', async () => {
+  const { client, receive, text, barrier } = setup();
   client.input('x');
-  receive({ type: 'editor', barrier: 1, state: state('x') });
-  receive({ type: 'editor', barrier: 1, state: state('from an extension') });
+  await flush(); receive({ type: 'editor', barrier: barrier(1), state: state('x') });
+  await flush(); receive({ type: 'editor', barrier: barrier(1), state: state('from an extension') });
   assert.equal(text(), 'from an extension');
 });
 
@@ -90,7 +101,7 @@ test('app shortcuts go to Pi without changing local text', async () => {
 });
 
 test('while Pi shows its dropdown, dropdown keys wait for Pi and its rows are shown', async () => {
-  const { client, receive, keys, text } = setup();
+  const { client, receive, keys, text, barrier } = setup();
   client.input('/');
   receive({ type: 'frame', width: 80, layout: 'known', reset: false, editorFocused: true, dropdownRows: 2, hardwareCursor: false, sections: {
     4: { start: 0, remove: 3, insert: ['── pi border ──', '/', '──', '→ model', '  scoped-models'] },
@@ -99,7 +110,7 @@ test('while Pi shows its dropdown, dropdown keys wait for Pi and its rows are sh
   assert.equal(text(), '/', 'Tab is not applied locally');
   await flush();
   assert.equal(keys().at(-1)!.key, '\t');
-  receive({ type: 'editor', barrier: 2, state: state('/model ') });
+  await flush(); receive({ type: 'editor', barrier: barrier(2), state: state('/model ') });
   assert.equal(text(), '/model ');
   const lines = client.tui.render(80).join('\n');
   assert.match(lines, /→ model/);

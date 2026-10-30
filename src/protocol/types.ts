@@ -25,6 +25,8 @@ export interface SlotInfo {
   sessionName?: string;
   error?: string;
   clients: number;
+  /** Pi runs its own interactive UI, shown through attach_native. Absent for RPC slots. */
+  native?: boolean;
 }
 export interface LiveState {
   busy: boolean;
@@ -53,7 +55,9 @@ export interface Snapshot {
   historyComplete?: boolean;
   presentation?: { models?: RecordValue[]; stats?: RecordValue; gitBranch?: string; homeDir?: string; [key: string]: any };
 }
-export interface CreateOptions { cwd?: string; args?: string[]; sessionPath?: string; parentSlotId?: string; prompt?: string; expectedParentSessionId?: string }
+export interface CreateOptions { cwd?: string; args?: string[]; sessionPath?: string; parentSlotId?: string; prompt?: string; expectedParentSessionId?: string;
+  /** Run Pi's own interactive UI (see attach_native). Side slots inherit their parent's kind. */
+  native?: boolean }
 /** A failed recovery attempt and the delay before the next attempt. */
 export interface ConnectionRetry { attempt: number; error: Error; nextDelayMs: number }
 export interface RemoteConnection {

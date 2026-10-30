@@ -1,6 +1,16 @@
 import type { Attachment, FilesystemMetadata, PathCompletionResult } from './files.js';
 import type { ActivitySnapshot } from './notification-stream.js';
 import type { CreateOptions, HistoryCursor, RecordValue, SlotInfo, Snapshot } from './types.js';
+import type { CompanionMessage, TerminalAnswers } from './companion.js';
+
+/** A native client's terminal: its size and its answers to Pi's terminal queries. */
+export interface ClientTerminal { columns: number; rows: number; answers?: TerminalAnswers }
+
+/**
+ * attach_native result. `messages` rebuild the current screen from nothing; live messages
+ * follow as `{ type: 'screen', message }` events with a higher seq.
+ */
+export interface SlotAttachment { slot: SlotInfo; messages: CompanionMessage[]; seq: number }
 
 /** Session catalogue data after JSON serialization; no upstream runtime dependency. */
 export interface SessionInfo {
@@ -88,6 +98,11 @@ export interface DaemonMethods {
   rpc: { params: { slotId: string; command: RecordValue }; result: unknown };
   answer: { params: { slotId: string; response: DialogResponse }; result: EmptyResult };
   kill: { params: { slotId: string }; result: EmptyResult };
+  /** Attach to a native slot. The client that last typed or resized sets Pi's terminal size. */
+  attach_native: { params: { slotId: string } & ClientTerminal; result: SlotAttachment };
+  /** Keys for Pi, in order. Makes this client the one that sets Pi's terminal size. */
+  input: { params: { slotId: string; data: string }; result: EmptyResult };
+  resize: { params: { slotId: string } & ClientTerminal; result: EmptyResult };
   complete_path: { params: FileContext & { prefix: string; directoriesOnly?: boolean }; result: PathCompletionResult };
   read_attachment: { params: FileContext & { path: string }; result: Attachment };
   filesystem_metadata: { params: FileContext; result: FilesystemMetadata };

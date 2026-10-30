@@ -130,7 +130,7 @@ async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {
     if (verify) {
       const response = await peer.request('hello', hello);
       assert.deepEqual({protocol: response.protocol, piVersion: response.piVersion, pid: response.pid}, { ...hello, pid: process.pid });
-      assert.deepEqual(response.capabilities, ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'transcript_filtering', 'activity_stream']);
+      assert.deepEqual(response.capabilities, ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'incremental_snapshots', 'side_slots', 'transcript_filtering', 'native_slots', 'activity_stream']);
     }
     return peer;
   };

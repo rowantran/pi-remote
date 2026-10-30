@@ -260,7 +260,7 @@ test('remote setup retains immutable releases, validates before atomic switch, a
   assert.match(REMOTE_INSTALL_SCRIPT, /mkdir "\$release"\ncreated=1/);
   assert.match(REMOTE_INSTALL_SCRIPT, /npm ci --omit=dev --ignore-scripts --no-audit --no-fund/);
   const switchAt = REMOTE_INSTALL_SCRIPT.indexOf('mv -Tf');
-  for (const validation of ['npm ci', 'bin/pi-remote --version', 'bin/pi-remote completion fish']) {
+  for (const validation of ['npm ci', 'npm rebuild node-pty', `require('node-pty')`, 'bin/pi-remote --version', 'bin/pi-remote completion fish']) {
     assert.ok(REMOTE_INSTALL_SCRIPT.indexOf(validation) < switchAt, `${validation} must finish before switching`);
   }
   assert.match(REMOTE_INSTALL_SCRIPT, /ln -s "\$release\/bin\/pi-remote"/);

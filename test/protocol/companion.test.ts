@@ -18,7 +18,8 @@ test('an append sends only the new lines', () => {
 });
 
 test('barriers round-trip and ignore other input', () => {
-  assert.equal(decodeBarrier(encodeBarrier(42)), 42);
+  assert.equal(decodeBarrier(encodeBarrier('c1:42')), 'c1:42');
+  assert.equal(decodeBarrier(encodeBarrier('bad tag:1')), undefined);
   assert.equal(decodeBarrier('a'), undefined);
   assert.equal(decodeBarrier('\x1b_other\x1b\\'), undefined);
 });
