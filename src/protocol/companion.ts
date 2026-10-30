@@ -1,0 +1,87 @@
+/**
+ * Messages between the companion extension (inside the remote Pi process) and the
+ * pi-remote host that owns that Pi process. Keep this file free of imports: Pi loads
+ * the companion through its own module loader, and this file is loaded with it.
+ */
+
+/** Environment variable with the Unix socket path the companion connects to. */
+export const COMPANION_SOCKET_ENV = 'PI_REMOTE_COMPANION_SOCKET';
+
+/**
+ * Pi's interactive mode mounts these root children, in this order, in both its regular
+ * and fullscreen layouts. The client rebuilds Pi's fullscreen layout from them.
+ */
+export const SECTION_NAMES = ['document', 'pendingMessages', 'status', 'widgetsAbove', 'editor', 'widgetsBelow', 'footer'] as const;
+export const SECTION_COUNT = SECTION_NAMES.length;
+export const EDITOR_SECTION = 4;
+
+/** Replace `remove` lines at `start` with `insert`. */
+export interface LineDiff { start: number; remove: number; insert: string[] }
+
+export interface EditorState { text: string; cursor: { line: number; col: number } }
+
+export type CompanionMessage =
+  /**
+   * Sent when Pi creates an editor in its editor slot. `bindings` are the remote's resolved
+   * keybindings. `editor` says whether the editor is Pi's default or one an extension set.
+   */
+  | { type: 'editorInstalled'; editor: 'default' | 'extension'; bindings: Record<string, string | string[] | undefined>; theme?: string }
+  /**
+   * Rendered lines. `sections` holds changes for the sections that changed since the last frame.
+   * `layout: 'unknown'` means the root did not match SECTION_NAMES; then `sections[0]`
+   * holds every rendered line and the client must forward all keys. `editorFocused` means
+   * the editor holds the editor slot and has keyboard focus (no picker or dialog is open).
+   * `reset` means the diffs start from empty sections. `dropdownRows` is the number of
+   * autocomplete rows at the end of the editor section; 0 when no dropdown is open.
+   * `hardwareCursor` is Pi's showHardwareCursor setting, which the client's renderer applies.
+   */
+  | {
+    type: 'frame'; width: number; layout: 'known' | 'unknown'; reset: boolean;
+    sections: Record<number, LineDiff>; editorFocused: boolean; dropdownRows: number; hardwareCursor: boolean;
+  }
+  /**
+   * Authoritative stand-in editor state. `barrier` is the last input barrier the remote
+   * processed; the state includes every key sent before it.
+   */
+  | { type: 'editor'; barrier: number; state: EditorState }
+  /** Editor appearance that Pi sets on the stand-in editor. `border` wraps text as [before, after]. */
+  | { type: 'editorChrome'; border: [string, string]; paddingX: number; autocompleteMaxVisible: number }
+  | { type: 'history'; text: string }
+  /** Facts about the Pi process and its current session, for the client's status panel. */
+  | {
+    type: 'session'; hostname: string; pid: number; piVersion: string; cwd: string;
+    sessionId?: string; sessionFile?: string; sessionName?: string;
+    /** The pi-remote session variables Pi sees; absent when Pi does not run in a pi-remote session. */
+    remote?: { host?: string; slotId?: string };
+  };
+
+/** APC (application program command) escape sequences pass through Pi's input parser as one unit. */
+const BARRIER_PREFIX = '\x1b_pi-remote:barrier:';
+const APC_END = '\x1b\\';
+
+export function encodeBarrier(id: number): string { return `${BARRIER_PREFIX}${id}${APC_END}`; }
+
+export function decodeBarrier(data: string): number | undefined {
+  if (!data.startsWith(BARRIER_PREFIX) || !data.endsWith(APC_END)) return undefined;
+  const id = Number(data.slice(BARRIER_PREFIX.length, -APC_END.length));
+  return Number.isSafeInteger(id) ? id : undefined;
+}
+
+export function sameEditorState(a: EditorState, b: EditorState): boolean {
+  return a.text === b.text && a.cursor.line === b.cursor.line && a.cursor.col === b.cursor.col;
+}
+
+/** The smallest single replacement that turns `before` into `after`. */
+export function diffLines(before: readonly string[], after: readonly string[]): LineDiff | undefined {
+  const shorter = Math.min(before.length, after.length);
+  let start = 0;
+  while (start < shorter && before[start] === after[start]) start++;
+  if (start === before.length && start === after.length) return undefined;
+  let end = 0;
+  while (end < shorter - start && before[before.length - 1 - end] === after[after.length - 1 - end]) end++;
+  return { start, remove: before.length - start - end, insert: after.slice(start, after.length - end) };
+}
+
+export function applyDiff(lines: readonly string[], diff: LineDiff): string[] {
+  return [...lines.slice(0, diff.start), ...diff.insert, ...lines.slice(diff.start + diff.remove)];
+}

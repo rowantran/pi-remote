@@ -2,6 +2,7 @@ import { basename } from 'node:path';
 import type { DaemonStatus } from '../protocol/methods.js';
 import type { RemoteConnection, SlotInfo } from '../protocol/types.js';
 import { plainText, type Paint } from './table.js';
+import type { CompanionMessage } from '../protocol/companion.js';
 
 /** Round trips at or above these are shown as slow and very slow. */
 export const SLOW_MS = 150;
@@ -156,4 +157,59 @@ export function statusSampler(connection: Requester, host: string, extra: [strin
       return statusPanelRows({ host, connected: true, samples, extra, daemon }, p);
     },
   };
+}
+
+type PiSessionInfo = Extract<CompanionMessage, { type: 'session' }>;
+
+export interface SlotStatus {
+  /** SSH host the client connected to; undefined when Pi runs on this machine. */
+  sshHost?: string;
+  connectedForSeconds: number;
+  /** Recent round trips to the process that runs Pi, oldest first. */
+  samples: readonly number[];
+  session?: PiSessionInfo;
+  editor: 'local' | 'remote';
+  editorKind?: 'default' | 'extension';
+  unconfirmedKeys: number;
+  layoutKnown: boolean;
+  messages: number;
+  bytes: number;
+}
+
+/** Rows for the status panel: where Pi runs, how fast the link is, and which Pi session this is. */
+export function slotStatusLines(status: SlotStatus, p: Paint): string[] {
+  const session = status.session;
+  const remote = session?.remote;
+  const stats = latencyStats(status.samples);
+  const rows: [string, string][] = [
+    ['mode', status.sshHost
+      ? `${p.ok('REMOTE')} · Pi runs on ${plainText(status.sshHost)} over SSH`
+      : `${p.warn('LOCAL')} · Pi runs on this machine`],
+    ['host', [
+      session ? plainText(session.hostname) : p.dim('waiting for Pi…'),
+      `connected ${formatDuration(status.connectedForSeconds)}`,
+    ].join(' · ')],
+    ['latency', stats
+      ? `${styleLatency(stats.last, p)} ${p.dim(`min ${formatLatency(stats.min)} · avg ${formatLatency(stats.avg)} · max ${formatLatency(stats.max)} · ${stats.count} sample${stats.count === 1 ? '' : 's'}`)}`
+      : p.dim('measuring…')],
+    ['pi-remote', remote
+      ? `slot ${plainText(remote.slotId ?? '?')} · Pi shows host ${plainText(remote.host ?? '?')}`
+      : p.dim(session ? 'not set: Pi does not know it runs in pi-remote' : 'waiting for Pi…')],
+  ];
+  if (session) {
+    rows.push(
+      ['session', [plainText(session.sessionId ?? 'not saved'), ...(session.sessionName ? [plainText(session.sessionName)] : [])].join(' · ')],
+      ['file', plainText(session.sessionFile ?? 'none (session is not saved)')],
+      ['workspace', plainText(session.cwd)],
+      ['pi', `v${plainText(session.piVersion)} · pid ${session.pid}`],
+    );
+  }
+  rows.push(
+    ['editor', status.editor === 'local'
+      ? `local · ${status.editorKind === 'extension' ? 'extension editor' : 'Pi default editor'} · ${status.unconfirmedKeys} key${status.unconfirmedKeys === 1 ? '' : 's'} not yet confirmed`
+      : p.warn('remote: every key waits for Pi')],
+    ['screen', status.layoutKnown ? 'Pi layout recognized' : p.warn('Pi layout not recognized: showing Pi output as one block')],
+    ['traffic', `${status.messages} message${status.messages === 1 ? '' : 's'} · ${formatBytes(status.bytes)} received`],
+  );
+  return formatRows(rows);
 }

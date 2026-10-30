@@ -1,0 +1,144 @@
+import { accessSync, chmodSync, constants, existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { createServer, type Server, type Socket } from 'node:net';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { spawn, type IPty } from 'node-pty';
+import { readJsonl } from '../protocol/jsonl.js';
+import { COMPANION_SOCKET_ENV, type CompanionMessage } from '../protocol/companion.js';
+
+export interface RgbColor { r: number; g: number; b: number }
+
+/** Answers to the queries Pi's renderer sends to its terminal, taken from the client's terminal. */
+export interface TerminalAnswers {
+  /** Kitty keyboard protocol flags. Undefined means the client's terminal does not use the protocol. */
+  kittyFlags?: number;
+  foreground?: RgbColor;
+  background?: RgbColor;
+  palette?: RgbColor[];
+  /** Cell size in pixels, for image layout. */
+  cell?: { width: number; height: number };
+}
+
+export interface PiTerminalOptions {
+  executable: string;
+  /** Extra Pi CLI arguments, after the ones the host adds. */
+  args: string[];
+  cwd: string;
+  companionPath: string;
+  columns: number;
+  rows: number;
+  env?: NodeJS.ProcessEnv;
+  answers: TerminalAnswers;
+}
+
+const hex16 = (value: number) => Math.round(Math.max(0, Math.min(255, value)) * 257).toString(16).padStart(4, '0');
+const oscColor = (color: RgbColor) => `rgb:${hex16(color.r)}/${hex16(color.g)}/${hex16(color.b)}`;
+
+/**
+ * Terminal queries that Pi's renderer writes at startup. Pi runs in a PTY whose output
+ * nobody displays, so the host answers them with the client terminal's values.
+ */
+const QUERY = /\x1b\[\?u|\x1b\[0?c|\x1b\](10|11|4;(\d+));\?(?:\x07|\x1b\\)|\x1b\[16t/g;
+const QUERY_TAIL_BYTES = 64;
+
+/** Answers every query in `output` that ends after index `after`. */
+export function answerQueries(output: string, answers: TerminalAnswers, after = 0): string {
+  let reply = '';
+  for (const match of output.matchAll(QUERY)) {
+    if (match.index + match[0].length <= after) continue;
+    const query = match[0];
+    if (query === '\x1b[?u') { if (answers.kittyFlags !== undefined) reply += `\x1b[?${answers.kittyFlags}u`; }
+    else if (query === '\x1b[c' || query === '\x1b[0c') reply += '\x1b[?62;22c';
+    else if (query === '\x1b[16t') { if (answers.cell) reply += `\x1b[6;${answers.cell.height};${answers.cell.width}t`; }
+    else if (match[1] === '10' && answers.foreground) reply += `\x1b]10;${oscColor(answers.foreground)}\x1b\\`;
+    else if (match[1] === '11' && answers.background) reply += `\x1b]11;${oscColor(answers.background)}\x1b\\`;
+    else if (match[2] !== undefined) {
+      const index = Number(match[2]);
+      const color = answers.palette?.[index];
+      if (color) reply += `\x1b]4;${index};${oscColor(color)}\x1b\\`;
+    }
+  }
+  return reply;
+}
+
+/**
+ * node-pty's macOS prebuild starts processes through a `spawn-helper` binary. Its install
+ * script marks it executable, but this project installs with --ignore-scripts.
+ */
+export function ensureSpawnHelper(): void {
+  if (process.platform !== 'darwin') return;
+  const root = dirname(createRequire(import.meta.url).resolve('node-pty/package.json'));
+  const helper = join(root, 'prebuilds', `${process.platform}-${process.arch}`, 'spawn-helper');
+  if (!existsSync(helper)) return;
+  try { accessSync(helper, constants.X_OK); }
+  catch { chmodSync(helper, statSync(helper).mode | 0o111); }
+}
+
+/**
+ * Runs the stock interactive Pi CLI in a PTY with the companion extension loaded, and
+ * relays the companion's messages. The PTY carries keys in; its output is discarded
+ * except for terminal queries, because the client draws from the companion's frames.
+ */
+export class PiTerminal {
+  onMessage?: (message: CompanionMessage) => void;
+  onExit?: (code: number, signal?: number) => void;
+  private pty?: IPty;
+  private server?: Server;
+  private companion?: Socket;
+  private socketDir?: string;
+  private queryTail = '';
+
+  constructor(private readonly options: PiTerminalOptions) {}
+
+  async start(): Promise<void> {
+    this.socketDir = mkdtempSync(join(tmpdir(), 'pi-remote-companion-'));
+    const socketPath = join(this.socketDir, 'companion.sock');
+    this.server = createServer(socket => {
+      // One companion per Pi process. A second connection is unexpected; keep the first.
+      if (this.companion) { socket.destroy(); return; }
+      this.companion = socket;
+      readJsonl(socket, record => this.onMessage?.(record as CompanionMessage), error => {
+        console.error(`pi-remote: companion message error: ${error.message}`);
+      }, { recover: true });
+    });
+    await new Promise<void>((resolve, reject) => {
+      this.server!.once('error', reject);
+      this.server!.listen(socketPath, () => { this.server!.off('error', reject); resolve(); });
+    });
+    const { executable, args, cwd, companionPath, columns, rows, env } = this.options;
+    ensureSpawnHelper();
+    this.pty = spawn(executable, ['--tui-mode', 'regular', '-e', companionPath, ...args], {
+      name: 'xterm-256color', cols: columns, rows, cwd,
+      env: { ...process.env, ...env, [COMPANION_SOCKET_ENV]: socketPath, COLORTERM: 'truecolor' } as Record<string, string>,
+    });
+    this.pty.onData(data => this.handleOutput(data));
+    this.pty.onExit(({ exitCode, signal }) => { this.cleanup(); this.onExit?.(exitCode, signal); });
+  }
+
+  /** Writes client input to Pi, in order. */
+  write(data: string): void { this.pty?.write(data); }
+
+  resize(columns: number, rows: number): void {
+    if (columns > 0 && rows > 0) this.pty?.resize(columns, rows);
+  }
+
+  setAnswers(answers: TerminalAnswers): void { this.options.answers = answers; }
+
+  stop(): void { this.pty?.kill(); }
+
+  private handleOutput(data: string): void {
+    // Queries can be split across reads. Scan the new data with a short tail of the old.
+    // Queries that end inside the old tail were answered with the previous read.
+    const text = this.queryTail + data;
+    const reply = answerQueries(text, this.options.answers, this.queryTail.length);
+    this.queryTail = text.slice(-QUERY_TAIL_BYTES);
+    if (reply) this.pty?.write(reply);
+  }
+
+  private cleanup(): void {
+    this.companion?.destroy();
+    this.server?.close();
+    if (this.socketDir) rmSync(this.socketDir, { recursive: true, force: true });
+  }
+}

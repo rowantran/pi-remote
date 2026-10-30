@@ -8,6 +8,9 @@
       "path": "./src/protocol"
     },
     {
+      "path": "./src/companion"
+    },
+    {
       "path": "./src/daemon"
     },
     {
