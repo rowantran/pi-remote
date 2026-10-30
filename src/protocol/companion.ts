@@ -4,6 +4,19 @@
  * the companion through its own module loader, and this file is loaded with it.
  */
 
+export interface RgbColor { r: number; g: number; b: number }
+
+/** Answers to the queries Pi's renderer sends to its terminal, taken from a client's terminal. */
+export interface TerminalAnswers {
+  /** Kitty keyboard protocol flags. Undefined means the terminal does not use the protocol. */
+  kittyFlags?: number;
+  foreground?: RgbColor;
+  background?: RgbColor;
+  palette?: RgbColor[];
+  /** Cell size in pixels, for image layout. */
+  cell?: { width: number; height: number };
+}
+
 /** Environment variable with the Unix socket path the companion connects to. */
 export const COMPANION_SOCKET_ENV = 'PI_REMOTE_COMPANION_SOCKET';
 
@@ -40,10 +53,10 @@ export type CompanionMessage =
     sections: Record<number, LineDiff>; editorFocused: boolean; dropdownRows: number; hardwareCursor: boolean;
   }
   /**
-   * Authoritative stand-in editor state. `barrier` is the last input barrier the remote
-   * processed; the state includes every key sent before it.
+   * Authoritative editor state. `barrier` is the last input barrier Pi processed, as
+   * `CLIENT:NUMBER`; the state includes every key sent before it, from every client.
    */
-  | { type: 'editor'; barrier: number; state: EditorState }
+  | { type: 'editor'; barrier: string; state: EditorState }
   /** Editor appearance that Pi sets on the stand-in editor. `border` wraps text as [before, after]. */
   | { type: 'editorChrome'; border: [string, string]; paddingX: number; autocompleteMaxVisible: number }
   | { type: 'history'; text: string }
@@ -51,20 +64,35 @@ export type CompanionMessage =
   | {
     type: 'session'; hostname: string; pid: number; piVersion: string; cwd: string;
     sessionId?: string; sessionFile?: string; sessionName?: string;
+    /** Entries in the session; 0 means nothing would be lost by reopening it from its file. */
+    entryCount?: number;
     /** The pi-remote session variables Pi sees; absent when Pi does not run in a pi-remote session. */
     remote?: { host?: string; slotId?: string };
-  };
+  }
+  /**
+   * Pi lifecycle events for `ls`, notifications and busy checks, in the same shape as Pi's
+   * RPC events, without transcript text: agent_start, agent_end, agent_settled,
+   * message_end (role, stop reason, tool names), compaction_start, compaction_end,
+   * extension_ui_request (a dialog opened) and remote_dialog_resolved.
+   */
+  | { type: 'activity'; event: { type: string; [key: string]: unknown } };
+
+/** Messages from the host to the companion. */
+export type ControlMessage =
+  /** Send `text` to the agent as a user message (pi.sendUserMessage). */
+  | { type: 'prompt'; text: string };
 
 /** APC (application program command) escape sequences pass through Pi's input parser as one unit. */
 const BARRIER_PREFIX = '\x1b_pi-remote:barrier:';
 const APC_END = '\x1b\\';
 
-export function encodeBarrier(id: number): string { return `${BARRIER_PREFIX}${id}${APC_END}`; }
+/** `id` is `CLIENT:NUMBER`. Each client picks its own CLIENT tag, so reports name their keys. */
+export function encodeBarrier(id: string): string { return `${BARRIER_PREFIX}${id}${APC_END}`; }
 
-export function decodeBarrier(data: string): number | undefined {
+export function decodeBarrier(data: string): string | undefined {
   if (!data.startsWith(BARRIER_PREFIX) || !data.endsWith(APC_END)) return undefined;
-  const id = Number(data.slice(BARRIER_PREFIX.length, -APC_END.length));
-  return Number.isSafeInteger(id) ? id : undefined;
+  const id = data.slice(BARRIER_PREFIX.length, -APC_END.length);
+  return /^[A-Za-z0-9_-]{1,64}:\d{1,15}$/.test(id) ? id : undefined;
 }
 
 export function sameEditorState(a: EditorState, b: EditorState): boolean {

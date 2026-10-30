@@ -220,6 +220,8 @@ export class PiScreen {
   /** Autocomplete rows at the end of Pi's editor section; 0 when Pi shows no dropdown. */
   dropdownRows = 0;
   private barrier = 0;
+  /** Names this client's barriers, so it can tell its own reports from other clients'. */
+  private readonly tag = Math.random().toString(36).slice(2, 10);
   private pending: PendingKey[] = [];
   private keybindings = new KeybindingsManager(TUI_KEYBINDINGS);
   private statusPanel?: { handle: OverlayHandle; timer: NodeJS.Timeout };
@@ -293,7 +295,7 @@ export class PiScreen {
     if (!editor || !this.editorLocal) { this.send(data); return; }
     // Pi's editor gets the same key; the barrier lets it report the state it reached.
     const id = ++this.barrier;
-    this.send(data + encodeBarrier(id));
+    this.send(data + encodeBarrier(`${this.tag}:${id}`));
     // While Pi shows its dropdown, these keys act on the dropdown, which only Pi has.
     // Leave the local editor alone and show Pi's result when it arrives.
     if (this.dropdownRows > 0 && DROPDOWN_KEYS.some(binding => this.keybindings.matches(data, binding))) {
@@ -382,10 +384,13 @@ export class PiScreen {
     if (wasLocal && !this.editorLocal) this.pending = [];
   }
 
-  /** The remote editor's exact state after barrier `id`. Confirm the local copy or correct it. */
-  private confirm(id: number, state: EditorState): void {
+  /** The remote editor's exact state after a barrier. Confirm the local copy or correct it. */
+  private confirm(barrier: string, state: EditorState): void {
     const editor = this.editor;
     if (!editor) return;
+    // Another client's barrier says nothing about which of this client's keys Pi has seen.
+    const [tag, number] = barrier.split(':');
+    const id = tag === this.tag ? Number(number) : 0;
     const head = this.pending.find(key => key.id === id);
     const rest = this.pending.filter(key => key.id > id);
     this.pending = rest;

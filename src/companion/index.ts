@@ -17,7 +17,7 @@ import { hostname } from 'node:os';
 import { appendFileSync } from 'node:fs';
 import {
   decodeBarrier, diffLines, EDITOR_SECTION, COMPANION_SOCKET_ENV, SECTION_COUNT, sameEditorState,
-  type CompanionMessage, type EditorState, type LineDiff,
+  type CompanionMessage, type ControlMessage, type EditorState, type LineDiff,
 } from '../protocol/companion.js';
 
 class Channel {
@@ -26,8 +26,20 @@ class Channel {
   private failed = false;
   private queue: string[] = [];
 
-  constructor(path: string) {
+  constructor(path: string, onControl: (message: ControlMessage) => void) {
     this.socket = createConnection(path);
+    // Control messages from the host, one JSON object per line.
+    let buffered = '';
+    this.socket.setEncoding('utf8');
+    this.socket.on('data', (chunk: string) => {
+      buffered += chunk;
+      let end: number;
+      while ((end = buffered.indexOf('\n')) !== -1) {
+        const line = buffered.slice(0, end);
+        buffered = buffered.slice(end + 1);
+        try { onControl(JSON.parse(line) as ControlMessage); } catch { /* Ignore a malformed message. */ }
+      }
+    });
     this.socket.on('connect', () => {
       this.connected = true;
       for (const line of this.queue) this.socket.write(line);
@@ -80,7 +92,7 @@ class Bridge {
   private width = 0;
   private sentWidth = 0;
   private flushQueued = false;
-  private lastBarrier = 0;
+  private lastBarrier = '';
   /** True when the last input from the client was a barrier, so the editor state has a precise position. */
   private quiescent = true;
   private reported?: EditorState;
@@ -258,14 +270,55 @@ function sessionMessage(ctx: ExtensionContext): CompanionMessage {
   return {
     type: 'session', hostname: hostname(), pid: process.pid, piVersion: VERSION, cwd: ctx.cwd,
     sessionId: sessions.getSessionId(), sessionFile: sessions.getSessionFile(), sessionName: sessions.getSessionName(),
+    entryCount: sessions.getEntries().length,
     remote: env.PI_REMOTE_SESSION === '1' ? { host: env.PI_REMOTE_SESSION_HOST, slotId: env.PI_REMOTE_SESSION_SLOT } : undefined,
   };
+}
+
+type ActivityEvent = Extract<CompanionMessage, { type: 'activity' }>['event'];
+
+/** Only what notifications need from a message: never text, thinking, or tool arguments. */
+function redactedMessage(message: any): Record<string, unknown> | undefined {
+  if (!message || typeof message.role !== 'string') return undefined;
+  if (message.role === 'assistant') {
+    return {
+      role: 'assistant', stopReason: message.stopReason,
+      content: Array.isArray(message.content) ? message.content.filter((block: any) => block?.type === 'toolCall')
+        .map((block: any) => ({ type: 'toolCall', name: block.name, id: block.id })) : [],
+    };
+  }
+  if (message.role === 'toolResult') return { role: 'toolResult', toolName: message.toolName, toolCallId: message.toolCallId, isError: message.isError };
+  return { role: message.role };
+}
+
+/** Pi lifecycle events for the daemon, in the shape of Pi's RPC events. */
+function reportActivity(pi: ExtensionAPI, send: (event: ActivityEvent) => void): void {
+  pi.on('agent_start', () => { send({ type: 'agent_start' }); });
+  pi.on('agent_end', event => {
+    const last = redactedMessage(event.messages.findLast((message: any) => message?.role === 'assistant'));
+    send({ type: 'agent_end', messages: last ? [last] : [] });
+  });
+  pi.on('agent_settled', event => { send({ type: 'agent_settled', aborted: event.aborted }); });
+  pi.on('message_end', event => { const message = redactedMessage(event.message); if (message) send({ type: 'message_end', message }); });
+  pi.on('session_before_compact', event => {
+    send({ type: 'compaction_start', reason: event.reason === 'threshold' ? 'automatic' : event.reason });
+    return undefined;
+  });
+  pi.on('session_compact', () => { send({ type: 'compaction_end', aborted: false }); });
+  pi.on('session_compact_failed', event => { send({ type: 'compaction_end', aborted: event.aborted, errorMessage: event.errorMessage }); });
+  // Pi reports only the outermost extension dialog; one ID at a time is enough.
+  let dialog = 0;
+  pi.on('ui_prompt_start', event => { send({ type: 'extension_ui_request', id: `dialog-${++dialog}`, method: event.kind, title: event.title }); });
+  pi.on('ui_prompt_end', () => { send({ type: 'remote_dialog_resolved', id: `dialog-${dialog}` }); });
 }
 
 export default function piRemoteCompanion(pi: ExtensionAPI): void {
   const socketPath = process.env[COMPANION_SOCKET_ENV];
   if (!socketPath) return;
-  const bridge = new Bridge(new Channel(socketPath));
+  const bridge = new Bridge(new Channel(socketPath, message => {
+    if (message.type === 'prompt') { try { pi.sendUserMessage(message.text); } catch { /* Reported through activity and the screen. */ } }
+  }));
+  reportActivity(pi, event => bridge.channel.send({ type: 'activity', event }));
   let unsubscribeInput: (() => void) | undefined;
   pi.on('session_start', (_event, ctx) => {
     if (ctx.mode !== 'tui') return;
@@ -275,4 +328,6 @@ export default function piRemoteCompanion(pi: ExtensionAPI): void {
     bridge.channel.send(sessionMessage(ctx));
   });
   pi.on('session_info_changed', (_event, ctx) => { bridge.channel.send(sessionMessage(ctx)); });
+  // Keep the entry count current for reload and daemon-restart safety checks.
+  pi.on('agent_settled', (_event, ctx) => { bridge.channel.send(sessionMessage(ctx)); });
 }

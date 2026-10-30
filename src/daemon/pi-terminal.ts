@@ -5,23 +5,13 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawn, type IPty } from 'node-pty';
 import { readJsonl } from '../protocol/jsonl.js';
-import { COMPANION_SOCKET_ENV, type CompanionMessage } from '../protocol/companion.js';
-
-export interface RgbColor { r: number; g: number; b: number }
-
-/** Answers to the queries Pi's renderer sends to its terminal, taken from the client's terminal. */
-export interface TerminalAnswers {
-  /** Kitty keyboard protocol flags. Undefined means the client's terminal does not use the protocol. */
-  kittyFlags?: number;
-  foreground?: RgbColor;
-  background?: RgbColor;
-  palette?: RgbColor[];
-  /** Cell size in pixels, for image layout. */
-  cell?: { width: number; height: number };
-}
+import { COMPANION_SOCKET_ENV, type CompanionMessage, type ControlMessage, type RgbColor, type TerminalAnswers } from '../protocol/companion.js';
+export type { RgbColor, TerminalAnswers } from '../protocol/companion.js';
 
 export interface PiTerminalOptions {
   executable: string;
+  /** Arguments before Pi's own, for example a script path when `executable` is node. */
+  prefixArgs?: string[];
   /** Extra Pi CLI arguments, after the ones the host adds. */
   args: string[];
   cwd: string;
@@ -41,6 +31,13 @@ const oscColor = (color: RgbColor) => `rgb:${hex16(color.r)}/${hex16(color.g)}/$
  */
 const QUERY = /\x1b\[\?u|\x1b\[0?c|\x1b\](10|11|4;(\d+));\?(?:\x07|\x1b\\)|\x1b\[16t/g;
 const QUERY_TAIL_BYTES = 64;
+
+/** Dark or light, from the background's relative luminance; undefined without a background. */
+export function appearance(answers: TerminalAnswers): 'dark' | 'light' | undefined {
+  const color = answers.background;
+  if (!color) return undefined;
+  return 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b < 128 ? 'dark' : 'light';
+}
 
 /** Answers every query in `output` that ends after index `after`. */
 export function answerQueries(output: string, answers: TerminalAnswers, after = 0): string {
@@ -88,8 +85,16 @@ export class PiTerminal {
   private companion?: Socket;
   private socketDir?: string;
   private queryTail = '';
+  private exited?: Promise<void>;
+  private size: { columns: number; rows: number };
 
-  constructor(private readonly options: PiTerminalOptions) {}
+  constructor(private readonly options: PiTerminalOptions) {
+    this.size = { columns: options.columns, rows: options.rows };
+  }
+
+  get pid(): number | undefined { return this.pty?.pid; }
+  get columns(): number { return this.size.columns; }
+  get rows(): number { return this.size.rows; }
 
   async start(): Promise<void> {
     this.socketDir = mkdtempSync(join(tmpdir(), 'pi-remote-companion-'));
@@ -106,26 +111,56 @@ export class PiTerminal {
       this.server!.once('error', reject);
       this.server!.listen(socketPath, () => { this.server!.off('error', reject); resolve(); });
     });
-    const { executable, args, cwd, companionPath, columns, rows, env } = this.options;
+    const { executable, prefixArgs = [], args, cwd, companionPath, columns, rows, env } = this.options;
     ensureSpawnHelper();
-    this.pty = spawn(executable, ['--tui-mode', 'regular', '-e', companionPath, ...args], {
+    this.pty = spawn(executable, [...prefixArgs, '--tui-mode', 'regular', '-e', companionPath, ...args], {
       name: 'xterm-256color', cols: columns, rows, cwd,
       env: { ...process.env, ...env, [COMPANION_SOCKET_ENV]: socketPath, COLORTERM: 'truecolor' } as Record<string, string>,
     });
     this.pty.onData(data => this.handleOutput(data));
-    this.pty.onExit(({ exitCode, signal }) => { this.cleanup(); this.onExit?.(exitCode, signal); });
+    this.exited = new Promise(resolve => {
+      this.pty!.onExit(({ exitCode, signal }) => { this.cleanup(); resolve(); this.onExit?.(exitCode, signal); });
+    });
+  }
+
+  /** Sends a message to the companion inside Pi. Dropped when the companion is not connected. */
+  control(message: ControlMessage): boolean {
+    if (!this.companion || this.companion.destroyed) return false;
+    this.companion.write(`${JSON.stringify(message)}\n`);
+    return true;
   }
 
   /** Writes client input to Pi, in order. */
   write(data: string): void { this.pty?.write(data); }
 
   resize(columns: number, rows: number): void {
-    if (columns > 0 && rows > 0) this.pty?.resize(columns, rows);
+    if (!(columns > 0 && rows > 0) || (columns === this.size.columns && rows === this.size.rows)) return;
+    this.size = { columns, rows };
+    this.pty?.resize(columns, rows);
   }
 
-  setAnswers(answers: TerminalAnswers): void { this.options.answers = answers; }
+  get answers(): TerminalAnswers { return this.options.answers; }
 
-  stop(): void { this.pty?.kill(); }
+  /**
+   * Use another terminal's answers from now on. When its light or dark appearance differs,
+   * report the change the way a terminal does (DEC mode 2031), so Pi can switch themes.
+   */
+  setAnswers(answers: TerminalAnswers): void {
+    const before = appearance(this.options.answers), after = appearance(answers);
+    this.options.answers = answers;
+    if (after && after !== before) this.pty?.write(`\x1b[?997;${after === 'dark' ? 1 : 2}n`);
+  }
+
+  /**
+   * Stops Pi: SIGTERM first, so Pi saves its session and restores the terminal, then
+   * SIGKILL if it has not exited after `graceMs`.
+   */
+  async stop(graceMs = 5000): Promise<void> {
+    if (!this.pty || !this.exited) return;
+    try { this.pty.kill('SIGTERM'); } catch { /* Already gone. */ }
+    const timer = setTimeout(() => { try { this.pty?.kill('SIGKILL'); } catch { /* Already gone. */ } }, graceMs);
+    try { await this.exited; } finally { clearTimeout(timer); }
+  }
 
   private handleOutput(data: string): void {
     // Queries can be split across reads. Scan the new data with a short tail of the old.

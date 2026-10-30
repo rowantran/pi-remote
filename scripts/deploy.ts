@@ -99,6 +99,9 @@ created=1
 tar -xzf "$archive" -C "$release"
 cd "$release"
 npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+# node-pty runs each slot's Pi in a terminal. Linux has no prebuilt binary: compile it.
+npm rebuild node-pty --no-audit --no-fund
+node -e "require('node-pty')"
 chmod +x bin/pi-remote
 # Validate both the compiled launcher and completion assets before switching.
 bin/pi-remote --version
