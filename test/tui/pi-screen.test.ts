@@ -4,7 +4,7 @@ import { CustomEditor } from '@earendil-works/pi-coding-agent';
 import { TUI_KEYBINDINGS, type Terminal } from '@earendil-works/pi-tui';
 import { PiScreen, STATUS_KEY } from '../../src/tui/pi-screen.js';
 import { answerQueries } from '../../src/daemon/pi-terminal.js';
-import { decodeBarrier, type CompanionMessage, type EditorState } from '../../src/protocol/companion.js';
+import { decodeBarrier, type PiExtensionMessage, type EditorState } from '../../src/protocol/pi-extension.js';
 
 class FakeTerminal implements Terminal {
   columns = 80; rows = 24; kittyProtocolActive = true;
@@ -24,7 +24,7 @@ function setup(options: ConstructorParameters<typeof PiScreen>[2] = {}) {
   const client = new PiScreen(new FakeTerminal(), {
     send: data => { writes.push(data); sent.push(...data.split(/(?<=\x1b\\)/)); }, resize() {},
   }, options);
-  const receive = (message: CompanionMessage) => client.receive(message);
+  const receive = (message: PiExtensionMessage) => client.receive(message);
   receive({ type: 'editorInstalled', editor: 'default', bindings: { ...bindings, 'app.model.select': 'ctrl+l' } });
   receive({ type: 'frame', width: 80, layout: 'known', reset: true, editorFocused: true, dropdownRows: 0, hardwareCursor: false, sections: {
     0: { start: 0, remove: 0, insert: ['transcript'] },

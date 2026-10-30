@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Deterministic stand-in for interactive Pi in a slot. It plays both Pi and the
-// companion: it reads keys from its terminal and reports to the companion socket. No SDK,
+// Deterministic stand-in for interactive Pi in a slot. It plays both Pi and pi-remote's
+// Pi extension: it reads keys from its terminal and reports to the extension socket. No SDK,
 // credentials, or network access.
 //
 // Environment:
@@ -45,7 +45,7 @@ const save = () => {
 };
 if (!entries.length) entries.push({ type: 'session', id: sessionId, cwd: process.cwd(), timestamp: new Date().toISOString() });
 
-const socket = createConnection(process.env.PI_REMOTE_COMPANION_SOCKET);
+const socket = createConnection(process.env.PI_REMOTE_EXTENSION_SOCKET);
 const send = message => socket.write(`${JSON.stringify(message)}\n`);
 const transcript = () => entries.filter(entry => entry.type === 'message').map(entry => `${entry.role}: ${entry.text}`);
 let draft = '';

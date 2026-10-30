@@ -1,7 +1,7 @@
 import type { Attachment, FilesystemMetadata, PathCompletionResult } from './files.js';
 import type { ActivitySnapshot } from './notification-stream.js';
 import type { CreateOptions, SlotInfo } from './types.js';
-import type { CompanionMessage, TerminalAnswers } from './companion.js';
+import type { PiExtensionMessage, TerminalAnswers } from './pi-extension.js';
 
 /** A client's terminal: its size and its answers to Pi's terminal queries. */
 export interface ClientTerminal { columns: number; rows: number; answers?: TerminalAnswers }
@@ -10,7 +10,7 @@ export interface ClientTerminal { columns: number; rows: number; answers?: Termi
  * attach result. `messages` rebuild the current screen from nothing; live messages
  * follow as `{ type: 'screen', message }` events with a higher seq.
  */
-export interface SlotAttachment { slot: SlotInfo; messages: CompanionMessage[]; seq: number;
+export interface SlotAttachment { slot: SlotInfo; messages: PiExtensionMessage[]; seq: number;
   /** Pi is running or compacting. Later changes arrive as agent_start and agent_settled events. */
   busy?: boolean }
 

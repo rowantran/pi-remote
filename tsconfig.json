@@ -8,7 +8,7 @@
       "path": "./src/protocol"
     },
     {
-      "path": "./src/companion"
+      "path": "./src/pi-extension"
     },
     {
       "path": "./src/daemon"

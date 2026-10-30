@@ -58,7 +58,7 @@ test('watch_activity requires hello and a separate read-only peer; advertises ac
   await assert.rejects(watcher.connection.request('list'), /read-only/);
 });
 
-test('one observer sees several slots from companion events, redacted, without changing client counts', { timeout: 15_000 }, async t => {
+test('one observer sees several slots from Pi extension events, redacted, without changing client counts', { timeout: 15_000 }, async t => {
   const { connect, controller, create } = await setup(t);
   const one: SlotInfo = await create(), two: SlotInfo = await create();
   const watcher = await connect();

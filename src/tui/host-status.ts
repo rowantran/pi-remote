@@ -2,7 +2,7 @@ import { basename } from 'node:path';
 import type { DaemonStatus } from '../protocol/methods.js';
 import type { RemoteConnection, SlotInfo } from '../protocol/types.js';
 import { plainText, type Paint } from './table.js';
-import type { CompanionMessage } from '../protocol/companion.js';
+import type { PiExtensionMessage } from '../protocol/pi-extension.js';
 
 /** Round trips at or above these are shown as slow and very slow. */
 export const SLOW_MS = 150;
@@ -161,7 +161,7 @@ export function statusSampler(connection: Requester, host: string, extra: [strin
   };
 }
 
-type PiSessionInfo = Extract<CompanionMessage, { type: 'session' }>;
+type PiSessionInfo = Extract<PiExtensionMessage, { type: 'session' }>;
 
 export interface SlotStatus {
   /** Display name of the machine Pi runs on, for example the SSH host. */

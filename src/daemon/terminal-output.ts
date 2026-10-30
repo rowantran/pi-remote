@@ -1,6 +1,6 @@
-import type { CompanionMessage } from '../protocol/companion.js';
+import type { PiExtensionMessage } from '../protocol/pi-extension.js';
 
-type TerminalMessage = Extract<CompanionMessage, { type: 'terminal' }>;
+type TerminalMessage = Extract<PiExtensionMessage, { type: 'terminal' }>;
 const MAX_PENDING = 64 * 1024;
 
 /**

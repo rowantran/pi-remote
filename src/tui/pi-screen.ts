@@ -6,8 +6,8 @@ import {
 } from '@earendil-works/pi-tui';
 import {
   applyDiff, EDITOR_SECTION, encodeBarrier, encodeSetText, SECTION_COUNT, sameEditorState,
-  type CompanionMessage, type EditorState,
-} from '../protocol/companion.js';
+  type PiExtensionMessage, type EditorState,
+} from '../protocol/pi-extension.js';
 
 /** How the client reaches the remote Pi process. Calls must be delivered in order. */
 export interface PiScreenLink {
@@ -272,8 +272,8 @@ export class PiScreen {
   private outgoing: string[] = [];
   /** Kind of editor in Pi's slot, from the last editorInstalled message. */
   editorKind?: 'default' | 'extension';
-  /** The last facts the companion sent about Pi and its session. */
-  session?: Extract<CompanionMessage, { type: 'session' }>;
+  /** The last facts the Pi extension sent about Pi and its session. */
+  session?: Extract<PiExtensionMessage, { type: 'session' }>;
   readonly traffic = { messages: 0, bytes: 0 };
   private readonly banner = new Banner();
   private readonly transcript: ScrollView;
@@ -337,7 +337,7 @@ export class PiScreen {
   get layoutKnown(): boolean { return this.layout === 'known'; }
 
   /** `bytes` is the message's encoded size, when the caller knows it. */
-  receive(message: CompanionMessage, bytes = 0): void {
+  receive(message: PiExtensionMessage, bytes = 0): void {
     this.traffic.messages++;
     this.traffic.bytes += bytes;
     switch (message.type) {
@@ -479,7 +479,7 @@ export class PiScreen {
     this.pending = [];
   }
 
-  private applyFrame(message: Extract<CompanionMessage, { type: 'frame' }>): void {
+  private applyFrame(message: Extract<PiExtensionMessage, { type: 'frame' }>): void {
     this.layout = message.layout;
     if (message.reset) for (const section of this.sections) section.set([], message.width);
     for (const [key, diff] of Object.entries(message.sections)) {

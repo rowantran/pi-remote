@@ -11,7 +11,7 @@ import { readJsonl, writeJsonl } from '../protocol/jsonl.js';
 import { ACTIVITY_CAPABILITY, activitySlot, activitySource, type ActivitySnapshot } from '../protocol/notification-stream.js';
 import { PiTerminal } from './pi-terminal.js';
 import { ScreenState } from '../protocol/screen.js';
-import type { CompanionMessage, TerminalAnswers } from '../protocol/companion.js';
+import type { PiExtensionMessage, TerminalAnswers } from '../protocol/pi-extension.js';
 import { remoteSessionEnv } from '../protocol/remote-session.js';
 import { socketPath } from '../protocol/paths.js';
 import type { FileMethod, MethodResult, ClientTerminal, SessionInfo } from '../protocol/methods.js';
@@ -23,7 +23,7 @@ import { PI_VERSION, PROTOCOL_VERSION, errorText, type CreateOptions, type Recor
 type SessionInfoSource = Omit<SessionInfo, 'created' | 'modified'> & { created: Date; modified: Date };
 
 const exec = promisify(execFile);
-/** Kinds of extension dialog Pi can wait on (from the companion's ui_prompt events). */
+/** Kinds of extension dialog Pi can wait on (from the Pi extension's ui_prompt events). */
 const DIALOGS = new Set(['select', 'confirm', 'input', 'editor', 'custom']);
 const RESERVED_ARGS = new Set(['--mode', '--tui-mode', '--print', '-p', '--session', '--session-id', '--fork', '--continue', '-c', '--resume', '-r', '--no-session', '--export', '--help', '-h', '--version', '-v', '--api-key']);
 
@@ -31,8 +31,8 @@ const RESERVED_ARGS = new Set(['--mode', '--tui-mode', '--print', '-p', '--sessi
 const RELEASE = realpathSync(fileURLToPath(new URL('../..', import.meta.url)));
 const DAEMON_STARTED_AT = new Date().toISOString();
 const BUSY = 'Remote Pi is busy. Confirm reload to interrupt running work and discard queued prompts.';
-/** The companion extension the daemon loads into slots, next to this module. */
-const COMPANION = fileURLToPath(new URL(`../companion/index.${import.meta.url.endsWith('.ts') ? 'ts' : 'js'}`, import.meta.url));
+/** pi-remote's Pi extension, which the daemon loads into each slot's Pi. */
+const PI_EXTENSION = fileURLToPath(new URL(`../pi-extension/pi-remote.${import.meta.url.endsWith('.ts') ? 'ts' : 'js'}`, import.meta.url));
 /** Pi in a slot always uses the kitty keyboard protocol; clients send keys in that encoding. */
 const KITTY_FLAGS = 7;
 /** Terminal size until a client attaches. */
@@ -45,7 +45,7 @@ interface PiRuntime { host: PiTerminal; screen: ScreenState; owner?: Peer }
 /** `reopen` marks a slot that was running when `restart_daemon` stopped the daemon. The next
  * daemon starts it again from its session file, exactly like /reload. Crashes never set it. */
 interface StoredSlot { id: string; number?: number; parentSlotId?: string; cwd: string; createdAt: string; args: string[]; sessionFile?: string; sessionName?: string; reopen?: boolean }
-/** Whether Pi is working, from the companion's lifecycle events. */
+/** Whether Pi is working, from the Pi extension's lifecycle events. */
 interface Live { busy: boolean; compacting: boolean }
 const idle = (): Live => ({ busy: false, compacting: false });
 interface Slot extends StoredSlot {
@@ -244,7 +244,7 @@ export class Supervisor {
     void this.save().catch(error => console.error('Cannot save daemon metadata:', error));
     this.sendInitialPrompt(slot);
   }
-  /** The companion reports a slot's session as it changes; there is nothing to ask. */
+  /** The Pi extension reports a slot's session as it changes; there is nothing to ask. */
   private refreshState(slot: Slot): Promise<RecordValue> {
     if (slot.status === 'starting') return Promise.reject(new Error('Pi is starting'));
     return Promise.resolve(slot.state);
@@ -388,28 +388,28 @@ export class Supervisor {
   }
 
   /**
-   * Start stock interactive Pi in a PTY with the companion. The slot is `starting` until
-   * the companion reports the session; the client that attaches first sets the size.
+   * Start stock interactive Pi in a PTY with the Pi extension. The slot is `starting` until
+   * the Pi extension reports the session; the client that attaches first sets the size.
    */
   private launchTerminal(slot: Slot, incarnation: number): void {
     const owner = slot.runtime?.owner;
     const size = owner?.terminal ?? DEFAULT_SIZE;
     const host = new PiTerminal({
-      executable: this.options.executable ?? 'pi', prefixArgs: this.options.prefixArgs, cwd: slot.cwd, companionPath: COMPANION,
+      executable: this.options.executable ?? 'pi', prefixArgs: this.options.prefixArgs, cwd: slot.cwd, extensionPath: PI_EXTENSION,
       args: [...slot.args, ...(slot.sessionFile ? ['--session', slot.sessionFile] : [])],
       env: { ...this.options.env, ...remoteSessionEnv({ host: hostname(), slotId: slot.id, slotNumber: slot.number }) },
       columns: size.columns, rows: size.rows, answers: terminalAnswers(owner?.terminal?.answers),
     });
     slot.runtime = { host, screen: new ScreenState(), owner };
-    host.onMessage = message => { if (incarnation === slot.incarnation) this.companionMessage(slot, message); };
+    host.onMessage = message => { if (incarnation === slot.incarnation) this.extensionMessage(slot, message); };
     host.onExit = (code, signal) => {
       if (incarnation === slot.incarnation) this.finishExit(slot, new Error(slot.stopping ? 'Stopped by request. Session history is on disk.' : `Pi exited (code=${code}, signal=${signal ?? 0}).`));
     };
     host.start().catch(error => { if (incarnation === slot.incarnation) this.finishExit(slot, new Error(`Cannot start Pi: ${errorText(error)}`)); });
   }
 
-  /** Apply a companion message to the slot, then pass it to the slot's clients. */
-  private companionMessage(slot: Slot, message: CompanionMessage): void {
+  /** Apply a Pi extension message to the slot, then pass it to the slot's clients. */
+  private extensionMessage(slot: Slot, message: PiExtensionMessage): void {
     // A clipboard write and a pi-remote command belong to the client that acted last.
     if ((message.type === 'terminal' && message.kind === 'clipboard') || message.type === 'clientAction') {
       const owner = slot.runtime!.owner;
@@ -424,12 +424,12 @@ export class Supervisor {
       const changed = slot.state.sessionId !== undefined && slot.state.sessionId !== state.sessionId;
       if (changed) { slot.live = idle(); slot.ui.clear(); }
       this.updateState(slot, state);
-    } else if (message.type === 'activity') this.companionActivity(slot, message.event);
+    } else if (message.type === 'activity') this.extensionActivity(slot, message.event);
     this.publish(slot, { type: 'screen', message });
   }
 
-  /** Lifecycle events from the companion keep busy flags, dialogs, `ls` and notifications current. */
-  private companionActivity(slot: Slot, event: RecordValue): void {
+  /** Lifecycle events from the Pi extension keep busy flags, dialogs, `ls` and notifications current. */
+  private extensionActivity(slot: Slot, event: RecordValue): void {
     const live = slot.live;
     if (event.type === 'agent_start') live.busy = true;
     else if (event.type === 'agent_settled') live.busy = false;
@@ -466,7 +466,7 @@ export class Supervisor {
   }
 
   /**
-   * The companion reports the session when Pi is ready; wait briefly for it. A slow startup
+   * The Pi extension reports the session when Pi is ready; wait briefly for it. A slow startup
    * (or an extension awaiting UI) leaves the slot `starting`; Pi is never killed for it.
    */
   private async startupGrace(slot: Slot): Promise<void> {
@@ -777,7 +777,7 @@ export class Supervisor {
             clearTimeout(slot.sideExpiry);
             slot.detachedAt = undefined;
             if (!slot.runtime.owner || slot.runtime.owner.socket.destroyed) this.takeSize(slot, peer);
-            // Synchronous: no companion message can arrive between this cut and live events.
+            // Synchronous: no Pi extension message can arrive between this cut and live events.
             data = { slot: this.info(slot), messages: slot.runtime.screen.snapshot(), seq: slot.seq, busy: slot.live.busy || slot.live.compacting } satisfies MethodResult<'attach'>;
             break;
           }

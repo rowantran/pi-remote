@@ -4,7 +4,7 @@ Use **Pi's own interface** on a laptop while Pi runs on a remote machine. Typing
 
 ## How it works
 
-The remote daemon runs the normal interactive `pi` program in a terminal (PTY) it owns, with a small pi-remote extension (the *companion*) loaded. Pi draws its interface as usual. The companion sends each of Pi's seven screen sections (transcript, pending messages, status, widgets, editor, widgets, footer) to the laptop as line changes.
+The remote daemon runs the normal interactive `pi` program in a terminal (PTY) it owns, with **pi-remote's Pi extension** loaded (`src/pi-extension/pi-remote.ts`; Pi lists it as `pi-remote.ts`). Pi draws its interface as usual. The extension sends each of Pi's seven screen sections (transcript, pending messages, status, widgets, editor, widgets, footer) to the laptop as line changes.
 
 The laptop client arranges those sections in Pi's fullscreen layout and keeps two parts local:
 
@@ -189,8 +189,8 @@ pi-remote client -> SSH stdio -> bridge -> private Unix socket
                                                 |
                                          detached daemon
                                           /           \
-                              PTY: pi + companion   PTY: pi + companion
-                                    slot A             slot B
+                         PTY: pi + pi-remote.ts   PTY: pi + pi-remote.ts
+                                 slot A                   slot B
 ```
 
 - One on-demand detached daemon per remote state directory. No network listener or systemd unit.
@@ -260,15 +260,15 @@ cli ──→ daemon ──→ protocol
     ├─→ client ──→ protocol
     ├─→ tui    ──→ protocol, config
     └────────────→ config
-companion ──→ protocol           (loaded into each remote Pi process)
+pi-extension ──→ protocol   (loaded into each remote Pi process)
 
 cli ──→ web/server ──→ daemon, client, protocol, config, web/shared
         web/build ──→ tui, protocol, web/shared
         web/client ─→ client, tui, protocol, web/shared
 ```
 
-- `src/companion/index.ts`: the Pi extension loaded into each slot's Pi. Sends Pi's screen sections, editor state, session facts and lifecycle events; registers `/detach` and `/status`.
-- `src/protocol/companion.ts`, `screen.ts`: companion messages, input barriers and line diffs; a screen copy that rebuilds a client from nothing. `types.ts`, `methods.ts`: daemon wire records and methods.
+- `src/pi-extension/pi-remote.ts`: pi-remote's Pi extension, loaded into each slot's Pi. Sends Pi's screen sections, editor state, session facts and lifecycle events; registers `/detach` and `/status`.
+- `src/protocol/pi-extension.ts`, `screen.ts`: the extension's messages, input barriers and line diffs; a screen copy that rebuilds a client from nothing. `types.ts`, `methods.ts`: daemon wire records and methods.
 - `src/daemon/supervisor.ts`: slots, persistence, attachments, input, size ownership, activity, reload and daemon restart. `pi-terminal.ts`, `terminal-output.ts`: runs Pi in a PTY, answers its terminal queries, and forwards bell, title, notification and clipboard output. `launch.ts`, `bridge.ts`, `files.ts`: daemon startup, socket bridging, remote filesystem requests.
 - `src/client/`: SSH transport, reconnect without replay, legacy filesystem fallback, daemon replacement.
 - `src/tui/pi-screen.ts`: Pi's screen rebuilt locally (layout, scrolling, local editor, status panel). `terminal-session.ts`: connects PiScreen to the daemon and this terminal for one slot (the phone's counterpart is `src/web/client/session-view.ts`). `kitty-keys.ts`: converts legacy key sequences to the kitty keyboard protocol Pi uses. `local-editor.ts`: local copies of editor extensions. `fuzzy-picker.ts`, `slot-table.ts`, `session-table.ts`, `host-status.ts`: pickers, lists and status rows.

@@ -1,23 +1,23 @@
-import { applyDiff, diffLines, SECTION_COUNT, type CompanionMessage, type LineDiff } from './companion.js';
+import { applyDiff, diffLines, SECTION_COUNT, type PiExtensionMessage, type LineDiff } from './pi-extension.js';
 
-type Frame = Extract<CompanionMessage, { type: 'frame' }>;
+type Frame = Extract<PiExtensionMessage, { type: 'frame' }>;
 const HISTORY_LIMIT = 1000;
 
 /**
- * The daemon's copy of what the companion reported for one Pi process. A client that
+ * The daemon's copy of what the Pi extension reported for one Pi process. A client that
  * attaches gets `snapshot()`: messages that rebuild the current screen and editor from
  * nothing. Live messages follow.
  */
 export class ScreenState {
   private sections: string[][] = Array.from({ length: SECTION_COUNT }, () => []);
   private frame?: Omit<Frame, 'sections' | 'reset'>;
-  private editorInstalled?: Extract<CompanionMessage, { type: 'editorInstalled' }>;
-  private editorChrome?: Extract<CompanionMessage, { type: 'editorChrome' }>;
-  private editor?: Extract<CompanionMessage, { type: 'editor' }>;
-  private session?: Extract<CompanionMessage, { type: 'session' }>;
+  private editorInstalled?: Extract<PiExtensionMessage, { type: 'editorInstalled' }>;
+  private editorChrome?: Extract<PiExtensionMessage, { type: 'editorChrome' }>;
+  private editor?: Extract<PiExtensionMessage, { type: 'editor' }>;
+  private session?: Extract<PiExtensionMessage, { type: 'session' }>;
   private history: string[] = [];
 
-  apply(message: CompanionMessage): void {
+  apply(message: PiExtensionMessage): void {
     switch (message.type) {
       case 'frame': {
         if (message.reset) this.sections = Array.from({ length: SECTION_COUNT }, () => []);
@@ -44,11 +44,11 @@ export class ScreenState {
     }
   }
 
-  get sessionInfo(): Extract<CompanionMessage, { type: 'session' }> | undefined { return this.session; }
+  get sessionInfo(): Extract<PiExtensionMessage, { type: 'session' }> | undefined { return this.session; }
 
   /** Messages that rebuild the current state on a client that has nothing. */
-  snapshot(): CompanionMessage[] {
-    const messages: CompanionMessage[] = [];
+  snapshot(): PiExtensionMessage[] {
+    const messages: PiExtensionMessage[] = [];
     if (this.editorInstalled) messages.push(this.editorInstalled);
     if (this.editorChrome) messages.push(this.editorChrome);
     for (const text of this.history) messages.push({ type: 'history', text });

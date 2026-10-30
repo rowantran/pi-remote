@@ -5,7 +5,7 @@ import { PiScreen } from './pi-screen.js';
 import { toKittyInput } from './kitty-keys.js';
 import { loadLocalEditorFactory } from './local-editor.js';
 import type { SlotAttachment } from '../protocol/methods.js';
-import type { TerminalAnswers } from '../protocol/companion.js';
+import type { TerminalAnswers } from '../protocol/pi-extension.js';
 import { errorText, type RemoteConnection, type RemoteEvent, type SlotInfo } from '../protocol/types.js';
 import { daemonStatus, formatDuration, Pinger, type DaemonState } from './host-status.js';
 import { editLocally, readLocalClipboard } from './local-input.js';
