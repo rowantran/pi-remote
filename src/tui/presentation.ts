@@ -553,7 +553,7 @@ export class PresentationHost {
     return { row, context: {
       cwd: this.snapshot.slot.cwd, executionStarted: true, argsComplete: true, isPartial: false,
       expanded: this.options.getToolsExpanded?.() ?? false, showImages: false, isError: false,
-      ...input, args: row.args, state: row.state, invalidate: row.invalidate, lastComponent: row[slot],
+      ...input, durationMs: input.durationMs, outputPad: input.outputPad ?? 0, args: row.args, state: row.state, invalidate: row.invalidate, lastComponent: row[slot],
     } };
   }
   renderCall(name: string, args: unknown, input: PresentationToolContext): Component | undefined {

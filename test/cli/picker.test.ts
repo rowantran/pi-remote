@@ -118,7 +118,7 @@ class FakeTerminal implements Terminal {
   async drainInput() {}
   write(data: string) { this.output += data; }
   moveBy() {} hideCursor() {} showCursor() {} clearLine() {} clearFromCursor() {} clearScreen() {}
-  setTitle() {} setProgress() {}
+  setTitle() {} setProgress() {} setProgramStatus() {}
 }
 
 test('runPicker erases only its own lines, never the screen or scrollback', async () => {

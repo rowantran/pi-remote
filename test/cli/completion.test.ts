@@ -499,7 +499,7 @@ ${silent ? 'return;' : `const data=request.method==='hello'?${JSON.stringify({ p
   const executable = join(dir, 'ssh');
   await writeFile(executable, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(script)} "$@"\n`);
   await chmod(executable, 0o700);
-  return { dir, log, env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, PI_REMOTE_HOST: '', PI_REMOTE_CWD: '', XDG_CONFIG_HOME: join(dir, 'config') } };
+  return { dir, log, env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, PI_REMOTE_HOST: '', PI_REMOTE_CWD: '', XDG_CONFIG_HOME: join(dir, 'config'), PI_REMOTE_STATE_DIR: join(dir, 'state') } };
 }
 
 test('internal complete command uses the standard SSH hello and read-only RPC, with quiet stderr', { timeout: 10000 }, async t => {

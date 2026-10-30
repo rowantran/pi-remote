@@ -12,10 +12,10 @@ const exec = promisify(execFile);
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const argv = process.argv.slice(2);
 if (argv.includes('--help')) {
-  console.log(`Real stock Pi 1.0.4 versus pi-remote terminal golden comparison.
+  console.log(`Real stock Pi 1.4.0 versus pi-remote terminal golden comparison.
 Usage: node --import tsx test/bench/golden-transcript.ts [options]
   --remote-bin PATH  CLI under test (default: this worktree's bin/pi-remote)
-  --pi-bin PATH      Stock Pi 1.0.4 CLI (default: pi from PATH)
+  --pi-bin PATH      Stock Pi 1.4.0 CLI (default: pi from PATH)
   --widths 80,120    Terminal column matrix
   --themes dark,light  Theme matrix
   --rows 160         Tall terminal exposes the entire expanded transcript
@@ -217,7 +217,7 @@ async function runScenario(width: number, theme: string) {
 
 try {
   const version = (await exec(stockBin, ['--version'], { env: cleanEnv(join(root, 'version-home'), join(root, 'version-agent'), root), timeout: 15000 })).stdout.trim();
-  assert.equal(version, '1.0.4', 'Golden comparison must run stock Pi 1.0.4');
+  assert.equal(version, '1.4.0', 'Golden comparison must run stock Pi 1.4.0');
   await writeFile(join(root, 'manifest.json'), JSON.stringify({ version, remoteBin, repo, widths, rows, themes, argv, tmuxName, started: new Date().toISOString() }, null, 2));
   console.log(`Stock Pi ${version}; artifacts: ${root}`);
   for (const theme of themes) for (const width of widths) await runScenario(width, theme);

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import { EventEmitter } from 'node:events';
-import { ProcessTerminal, StdinBuffer, stripTerminalSequences, type Terminal } from '@earendil-works/pi-tui';
+import { formatProgramStatus, ProcessTerminal, type ProgramStatus, StdinBuffer, stripTerminalSequences, type Terminal } from '@earendil-works/pi-tui';
 import type { RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../../src/protocol/types.js';
-import { formatProgramStatus, PROGRAM_STATUS_QUERY, ProgramStatusTerminal, ProgramActivity, waitingOnBackground } from '../../src/tui/program-status.js';
+import { ProgramActivity, waitingOnBackground } from '../../src/tui/program-status.js';
 import { RemoteTui } from '../../src/tui/tui.js';
 
 const flush = async () => { for (let i = 0; i < 3; i++) await new Promise<void>(resolve => setImmediate(resolve)); };
@@ -31,11 +31,15 @@ class FakeTerminal implements Terminal {
     this.buffer = new StdinBuffer(); this.buffer.on('data', input);
     this.input = data => this.buffer!.process(data);
   }
-  stop() { this.buffer?.destroy(); }
+  private status?: ProgramStatus;
+  /** Like ProcessTerminal: stopping clears a reported status. */
+  stop() { this.buffer?.destroy(); if (this.status) this.write(formatProgramStatus({ state: 'clear' })); this.status = undefined; }
   async drainInput() {}
   write(data: string) { this.writes.push(data); }
   moveBy() {} hideCursor() {} showCursor() {} clearLine() {} clearFromCursor() {} clearScreen() {}
   setTitle() {} setProgress() {}
+  /** Like pi-tui's ProcessTerminal with confirmed support (the tests set PI_PROGRAM_STATUS=1). */
+  setProgramStatus(status: ProgramStatus) { this.status = status.state === 'clear' ? undefined : status; this.write(formatProgramStatus(status)); }
   get bells() { return this.writes.filter(data => data === '\x07').length; }
   get reports() {
     return this.writes.filter(data => data.startsWith('\x1b]7501;state=')).map(data => {
@@ -776,63 +780,11 @@ test('session and process resets discard waiting even if the retained transcript
   });
 });
 
-test('OSC encoding is single-line UTF-8 base64, bounded, root-only and uses ST rather than BEL', () => {
-  const sequence = formatProgramStatus({ state: 'blocked', kind: 'question', message: '\x1b\x07\n\tcafé:;=' + '😀'.repeat(1000) });
-  assert.ok(sequence.startsWith('\x1b]7501;state=blocked:app=pi:kind=question:msg='));
-  assert.ok(sequence.endsWith('\x1b\\')); assert.ok(Buffer.byteLength(sequence) < 4096);
-  const encoded = sequence.split(':msg=')[1].slice(0, -2), decoded = Buffer.from(encoded, 'base64').toString('utf8');
-  assert.ok(Buffer.byteLength(decoded) <= 2048); assert.ok(encoded.length <= 2732);
-  assert.ok(decoded.startsWith('café:;=')); assert.doesNotMatch(decoded, /[\u0000-\u001f\u007f-\u009f\ufffd]/);
-  assert.doesNotMatch(formatProgramStatus({ state: 'done', kind: 'question' }), /kind=/);
-});
-
-test('capability detection consumes split/batched replies before DA1, rejects late replies, and honors overrides', async t => {
-  for (const mode of ['auto', 'unsupported', 'late', '1', '0']) await t.test(mode, () => {
-    const terminal = new FakeTerminal();
-    const adapter = new ProgramStatusTerminal(terminal, mode === '1' || mode === '0' ? { PI_PROGRAM_STATUS: mode } : {});
-    const input: string[] = [];
-    adapter.setProgramStatus({ state: 'working' }); adapter.start(data => input.push(data), () => {});
-    if (mode === '1') assert.equal(terminal.last?.state, 'working');
-    else assert.equal(terminal.reports.length, 0);
-    if (mode === 'auto') {
-      terminal.input('\x1b]7501;?'); terminal.input(':states=idle,working,done,blocked,error\x1b');
-      terminal.input('\\\x1b[?1;2c'); assert.equal(terminal.last?.state, 'working');
-    } else if (mode === 'late' || mode === 'unsupported') {
-      terminal.input('\x1b[?1;2c');
-      if (mode === 'late') terminal.input('\x1b]7501;?\x07');
-      assert.equal(terminal.reports.length, 0);
-    }
-    terminal.input('abc'); assert.equal(input.join(''), 'abc', 'status replies and our DA1 sentinel never enter the editor');
-    assert.equal(terminal.writes.some(data => data.includes(PROGRAM_STATUS_QUERY)), mode !== '1' && mode !== '0');
-    adapter.stop();
-    assert.equal(terminal.last?.state, mode === 'auto' || mode === '1' ? 'clear' : undefined);
-  });
-});
-
-test('support timeout rejects late replies and consumes its eventual DA1 without swallowing other input', t => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  const terminal = new FakeTerminal(), adapter = new ProgramStatusTerminal(terminal, {}), input: string[] = [];
-  adapter.start(data => input.push(data), () => {});
-  t.mock.timers.tick(1001);
-  terminal.input(`${PROGRAM_STATUS_QUERY}\x1b[?1cabc`);
-  assert.equal(terminal.reports.length, 0); assert.equal(input.join(''), 'abc'); adapter.stop();
-});
-
-test('terminal restart clears while stopped and restores latest state after forced/detected support', () => {
-  const terminal = new FakeTerminal(), adapter = new ProgramStatusTerminal(terminal, {});
-  adapter.start(() => {}, () => {}); terminal.input(`${PROGRAM_STATUS_QUERY}\x1b[?1c`);
-  adapter.setProgramStatus({ state: 'blocked', kind: 'permission', message: 'Approve' });
-  adapter.stop(); assert.equal(terminal.last?.state, 'clear');
-  adapter.setProgramStatus({ state: 'done' }); assert.equal(terminal.last?.state, 'clear');
-  adapter.start(() => {}, () => {}); assert.equal(terminal.last?.state, 'clear');
-  terminal.input(`${PROGRAM_STATUS_QUERY}\x1b[?1c`); assert.equal(terminal.last?.state, 'done'); adapter.stop();
-});
-
-
-test('real ProcessTerminal preserves capability negotiation across keyboard DA1, batched CSI and fragmented OSC', async t => {
+test('RemoteTui reports through pi-tui ProcessTerminal, which negotiates OSC 7501 with the keyboard DA1 sentinel', async t => {
   for (const supported of [true, false]) await t.test(String(supported), t => {
     const stdinDescriptor = Object.getOwnPropertyDescriptor(process, 'stdin')!;
     const stdoutDescriptor = Object.getOwnPropertyDescriptor(process, 'stdout')!;
+    const previous = process.env.PI_PROGRAM_STATUS; delete process.env.PI_PROGRAM_STATUS;
     const writes: string[] = [], input: string[] = [];
     const stdin = Object.assign(new EventEmitter(), {
       isRaw: false, setRawMode() {}, setEncoding() {}, resume() {}, pause() {},
@@ -841,29 +793,22 @@ test('real ProcessTerminal preserves capability negotiation across keyboard DA1,
     t.mock.method(process, 'kill', () => true); // No real SIGWINCH while streams are replaced.
     Object.defineProperty(process, 'stdin', { configurable: true, value: stdin });
     Object.defineProperty(process, 'stdout', { configurable: true, value: stdout });
-    const adapter = new ProgramStatusTerminal(new ProcessTerminal(), {});
+    const terminal = new ProcessTerminal();
     try {
-      adapter.setProgramStatus({ state: 'working' }); adapter.start(data => input.push(data), () => {});
-      assert.equal(writes.filter(data => data.includes('\x1b[c')).length, 2, 'keyboard query and status query each have a DA1 sentinel');
+      terminal.setProgramStatus({ state: 'working', app: 'pi' }); terminal.start(data => input.push(data), () => {});
+      assert.equal(writes.filter(data => data.includes('\x1b[c')).length, 1, 'one DA1 sentinel covers the keyboard and status queries');
       assert.equal(writes.some(data => data.includes('7501;state=')), false);
-      // The keyboard DA1 precedes our query response and must be consumed by ProcessTerminal.
-      // A split CSI response must not close our detection window.
-      stdin.emit('data', '\x1b[?1u\x1b[?'); stdin.emit('data', '1;2c');
-      if (supported) {
-        stdin.emit('data', '\x1b]750'); stdin.emit('data', '1;?:states=idle,working,done,blocked,error');
-        stdin.emit('data', '\x1b'); stdin.emit('data', '\\\x1b[?1;2cX');
-        assert.ok(writes.some(data => data.includes('7501;state=working')));
-      } else {
-        stdin.emit('data', '\x1b[?1;2c\x1b]7501;?\x07X');
-        assert.equal(writes.some(data => data.includes('7501;state=')), false, 'reply after our DA1 is too late');
-      }
+      if (supported) stdin.emit('data', '\x1b]7501;?:states=idle,working,done,blocked,error\x1b\\');
+      stdin.emit('data', '\x1b[?1;2cX');
+      assert.equal(writes.some(data => data.includes('7501;state=working:app=pi')), supported);
       assert.deepEqual(input, ['X'], 'neither DA1 reply nor OSC response reaches the editor');
-      adapter.stop();
+      terminal.stop();
       assert.equal(writes.some(data => data.includes('7501;state=clear')), supported);
     } finally {
-      adapter.stop();
+      terminal.stop();
       Object.defineProperty(process, 'stdin', stdinDescriptor);
       Object.defineProperty(process, 'stdout', stdoutDescriptor);
+      if (previous === undefined) delete process.env.PI_PROGRAM_STATUS; else process.env.PI_PROGRAM_STATUS = previous;
     }
   });
 });

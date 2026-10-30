@@ -13,7 +13,7 @@ const option = (name, fallback) => {
 };
 if (args.includes('--version')) {
   if (process.env.PI_FIXTURE_VERSION_LOG) appendFileSync(process.env.PI_FIXTURE_VERSION_LOG, 'version\n');
-  const version = process.env.PI_FIXTURE_VERSION_FILE ? readFileSync(process.env.PI_FIXTURE_VERSION_FILE, 'utf8').trim() : '1.0.4';
+  const version = process.env.PI_FIXTURE_VERSION_FILE ? readFileSync(process.env.PI_FIXTURE_VERSION_FILE, 'utf8').trim() : '1.4.0';
   process.stdout.write(version + '\n');
   process.exit(0);
 }

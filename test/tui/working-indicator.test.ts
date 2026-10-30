@@ -17,7 +17,7 @@ const flush = async () => { for (let i = 0; i < 3; i++) await new Promise<void>(
 class FakeTerminal implements Terminal {
   columns = 80; rows = 24; kittyProtocolActive = false;
   start() {} stop() {} async drainInput() {} write() {} moveBy() {} hideCursor() {} showCursor() {}
-  clearLine() {} clearFromCursor() {} clearScreen() {} setTitle() {} setProgress() {}
+  clearLine() {} clearFromCursor() {} clearScreen() {} setTitle() {} setProgress() {} setProgramStatus() {}
 }
 class Connection implements RemoteConnection {
   listener?: (event: RemoteEvent) => void;

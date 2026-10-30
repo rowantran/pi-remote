@@ -45,7 +45,7 @@ class FakeTerminal implements Terminal {
   write(data: string) { this.output += data; }
   moveBy() {} hideCursor() {} showCursor() {} clearLine() {} clearFromCursor() {} clearScreen() {}
   setTitle(title: string) { this.title = title; this.titles.push(title); }
-  setProgress() {}
+  setProgress() {} setProgramStatus() {}
 }
 class FakeConnection implements RemoteConnection {
   requests: { method: string; params?: RecordValue }[] = [];

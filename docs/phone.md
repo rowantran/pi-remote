@@ -311,7 +311,7 @@ online authentication and configuration loading succeed again.
 
 ## Compatibility
 
-The browser uses the pinned Pi 1.0.4 transcript components, not an agent in the browser. No provider
+The browser uses the pinned Pi 1.4.0 transcript components, not an agent in the browser. No provider
 credentials, model calls, tool execution, or Pi session persistence move to the phone. Accepted or
 uncertain commands are never replayed after reconnect.
 

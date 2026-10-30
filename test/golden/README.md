@@ -1,12 +1,12 @@
 # Real Pi terminal golden comparison
 
-This harness runs the **actual stock Pi 1.0.4 CLI** beside the current `pi-remote` CLI. Pi owns both agent runs: one uses the stock terminal UI; the other is an unmodified stock RPC process started by an isolated `pi-remote --local` daemon. Neither side needs credentials or a live model service.
+This harness runs the **actual stock Pi 1.4.0 CLI** beside the current `pi-remote` CLI. Pi owns both agent runs: one uses the stock terminal UI; the other is an unmodified stock RPC process started by an isolated `pi-remote --local` daemon. Neither side needs credentials or a live model service.
 
 ## Reference behavior follows Pi
 
 The **correct rendering is the behavior of stock Pi at the version being tested**, not a permanent requirement to preserve today's screenshots. Future Pi releases can intentionally change layout, colors, spacing, tool output, or keyboard hints. Those changes can become the new expected behavior for pi-remote.
 
-The harness captures its stock reference on every run; saved artifacts document a particular version, not a timeless baseline. It currently requires Pi **1.0.4**, matching the pinned client dependencies. When upgrading Pi:
+The harness captures its stock reference on every run; saved artifacts document a particular version, not a timeless baseline. It currently requires Pi **1.4.0**, matching the pinned client dependencies. When upgrading Pi:
 
 1. Update the client dependency pins, supported-version checks, and golden harness version check together.
 2. Run both the standard and `--rowan` comparisons against that same Pi version.
@@ -17,7 +17,7 @@ With `--rowan`, the reference also includes the selected local extension files, 
 
 ## Run
 
-Requires Node 22.19+, the project's installed dependencies, `tmux`, `diff`, Bash, and stock `pi` 1.0.4 on `PATH`.
+Requires Node 22.19+, the project's installed dependencies, `tmux`, `diff`, Bash, and stock `pi` 1.4.0 on `PATH`.
 
 ```sh
 node --import tsx test/bench/golden-transcript.ts
