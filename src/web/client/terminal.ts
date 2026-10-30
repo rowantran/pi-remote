@@ -51,6 +51,8 @@ export class XtermTerminal implements Terminal {
   clearScreen(): void { this.write('\x1b[2J\x1b[H'); }
   setTitle(title: string): void { document.title = title || 'Pi Remote'; }
   setProgress(_active: boolean): void {}
+  /** Browser tabs show activity through notifications, not the terminal attention protocol. */
+  setProgramStatus(): void {}
   dispose(): void {
     this.stop(); this.observer.disconnect();
     for (const disposable of this.disposables) disposable.dispose();

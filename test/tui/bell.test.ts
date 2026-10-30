@@ -19,7 +19,7 @@ class BellTerminal implements Terminal {
   start() {} stop() {} async drainInput() {}
   write(text: string) { this.writes.push(text); }
   moveBy() {} hideCursor() {} showCursor() {} clearLine() {} clearFromCursor() {} clearScreen() {}
-  setTitle() {} setProgress() {}
+  setTitle() {} setProgress() {} setProgramStatus() {}
   // OSC color queries also contain BEL terminators; count only standalone bells.
   get bells() { return this.writes.filter(text => text === '\x07').length; }
 }

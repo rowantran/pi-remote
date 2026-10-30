@@ -13,7 +13,7 @@ class FakeTerminal implements Terminal {
   input: (data: string) => void = () => {};
   start(input: (data: string) => void) { this.input = input; }
   stop() {} async drainInput() {} write() {} moveBy() {} hideCursor() {} showCursor() {}
-  clearLine() {} clearFromCursor() {} clearScreen() {} setTitle() {} setProgress() {}
+  clearLine() {} clearFromCursor() {} clearScreen() {} setTitle() {} setProgress() {} setProgramStatus() {}
 }
 const connection: RemoteConnection = {
   request: async () => ({}) as any, onEvent: () => () => {}, onDisconnect: () => () => {}, close() {},

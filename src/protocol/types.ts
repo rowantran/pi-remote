@@ -3,7 +3,7 @@ import type { DaemonMethod, MethodResult, RequestArgs } from './methods.js';
 /** Routing envelope for Pi RPC. Filtered snapshots/events omit assistant signatures;
  * raw RPC replies and the authoritative Pi history remain unchanged. */
 export const PROTOCOL_VERSION = 1;
-export const PI_VERSION = "1.0.4";
+export const PI_VERSION = "1.4.0";
 export type RecordValue = Record<string, any>;
 export interface Request { type: "request"; id: string; method: string; params?: RecordValue }
 export interface Result { type: "result"; id: string; success: boolean; data?: any; error?: string }

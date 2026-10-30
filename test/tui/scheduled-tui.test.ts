@@ -53,7 +53,7 @@ class FakeTerminal implements Terminal {
     if (data.startsWith('\x1b[?2026h')) this.frameStarts.push(this.now());
   }
   moveBy() {} hideCursor() {} showCursor() {} clearLine() {} clearFromCursor() {} clearScreen() {}
-  setTitle() {} setProgress() {}
+  setTitle() {} setProgress() {} setProgramStatus() {}
 }
 
 const flush = () => new Promise<void>(resolve => setImmediate(resolve));

@@ -14,7 +14,7 @@ another config file. See [phone setup, configuration, and security](docs/phone.m
 
 ## Quick start
 
-Requires Node.js 22.19+ on both machines, working SSH authentication, and **Pi 1.0.4** installed and configured on the remote host. Local dependencies are pinned to the same Pi version; a separate local Pi CLI is not required. Replace `devbox` with your SSH host alias and `/remote/project` with an existing remote directory.
+Requires Node.js 22.19+ on both machines, working SSH authentication, and **Pi 1.4.0** installed and configured on the remote host. Local dependencies are pinned to the same Pi version; a separate local Pi CLI is not required. Replace `devbox` with your SSH host alias and `/remote/project` with an existing remote directory.
 
 From this checkout on your local machine:
 
@@ -112,7 +112,7 @@ Listing without a slot needs a daemon from this release; an older daemon reports
   slot      #3 · running · 1 client attached · started 2h ago
   workspace /home/me/project
   daemon    pid 12345 · up 3d 4h · release 2f1c9e0
-  versions  Pi 1.0.4 · Node v22.19.0
+  versions  Pi 1.4.0 · Node v22.19.0
   machine   devbox · linux x64 · up 12d 3h
   load      0.42 0.38 0.30 · 8 CPUs
   memory    5.2 GB free of 31 GB
@@ -529,7 +529,7 @@ Locally, `pi-remote` runs from `src/` through the `tsx` devDependency, so source
 npm run verify
 
 # Golden master: real stock Pi versus pi-remote in paired tmux terminals.
-# Requires tmux and Pi 1.0.4 on PATH. Uses a deterministic local provider, no credentials.
+# Requires tmux and Pi 1.4.0 on PATH. Uses a deterministic local provider, no credentials.
 npm run test:golden
 
 # Repeat with the unchanged Rowan compact-tools, assistant-background and caret factories.

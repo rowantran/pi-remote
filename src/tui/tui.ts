@@ -8,7 +8,7 @@ import { ForkSelector } from './fork-selector.js';
 import { sessionTree } from './session-tree.js';
 import { ScheduledTuiAltScreen } from './scheduled-tui.js';
 import { WorkingIndicator } from './working-indicator.js';
-import { ProgramActivity, ProgramStatusTerminal } from './program-status.js';
+import { ProgramActivity } from './program-status.js';
 import { createRemoteKeybindings } from './keybindings.js';
 import { readLocalClipboard, editLocally } from './local-input.js';
 import { PresentationHost, readPresentationConfig, createPresentationTheme, type PresentationChange, type PresentationFactoryEntry } from './presentation.js';
@@ -204,7 +204,6 @@ export class RemoteTui {
   private bell?: boolean;
   private pendingBell = false;
   private activity: ProgramActivity;
-  private programTerminal: ProgramStatusTerminal;
   private sideSplit: SplitDirection = 'auto';
   private sidePending = false;
   private sessionFlowPending = 0;
@@ -224,8 +223,7 @@ export class RemoteTui {
     initTheme(initial, false);
     this.view = new RemoteView(snapshot);
     this.activity = new ProgramActivity(snapshot);
-    this.programTerminal = new ProgramStatusTerminal(terminal);
-    this.tui = new ScheduledTuiAltScreen(this.programTerminal, true, undefined, { renderIntervalMs: options.renderIntervalMs,
+    this.tui = new ScheduledTuiAltScreen(terminal, true, undefined, { renderIntervalMs: options.renderIntervalMs,
       // Like Pi's fullscreen mode: a clickable pill while the transcript is not following output.
       scrollToEndIndicator: () => {
         const shortcut = keyDisplayText('tui.altScreen.bottom');
@@ -932,7 +930,7 @@ export class RemoteTui {
   private syncProgramStatus(options: { snapshot?: boolean; reconnect?: boolean } = {}): void {
     if (this.detached) return;
     const { status, bells } = this.activity.update(this.view.snapshot, options);
-    this.programTerminal.setProgramStatus(status);
+    this.tui.terminal.setProgramStatus({ ...status, app: 'pi' });
     for (let i = 0; i < bells; i++) this.ringBell();
   }
 

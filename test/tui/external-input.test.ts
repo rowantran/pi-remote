@@ -30,7 +30,7 @@ class FakeTerminal implements Terminal {
   stop() { this.stopped = true; }
   async drainInput() {}
   write(text: string) { this.output += text; }
-  moveBy() {} hideCursor() {} showCursor() {} clearLine() {} clearFromCursor() {} clearScreen() {} setTitle() {} setProgress() {}
+  moveBy() {} hideCursor() {} showCursor() {} clearLine() {} clearFromCursor() {} clearScreen() {} setTitle() {} setProgress() {} setProgramStatus() {}
 }
 class FakeConnection implements RemoteConnection {
   requests: { method: string; params?: RecordValue }[] = [];

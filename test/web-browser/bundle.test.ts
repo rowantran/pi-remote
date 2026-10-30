@@ -35,7 +35,7 @@ class MemoryTerminal {
   start(input) { this.input = input; } stop() { this.input = undefined; } async drainInput() {} write(data) { this.output += data; }
   sendKey(data) { this.input?.(data); }
   moveBy() {} hideCursor() {} showCursor() {} clearLine() {} clearFromCursor() {} clearScreen() {}
-  setTitle() {} setProgress() {}
+  setTitle() {} setProgress() {} setProgramStatus() {}
 }
 const tools = [
   ['bash', { command: 'echo SHELL_OFFLINE' }, 'SHELL_OFFLINE'],

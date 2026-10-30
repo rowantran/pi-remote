@@ -15,7 +15,7 @@ import { applyLiveEvent, emptyLive } from '../../src/protocol/live.js';
 import type { HistoryCursor, RecordValue, RemoteEvent, Result, SlotInfo, Snapshot } from '../../src/protocol/types.js';
 
 const fixture = fileURLToPath(new URL('../fixtures/fixture-pi.mjs', import.meta.url));
-const hello = { protocol: 1, piVersion: '1.0.4' };
+const hello = { protocol: 1, piVersion: '1.4.0' };
 
 /** A test-only wire peer: do not depend on the production terminal client. */
 class Peer {
@@ -880,7 +880,7 @@ test('ping does no work and status reports daemon and host facts', { timeout: 10
   assert.deepEqual(await peer.request('ping', {}), {});
   const status = await peer.request('status', {});
   assert.equal(status.pid, process.pid);
-  assert.equal(status.piVersion, '1.0.4');
+  assert.equal(status.piVersion, '1.4.0');
   assert.equal(status.nodeVersion, process.version);
   assert.equal(status.host.hostname, hostname());
   assert.ok(Date.parse(status.startedAt) <= Date.now());

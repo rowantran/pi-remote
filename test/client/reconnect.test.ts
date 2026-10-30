@@ -371,7 +371,7 @@ test('an exited recovery snapshot is terminal even if the peer reports attach su
   await assert.rejects(connection.request('rpc'), /Daemon restarted/);
 });
 
-for (const message of ['Version mismatch: daemon protocol 2, Pi 0.0.0', 'Daemon returned an incompatible protocol or Pi version', 'Remote Pi version 0.0.0 does not match required 1.0.4']) {
+for (const message of ['Version mismatch: daemon protocol 2, Pi 0.0.0', 'Daemon returned an incompatible protocol or Pi version', 'Remote Pi version 0.0.0 does not match required 1.4.0']) {
   test(`a handshake error '${message}' is terminal`, async t => {
     const first = new FakeConnection();
     const { connection, count } = await attached(t, first, new Error(message));

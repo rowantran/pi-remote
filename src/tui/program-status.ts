@@ -1,5 +1,4 @@
 import { buildSessionProjection, type SessionEntry } from '@earendil-works/pi-coding-agent';
-import type { Terminal } from '@earendil-works/pi-tui';
 import type { RecordValue, Snapshot } from '../protocol/types.js';
 import { DIALOG_METHODS } from './view.js';
 import { messageKey } from '../protocol/live.js';
@@ -7,27 +6,9 @@ import { activitySource, waitingOnBackground, type ActivityMessage } from '../pr
 export { waitingOnBackground } from '../protocol/notification-stream.js';
 
 const WAITING_MESSAGE = 'Waiting on background task';
-export const PROGRAM_STATUS_QUERY = '\x1b]7501;?\x1b\\';
-export interface ProgramStatus {
-  state: 'idle' | 'working' | 'blocked' | 'done' | 'error' | 'clear';
-  kind?: 'permission' | 'question';
-  message?: string;
-}
-
-/** Root records only. Keep this compatible with Pi's newer pi-tui formatter. */
-export function formatProgramStatus(status: ProgramStatus): string {
-  const pairs = [`state=${status.state}`, 'app=pi'];
-  if (status.state === 'blocked' && status.kind) pairs.push(`kind=${status.kind}`);
-  const text = (status.message ?? '').replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim();
-  let message = '', bytes = 0;
-  for (const character of text) {
-    bytes += Buffer.byteLength(character, 'utf8');
-    if (bytes > 2048) break;
-    message += character;
-  }
-  if (message) pairs.push(`msg=${Buffer.from(message, 'utf8').toString('base64')}`);
-  return `\x1b]7501;${pairs.join(':')}\x1b\\`;
-}
+/** Pi's ProcessTerminal (pi-tui 1.4) detects support and writes these OSC 7501 reports itself. */
+export type { ProgramStatus } from '@earendil-works/pi-tui';
+import type { ProgramStatus } from '@earendil-works/pi-tui';
 
 type Outcome = { state: 'idle' | 'done' | 'error' | 'waiting'; message?: string };
 /** Waiting follows Pi's effective context, not raw display history containing omitted retries. */
@@ -320,67 +301,4 @@ export class ProgramActivity {
     this.recoveredCompletion = false;
     return { status, bells };
   }
-}
-
-/** Compatibility adapter for pi-tui 1.0.4. It already splits input into complete terminal
- * sequences. Its keyboard DA1 is consumed internally, so query after start with our own DA1.
- * No reports are written until support is confirmed (or explicitly forced). */
-export class ProgramStatusTerminal implements Terminal {
-  private status: ProgramStatus = { state: 'idle' };
-  private encoded?: string;
-  private supported = false;
-  private pending = false;
-  private awaitingDeviceAttributes = false;
-  private started = false;
-  private timeout?: NodeJS.Timeout;
-  constructor(private terminal: Terminal, private env: NodeJS.ProcessEnv = process.env) {}
-  start(onInput: (data: string) => void, onResize: () => void): void {
-    this.started = true;
-    this.encoded = undefined;
-    this.supported = this.env.PI_PROGRAM_STATUS === '1';
-    this.pending = this.env.PI_PROGRAM_STATUS !== '0' && !this.supported;
-    this.terminal.start(data => {
-      if (/^\x1b\]7501;\?[^\x07\x1b]*(?:\x07|\x1b\\)$/.test(data)) {
-        if (this.pending) { this.supported = true; this.pending = false; clearTimeout(this.timeout); this.report(); }
-        return; // Late replies must not enter the editor or enable reporting.
-      }
-      if (this.awaitingDeviceAttributes && /^\x1b\[\?[\d;]*c$/.test(data)) {
-        this.awaitingDeviceAttributes = false;
-        this.pending = false; clearTimeout(this.timeout); return;
-      }
-      onInput(data);
-    }, onResize);
-    if (this.pending) {
-      this.awaitingDeviceAttributes = true;
-      this.timeout = setTimeout(() => { this.pending = false; }, 1000);
-      this.timeout.unref?.();
-      this.terminal.write(`${PROGRAM_STATUS_QUERY}\x1b[c`);
-    }
-    this.report();
-  }
-  setProgramStatus(status: ProgramStatus): void { this.status = { ...status }; this.report(); }
-  private report(): void {
-    if (!this.started || !this.supported) return;
-    const encoded = formatProgramStatus(this.status);
-    if (encoded !== this.encoded) { this.encoded = encoded; this.terminal.write(encoded); }
-  }
-  stop(): void {
-    if (this.started && this.supported) this.terminal.write(formatProgramStatus({ state: 'clear' }));
-    this.started = false; this.pending = false; this.awaitingDeviceAttributes = false; this.supported = false; this.encoded = undefined;
-    clearTimeout(this.timeout);
-    this.terminal.stop();
-  }
-  get columns() { return this.terminal.columns; }
-  get rows() { return this.terminal.rows; }
-  get kittyProtocolActive() { return this.terminal.kittyProtocolActive; }
-  drainInput(maxMs?: number, idleMs?: number) { return this.terminal.drainInput(maxMs, idleMs); }
-  write(data: string) { this.terminal.write(data); }
-  moveBy(lines: number) { this.terminal.moveBy(lines); }
-  hideCursor() { this.terminal.hideCursor(); }
-  showCursor() { this.terminal.showCursor(); }
-  clearLine() { this.terminal.clearLine(); }
-  clearFromCursor() { this.terminal.clearFromCursor(); }
-  clearScreen() { this.terminal.clearScreen(); }
-  setTitle(title: string) { this.terminal.setTitle(title); }
-  setProgress(active: boolean) { this.terminal.setProgress(active); }
 }

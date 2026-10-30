@@ -262,6 +262,9 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     console.log(formatSlotList(active, result.slots.length - active.length));
     return;
   }
+  // Fail before connecting, which may start a daemon, when `new` has no directory.
+  const cwdDefault = options.values.get('--cwd') ?? (local ? undefined : defaultCwd());
+  if (command === 'new' && !cwdDefault) throw missingCwd(local);
   const connectStarted = performance.now();
   const connection = shouldReconnect(command, options.flags) ? await ReconnectingConnection.connect(factory) : await factory();
   // Ctrl+S in the home and attach pickers: the same panel as in an attached slot.
@@ -289,7 +292,6 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     let slotId: string | undefined;
     let createCwd: string | undefined;
     let resume: ResumeChoice | undefined;
-    const cwdDefault = options.values.get('--cwd') ?? (local ? undefined : defaultCwd());
     if (command === 'home') {
       // Esc in the resume finder returns to the home picker.
       while (!slotId && !createCwd && !resume) {
@@ -329,7 +331,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     }
     if (command === 'new' || createCwd) {
       const cwd = createCwd ?? cwdDefault;
-      if (!cwd) throw new Error(local ? 'new --local requires --cwd with a directory' : `new requires a remote directory. Use --cwd DIRECTORY, set PI_REMOTE_CWD, or add {"cwd": "DIRECTORY"} to ${configPath()}.`);
+      if (!cwd) throw missingCwd(local);
       const slot = await connection.request('create', { cwd, args: options.piArgs, sessionPath: options.values.get('--session') });
       slotId = slot.id;
       if (options.flags.has('--no-attach') || !process.stdin.isTTY || !process.stdout.isTTY) {
@@ -376,4 +378,8 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
 // Daemon launches this compiled module directly; the bin launcher imports it instead.
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   main().catch(error => { console.error(error.message); process.exitCode = 1; });
+}
+
+function missingCwd(local: boolean): Error {
+  return new Error(local ? 'new --local requires --cwd with a directory' : `new requires a remote directory. Use --cwd DIRECTORY, set PI_REMOTE_CWD, or add {"cwd": "DIRECTORY"} to ${configPath()}.`);
 }
