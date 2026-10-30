@@ -11,7 +11,7 @@ const CODES: Record<string, number> = { escape: 27, enter: 13, tab: 9, backspace
 const MODIFIERS: Record<string, number> = { shift: 1, alt: 2, ctrl: 4, super: 8 };
 
 /**
- * Pi in a native slot uses the kitty keyboard protocol. A local terminal without it sends
+ * Pi in a slot uses the kitty keyboard protocol. A local terminal without it sends
  * legacy sequences, some of which mean other keys under that protocol (for example ESC b
  * is Alt+Left in legacy terminals and Alt+B in kitty). Re-encode each legacy key as the
  * kitty sequence for the same key. Text, pastes and unknown sequences pass through.

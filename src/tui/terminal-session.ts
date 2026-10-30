@@ -11,7 +11,7 @@ import { daemonStatus, formatDuration, Pinger, type DaemonState } from './host-s
 import { editLocally, readLocalClipboard } from './local-input.js';
 import { loadLocalTheme, readPiThemeSetting, resolveThemeSelection, terminalAppearance } from './local-theme.js';
 import { slotStatusLines } from './host-status.js';
-import { readPresentationConfig } from './presentation.js';
+import { readPresentationConfig } from '../config/presentation.js';
 import { detachMessage, stoppedMessage } from './session-labels.js';
 import { paint } from './table.js';
 
@@ -22,6 +22,8 @@ export interface TerminalSessionOptions {
   presentationPaths?: string[];
   /** Theme setting to use instead of Pi's local setting. */
   theme?: string;
+  /** False: do not pass Pi's bell to the terminal. Defaults to the config's `bell`, then true. */
+  bell?: boolean;
   /** Replace in tests. */
   terminal?: Terminal;
 }
@@ -29,9 +31,9 @@ export interface TerminalSessionOptions {
 const SAMPLES = 20;
 
 /**
- * Shows a native slot: Pi's own interface, rendered on the remote, with local editing and
- * scrolling. Returns when the user detaches or Pi stops; prints the same messages as the
- * other terminal client.
+ * Shows a slot: Pi's own interface, rendered on the remote, with local editing and
+ * scrolling, in this process's terminal. The phone's counterpart is src/web/client/session-view.ts.
+ * Returns when the user detaches or Pi stops, after printing the detach or stop message.
  */
 export async function runTerminalSession(connection: RemoteConnection, slot: SlotInfo, options: TerminalSessionOptions = {}): Promise<void> {
   const terminal = options.terminal ?? new ProcessTerminal();
@@ -39,7 +41,7 @@ export async function runTerminalSession(connection: RemoteConnection, slot: Slo
   const host = options.host ?? 'local';
   let finish!: (outcome: 'detached' | 'stopped' | Error) => void;
   const finished = new Promise<'detached' | 'stopped' | Error>(resolve => { finish = resolve; });
-  const local: { theme?: Theme; factory?: Awaited<ReturnType<typeof loadLocalEditorFactory>>; answers: TerminalAnswers } = { answers: {} };
+  const local: { theme?: Theme; factory?: Awaited<ReturnType<typeof loadLocalEditorFactory>>; answers: TerminalAnswers; bell: boolean } = { answers: {}, bell: options.bell ?? true };
   let connected = true, connectedAt = Date.now(), reconnects = 0, notice: ReturnType<typeof setTimeout> | undefined;
   const samples: number[] = [];
   let daemon: DaemonState = 'loading';
@@ -58,7 +60,7 @@ export async function runTerminalSession(connection: RemoteConnection, slot: Slo
     theme: () => local.theme,
     editorTheme: () => ({ borderColor: text => local.theme?.fg('borderMuted', text) ?? text, selectList: getSelectListTheme() }),
     encodeKey: data => toKittyInput(data),
-    onTerminalOutput: data => terminal.write(data),
+    onTerminalOutput: data => { if (data !== '\x07' || local.bell) terminal.write(data); },
     notify: message => notify(message),
     editExternally: async text => {
       client.tui.stop();
@@ -114,7 +116,7 @@ export async function runTerminalSession(connection: RemoteConnection, slot: Slo
       client.setBanner(`Disconnected: ${error.message} Reconnecting… Remote work continues; typing waits.`);
     }),
     connection.onRetry?.(retry => client.setBanner(`Reconnecting (attempt ${retry.attempt}): ${retry.error.message}`)) ?? (() => {}),
-    connection.onNativeReconnect?.(attachment => {
+    connection.onReconnect?.(attachment => {
       connected = true; connectedAt = Date.now(); reconnects++;
       client.reset();
       apply(attachment);
@@ -131,9 +133,10 @@ export async function runTerminalSession(connection: RemoteConnection, slot: Slo
     const setting = options.theme ?? await readPiThemeSetting();
     local.theme = await loadLocalTheme(setting ? resolveThemeSelection(setting, terminalAppearance(colors)) : undefined);
     const config = await readPresentationConfig(options.presentationConfig, options.presentationPaths);
+    local.bell = options.bell ?? config.bell ?? true;
     local.factory = await loadLocalEditorFactory(config.extensions, local.theme, message => notify(`Local editor extension failed: ${message}`));
 
-    const attachment = await connection.request('attach_native', { slotId, columns: terminal.columns, rows: terminal.rows, answers: local.answers });
+    const attachment = await connection.request('attach', { slotId, columns: terminal.columns, rows: terminal.rows, answers: local.answers });
     apply(attachment);
     subscriptions.push(connection.onEvent((event: RemoteEvent) => {
       if (event.slotId !== slotId || event.seq <= seq) return;

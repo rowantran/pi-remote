@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { configPath, defaultCwd, defaultHost, loadConfig, parseConfig } from '../../src/cli/config.js';
-import { readPresentationConfig } from '../../src/tui/presentation.js';
+import { readPresentationConfig } from '../../src/config/presentation.js';
 
 async function setup(t: TestContext, xdg = true) {
   const home = await mkdtemp(join(tmpdir(), 'pi-unified-config-'));

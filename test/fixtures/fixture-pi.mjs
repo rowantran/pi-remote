@@ -1,363 +1,110 @@
 #!/usr/bin/env node
-// Deterministic public-RPC stand-in. No SDK runtime, credentials, or network access.
+// Deterministic stand-in for interactive Pi in a slot. It plays both Pi and the
+// companion: it reads keys from its terminal and reports to the companion socket. No SDK,
+// credentials, or network access.
+//
+// Environment:
+//   PI_FIXTURE_VERSION_FILE  version to print for --version (default 1.4.0)
+//   PI_FIXTURE_LAUNCH_LOG    append {pid, cwd, args, env} per launch
+//   PI_FIXTURE_EXIT_FILE     when it exists at startup, exit 23
+//   PI_FIXTURE_PROMPT_GATE   while this file exists, prompts stay running (busy)
+//   PI_FIXTURE_SLOW_START    milliseconds before reporting the session
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createConnection } from 'node:net';
+import { hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { StringDecoder } from 'node:string_decoder';
 
 const args = process.argv.slice(2);
 const option = (name, fallback) => {
   const index = args.indexOf(name);
-  if (index >= 0) return args[index + 1];
-  return args.find(arg => arg.startsWith(name + '='))?.slice(name.length + 1) ?? fallback;
+  return index >= 0 ? args[index + 1] : fallback;
 };
 if (args.includes('--version')) {
-  if (process.env.PI_FIXTURE_VERSION_LOG) appendFileSync(process.env.PI_FIXTURE_VERSION_LOG, 'version\n');
-  const version = process.env.PI_FIXTURE_VERSION_FILE ? readFileSync(process.env.PI_FIXTURE_VERSION_FILE, 'utf8').trim() : '1.4.0';
-  process.stdout.write(version + '\n');
+  const file = process.env.PI_FIXTURE_VERSION_FILE;
+  process.stdout.write(`${file ? readFileSync(file, 'utf8').trim() : '1.4.0'}\n`);
   process.exit(0);
 }
-if (option('--mode') !== 'rpc') throw new Error('Fixture requires --mode rpc');
-if (process.env.PI_FIXTURE_LAUNCH_LOG) appendFileSync(process.env.PI_FIXTURE_LAUNCH_LOG, JSON.stringify({ pid: process.pid, cwd: process.cwd(), args }) + '\n');
+if (option('--tui-mode') !== 'regular') throw new Error('Fixture requires --tui-mode regular');
+if (process.env.PI_FIXTURE_LAUNCH_LOG) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('PI_REMOTE_SESSION')));
+  appendFileSync(process.env.PI_FIXTURE_LAUNCH_LOG, `${JSON.stringify({ pid: process.pid, cwd: process.cwd(), args, env })}\n`);
+}
 if (process.env.PI_FIXTURE_EXIT_FILE && existsSync(process.env.PI_FIXTURE_EXIT_FILE)) {
-  process.stderr.write('fixture startup failed\n'); process.exit(23);
+  process.stderr.write('fixture startup failed\n');
+  process.exit(23);
 }
-const extension = process.env.PI_FIXTURE_EXTENSION_FILE && existsSync(process.env.PI_FIXTURE_EXTENSION_FILE)
-  ? JSON.parse(readFileSync(process.env.PI_FIXTURE_EXTENSION_FILE, 'utf8')) : {};
-if (process.env.PI_FIXTURE_ENV_LOG) appendFileSync(process.env.PI_FIXTURE_ENV_LOG, JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('PI_REMOTE_SESSION')))) + '\n');
-let sessionId = option('--session-id', randomUUID());
+
 const sessionDir = resolve(option('--session-dir', join(process.cwd(), '.fixture-sessions')));
-let sessionFile = resolve(option('--session', join(sessionDir, `${sessionId}.jsonl`)));
-let entries = [];
-let sessionName = option('--name');
-let streaming = false;
-let compacting = false;
-let boundaryArmed = false;
-let backgroundAssistant;
-let failStateAfterEntries = false;
-let failStateCount = 0;
-let failEntriesCount = Number(option('--fixture-fail-entries', '0'));
-let switchAfterStates = 0;
-let switchBeforeEntries = false;
-let switchAfterEntries = false;
-let dialogNumber = 0;
-const pendingDialogs = new Map();
-const blockedQueries = [];
-const seenIds = new Set();
-const timers = new Set();
-const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
-const send = (...records) => process.stdout.write(records.map(record => JSON.stringify(record) + '\n').join(''));
-const response = (command, data, error) => ({ type: 'response', id: command.id, command: command.type,
-  success: !error, ...(error ? { error } : { data }) });
-const later = (delay, callback) => {
-  const timer = setTimeout(() => { timers.delete(timer); callback(); }, delay);
-  timers.add(timer);
-  return timer;
+let sessionFile = option('--session') ? resolve(option('--session')) : join(sessionDir, `${randomUUID()}.jsonl`);
+const entries = existsSync(sessionFile) ? readFileSync(sessionFile, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
+let sessionId = entries[0]?.id ?? randomUUID();
+const save = () => {
+  mkdirSync(dirname(sessionFile), { recursive: true });
+  writeFileSync(sessionFile, entries.map(entry => JSON.stringify(entry)).join('\n') + '\n');
 };
-function openSession() {
-  mkdirSync(dirname(sessionFile), { recursive: true });
-  if (!existsSync(sessionFile)) writeFileSync(sessionFile, JSON.stringify({ type: 'session', version: 3,
-    id: sessionId, timestamp: new Date().toISOString(), cwd: process.cwd() }) + '\n');
-  const records = readFileSync(sessionFile, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
-  sessionId = records[0].id;
-  entries = records.slice(1);
-  sessionName = entries.filter(entry => entry.type === 'session_info').at(-1)?.name ?? sessionName;
-}
-const forkPath = option('--fork');
-if (forkPath) {
-  const records = readFileSync(forkPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-  mkdirSync(dirname(sessionFile), { recursive: true });
-  writeFileSync(sessionFile, [JSON.stringify({ ...records[0], id: sessionId, timestamp: new Date().toISOString(),
-    cwd: process.cwd(), parentSession: forkPath }), ...records.slice(1).map(record => JSON.stringify(record))].join('\n') + '\n');
-}
-openSession();
-function newSession(sameFile = false) {
-  sessionId = randomUUID();
-  if (!sameFile) sessionFile = join(sessionDir, `${sessionId}.jsonl`);
-  sessionName = undefined;
-  streaming = false;
-  compacting = false;
-  entries = [];
-  mkdirSync(dirname(sessionFile), { recursive: true });
-  writeFileSync(sessionFile, JSON.stringify({ type: 'session', version: 3,
-    id: sessionId, timestamp: new Date().toISOString(), cwd: process.cwd() }) + '\n');
-}
-function appendEntry(value) {
-  const entry = { id: randomUUID().slice(0, 8), parentId: entries.at(-1)?.id ?? null,
-    timestamp: new Date().toISOString(), ...value };
-  entries.push(entry);
-  appendFileSync(sessionFile, JSON.stringify(entry) + '\n');
-  return entry;
-}
-function append(message) { appendEntry({ type: 'message', message }); }
-const state = () => ({ sessionId, sessionFile, sessionName, isStreaming: streaming, isCompacting: compacting,
-  thinkingLevel: 'off', steeringMode: 'all', followUpMode: 'one-at-a-time', autoCompactionEnabled: false,
-  messageCount: entries.filter(entry => entry.type === 'message').length, pendingMessageCount: 0 });
-const signatures = args.includes('--fixture-signatures');
-const assistant = (text, timestamp, stopReason = 'pending') => ({ role: 'assistant',
-  content: [
-    ...(text || signatures ? [{ type: 'text', text, ...(signatures ? { textSignature: 'fixture-text-signature' } : {}) }] : []),
-    ...(signatures ? [{ type: 'thinking', thinking: 'fixture reasoning', thinkingSignature: 'fixture-thinking-signature', redacted: true }] : []),
-  ], api: 'fixture', provider: 'fixture', model: 'fixture', usage, timestamp, stopReason });
-const delta = text => ({ type: 'message_update', usage,
-  assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: text,
-    ...(signatures ? { partial: assistant(text, 0) } : {}) } });
-function finish(message) {
-  streaming = false;
-  append(message);
-  send({ type: 'message_end', message }, { type: 'turn_end', message, toolResults: [] },
-    { type: 'agent_end', messages: [message], willRetry: false }, { type: 'agent_settled' });
-}
-function prompt(command) {
-  if (command.message === '/reject-prompt') {
-    send(response(command, undefined, 'Fixture prompt rejected'));
-    return;
-  }
-  if (command.message === '/exit') {
-    process.stderr.write('fixture requested exit\n');
-    later(20, () => process.exit(23));
-    return;
-  }
-  if (command.message === '/boundary') {
-    boundaryArmed = true;
-    send(response(command, { disposition: 'handled' }));
-    return;
-  }
-  // Fixture-only extension commands still use stock prompt and event wire records.
-  if (command.message === '/malformed-output') {
-    // Keep the triggering command outstanding while corrupting one small stdout frame.
-    process.stdout.write('{malformed fixture output}\n');
-    later(30, () => send({ type: 'queue_update', steering: [], followUp: [] }, response(command, { disposition: 'handled' })));
-    return;
-  }
-  if (command.message === '/consumer-event') {
-    send({ type: 'queue_update', steering: ['consumer event'], followUp: [] }, response(command, { disposition: 'handled' }));
-    return;
-  }
-  if (command.message === '/fail-next-state') {
-    sessionName = 'mutation applied before refresh failed';
-    failStateCount = 1;
-    send(response(command, { disposition: 'handled' }));
-    return;
-  }
-  if (command.message === '/fail-next-entries') {
-    failEntriesCount++;
-    send(response(command, { disposition: 'handled' }));
-    return;
-  }
-  if (command.message === '/fail-snapshot-validation') {
-    failStateAfterEntries = true;
-    send(response(command, { disposition: 'handled' }));
-    return;
-  }
-  if (command.message === '/background-tail') {
-    streaming = true;
-    const timestamp = Date.now() - 60_000;
-    send({ type: 'agent_start' });
-    for (let i = 0; i < 13; i++) {
-      // The final two notices are identical, including both their live and saved times.
-      const occurrence = Math.min(i, 11);
-      const message = { role: 'custom', customType: 'background', display: true,
-        timestamp: timestamp + occurrence, content: `BACKGROUND_${occurrence}`,
-        details: { id: `task-${occurrence}`, state: 'completed' } };
-      const { role, timestamp: createdAt, ...stored } = message;
-      appendEntry({ type: 'custom_message', ...stored, timestamp: new Date(createdAt + 60_000).toISOString() });
-      send({ type: 'message_start', message }, { type: 'message_end', message });
-    }
-    backgroundAssistant = assistant('PARTIAL_BACKGROUND_ANSWER', timestamp + 14);
-    send({ type: 'message_start', message: backgroundAssistant }, response(command, { disposition: 'handled' }));
-    return;
-  }
-  if (command.message === '/finish-background-tail') {
-    const message = { ...backgroundAssistant, stopReason: 'stop', content: [{ type: 'text', text: 'FINAL_BACKGROUND_ANSWER' }] };
-    append(message);
-    const timing = appendEntry({ type: 'custom', customType: 'worked-for', data: { elapsedSeconds: 538 } });
-    streaming = false;
-    send({ type: 'message_end', message }, { type: 'entry_appended', entry: timing },
-      { type: 'agent_end', messages: [message], willRetry: false }, { type: 'agent_settled' },
-      response(command, { disposition: 'handled' }));
-    return;
-  }
-  if (command.message === '/large-history') {
-    appendEntry({ type: 'custom', customType: 'large-baseline', data: { text: 'LARGE_BASELINE_'.repeat(250_000) } });
-    send(response(command, { disposition: 'handled' }));
-    return;
-  }
-  if (command.message === '/reset-history') {
-    entries = [];
-    writeFileSync(sessionFile, JSON.stringify({ type: 'session', version: 3,
-      id: sessionId, timestamp: new Date().toISOString(), cwd: process.cwd() }) + '\n');
-    send(response(command, { disposition: 'handled' }));
-    return;
-  }
-  if (['/switch-before-entries', '/switch-after-entries'].includes(command.message)) {
-    switchBeforeEntries = command.message === '/switch-before-entries';
-    switchAfterEntries = command.message === '/switch-after-entries';
-    send(response(command, { disposition: 'handled' }));
-    return;
-  }
-  if (command.message === '/seed-live') {
-    streaming = true;
-    compacting = true;
-    send({ type: 'agent_start' }, { type: 'message_start', message: assistant('', Date.now()) },
-      delta('old session partial'), { type: 'tool_execution_start', toolCallId: 'old-tool', toolName: 'read', args: { path: 'old' } },
-      { type: 'queue_update', steering: ['old steering'], followUp: ['old follow-up'] },
-      { type: 'compaction_start', reason: 'manual' }, response(command, { disposition: 'handled' }));
-    return;
-  }
-  if (command.message === '/switch-on-snapshot') {
-    // The RPC's own refresh gets the old identity; the next snapshot gets a new ID at the same path.
-    switchAfterStates = 2;
-    send(response(command, { disposition: 'handled' }));
-    return;
-  }
-  if (command.message === '/switch-session') {
-    newSession();
-    send(response(command, { disposition: 'handled' }));
-    return;
-  }
-  if (['/dialog', '/confirm', '/select', '/editor', '/timeout'].includes(command.message)) {
-    const id = `fixture-dialog-${++dialogNumber}`;
-    // Delay opening so a test can disconnect before the dialog exists.
-    later(60, () => {
-      const method = ({ '/confirm': 'confirm', '/select': 'select', '/editor': 'editor' })[command.message] ?? 'input';
-      const timeout = command.message === '/timeout' ? 120 : undefined;
-      const dialog = { type: 'extension_ui_request', id, method, title: 'Fixture dialog',
-        ...(method === 'confirm' ? { message: 'Continue?' } : method === 'select' ? { options: ['Allow', 'Block'] }
-          : method === 'editor' ? { prefill: 'initial text' } : { placeholder: 'answer' }),
-        ...(timeout ? { timeout } : {}) };
-      const pending = { command, timer: undefined };
-      pendingDialogs.set(id, pending);
-      send(dialog);
-      if (timeout) pending.timer = later(timeout, () => {
-        if (!pendingDialogs.delete(id)) return;
-        send(response(command, { disposition: 'handled' }), { type: 'extension_ui_request',
-          id: randomUUID(), method: 'notify', notifyType: 'info', message: 'dialog timed out' });
-      });
-    });
-    return;
-  }
-  if (streaming) { send(response(command, undefined, 'Already streaming')); return; }
-  streaming = true;
-  const timestamp = Date.now();
-  const user = { role: 'user', content: command.message, timestamp };
-  append(user);
-  send(...(args.includes('--fixture-prompt-after-turn') ? [] : [response(command, { disposition: 'started' })]), { type: 'agent_start' }, { type: 'turn_start' },
-    { type: 'message_start', message: user }, { type: 'message_end', message: user },
-    { type: 'message_start', message: assistant('', timestamp + 1) }, delta('partial: '));
-  later(400, () => { if (streaming) send(delta(command.message)); });
-  const complete = () => {
-    if (streaming) finish(assistant(`partial: ${command.message} complete`, timestamp + 1, 'stop'));
-    if (args.includes('--fixture-prompt-after-turn')) send(response(command, { disposition: 'started' }));
-  };
-  const gate = option('--fixture-prompt-gate');
-  if (gate) {
-    const wait = () => { if (existsSync(gate)) complete(); else later(10, wait); };
-    later(10, wait);
-  } else later(700, complete);
-}
-function handle(command) {
-  if (process.env.PI_FIXTURE_COMMANDS_LOG) appendFileSync(process.env.PI_FIXTURE_COMMANDS_LOG, JSON.stringify({ pid: process.pid, command }) + '\n');
-  if (command.type === 'extension_ui_response') {
-    const pending = pendingDialogs.get(command.id);
-    if (!pending) return;
-    pendingDialogs.delete(command.id);
-    clearTimeout(pending.timer);
-    timers.delete(pending.timer);
-    if (pending.startup) {
-      for (const query of blockedQueries.splice(0)) handle(query);
-      return;
-    }
-    if (pending.newSession && command.cancelled !== true && command.confirmed === true) newSession();
-    const data = pending.newSession ? { cancelled: command.cancelled === true || command.confirmed !== true } : { disposition: 'handled' };
-    send(response(pending.command, data), { type: 'extension_ui_request',
-      id: randomUUID(), method: 'notify', notifyType: 'info',
-      message: `answer:${JSON.stringify({ value: command.value, confirmed: command.confirmed, cancelled: command.cancelled })}` });
-    if (pending.newSession) for (const query of blockedQueries.splice(0)) handle(query);
-    return;
-  }
-  // A runtime replacement can hold inspection until its extension hook finishes.
-  if (['get_state', 'get_entries'].includes(command.type) && [...pendingDialogs.values()].some(pending => pending.newSession || pending.startup)) {
-    blockedQueries.push(command);
-    return;
-  }
-  if (seenIds.has(command.id)) { send(response(command, undefined, 'Duplicate child command ID')); return; }
-  seenIds.add(command.id);
-  switch (command.type) {
-    case 'get_state':
-      if (failStateCount > 0) { failStateCount--; send(response(command, undefined, 'Fixture get_state failure')); break; }
-      if (switchAfterStates > 0 && --switchAfterStates === 0) newSession(true);
-      send(response(command, state()));
-      break;
-    case 'get_entries': {
-      if (process.env.PI_FIXTURE_ENTRIES_LOG) appendFileSync(process.env.PI_FIXTURE_ENTRIES_LOG, JSON.stringify({ since: command.since }) + '\n');
-      if (switchBeforeEntries) { switchBeforeEntries = false; newSession(true); }
-      if (failEntriesCount > 0) { failEntriesCount--; send(response(command, undefined, 'Fixture get_entries failure')); break; }
-      const index = command.since === undefined ? -1 : entries.findIndex(entry => entry.id === command.since);
-      if (command.since !== undefined && index < 0) { send(response(command, undefined, `Entry not found: ${command.since}`)); break; }
-      const result = response(command, { entries: entries.slice(index + 1), leafId: entries.at(-1)?.id ?? null });
-      if (boundaryArmed) {
-        boundaryArmed = false;
-        const message = assistant('boundary complete', Date.now(), 'stop');
-        append(message);
-        // One write is essential: following events are parsed before Promise continuations run.
-        send(result, { type: 'agent_start' }, { type: 'message_start', message: { ...message, content: [], stopReason: 'pending' } },
-          delta('boundary complete'), { type: 'message_end', message },
-          { type: 'agent_end', messages: [message], willRetry: false }, { type: 'agent_settled' });
-      } else send(result);
-      if (switchAfterEntries) { switchAfterEntries = false; newSession(true); }
-      if (failStateAfterEntries) { failStateAfterEntries = false; failStateCount++; }
-      break;
-    }
-    case 'get_messages': send(response(command, { messages: entries.filter(entry => entry.type === 'message').map(entry => entry.message) })); break;
-    case 'get_last_assistant_text': send(response(command, { text: entries.filter(entry => entry.message?.role === 'assistant').at(-1)?.message.content[0]?.text ?? null })); break;
-    case 'get_commands': send(response(command, { commands: ['dialog', 'confirm', 'select', 'editor', 'timeout',
-      'fail-next-state', 'seed-live', 'switch-on-snapshot', 'switch-session', ...(extension.commands ?? [])].map(name => ({ name, source: 'extension' })) })); break;
-    case 'prompt': prompt(command); break;
-    case 'set_session_name': sessionName = command.name; appendEntry({ type: 'session_info', name: command.name }); send(response(command, {})); break;
-    case 'switch_session': sessionFile = command.sessionPath; openSession(); streaming = false; send(response(command, { cancelled: false })); break;
-    case 'new_session':
-      if (args.includes('--fixture-new-session-dialog')) {
-        const id = `fixture-dialog-${++dialogNumber}`;
-        pendingDialogs.set(id, { command, newSession: true });
-        send({ type: 'extension_ui_request', id, method: 'confirm', title: 'New session hook', message: 'Switch sessions?' });
-      } else { newSession(); send(response(command, { cancelled: false })); }
-      break;
-    case 'clear_queue': send(response(command, { steering: [], followUp: [] })); break;
-    case 'abort': streaming = false; send({ type: 'agent_settled' }, response(command, {})); break;
-    case 'bash': later(180, () => send(response(command, { output: command.command, exitCode: 0, cancelled: false, truncated: false }))); break;
-    default: send(response(command, undefined, `Unsupported fixture command: ${command.type}`));
-  }
-}
-const decoder = new StringDecoder('utf8');
-let buffer = '';
-const consume = chunk => {
-  buffer += decoder.write(chunk);
-  let newline;
-  while ((newline = buffer.indexOf('\n')) >= 0) {
-    const line = buffer.slice(0, newline).replace(/\r$/, '');
-    buffer = buffer.slice(newline + 1);
-    if (!line.trim()) continue;
-    try { handle(JSON.parse(line)); }
-    catch (error) { send({ type: 'response', command: 'parse', success: false, error: String(error) }); }
-  }
-};
-// A new side starts from a file that ends with the daemon's boundary message.
-if (args.includes('--fixture-startup-dialog') && (forkPath || entries.at(-1)?.customType === 'side-boundary')) {
-  pendingDialogs.set('fixture-startup-dialog', { startup: true });
-  send({ type: 'extension_ui_request', id: 'fixture-startup-dialog', method: 'confirm', title: 'Side startup', message: 'Ready?' });
-}
-const startDelay = Number(process.env.PI_FIXTURE_START_DELAY_FILE && existsSync(process.env.PI_FIXTURE_START_DELAY_FILE)
-  ? readFileSync(process.env.PI_FIXTURE_START_DELAY_FILE, 'utf8') : option('--fixture-start-delay', '0'));
-if (startDelay > 0) {
-  send({ type: 'extension_ui_request', id: 'fixture-startup-status', method: 'setStatus', statusKey: 'startup', statusText: 'Starting fixture' });
-  later(startDelay, () => process.stdin.on('data', consume));
-} else process.stdin.on('data', consume);
-for (const record of extension.ui ?? []) send({ type: 'extension_ui_request', ...record });
-process.stdin.on('end', () => {
-  for (const timer of timers) clearTimeout(timer);
-  if (args.includes('--fixture-shutdown-events')) send({ type: 'agent_settled' },
-    { type: 'extension_ui_request', id: 'retired', method: 'setWidget', widgetKey: 'retired', widgetLines: ['stale shutdown widget'] });
-  setTimeout(() => process.exit(0), Number(option('--fixture-stop-delay', '0')));
+if (!entries.length) entries.push({ type: 'session', id: sessionId, cwd: process.cwd(), timestamp: new Date().toISOString() });
+
+const socket = createConnection(process.env.PI_REMOTE_COMPANION_SOCKET);
+const send = message => socket.write(`${JSON.stringify(message)}\n`);
+const transcript = () => entries.filter(entry => entry.type === 'message').map(entry => `${entry.role}: ${entry.text}`);
+let draft = '';
+const frame = (reset = false) => send({
+  type: 'frame', width: process.stdout.columns ?? 80, layout: 'known', reset, editorFocused: true, dropdownRows: 0, hardwareCursor: false,
+  sections: { 0: { start: 0, remove: Number.MAX_SAFE_INTEGER, insert: transcript() }, 4: { start: 0, remove: Number.MAX_SAFE_INTEGER, insert: ['──', `> ${draft}`, '──'] } },
 });
+const session = () => send({
+  type: 'session', hostname: hostname(), pid: process.pid, piVersion: '1.4.0', cwd: process.cwd(), sessionId, sessionFile,
+  entryCount: entries.length - 1,
+  remote: process.env.PI_REMOTE_SESSION === '1' ? { host: process.env.PI_REMOTE_SESSION_HOST, slotId: process.env.PI_REMOTE_SESSION_SLOT } : undefined,
+});
+const activity = event => send({ type: 'activity', event });
+
+let running = Promise.resolve();
+function prompt(text) {
+  running = running.then(async () => {
+    activity({ type: 'agent_start' });
+    entries.push({ type: 'message', role: 'user', text });
+    frame();
+    while (process.env.PI_FIXTURE_PROMPT_GATE && existsSync(process.env.PI_FIXTURE_PROMPT_GATE)) await new Promise(r => setTimeout(r, 20));
+    entries.push({ type: 'message', role: 'assistant', text: `echo: ${text}` });
+    save();
+    activity({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [] } });
+    frame();
+    session();
+    activity({ type: 'agent_end', messages: [{ role: 'assistant', stopReason: 'stop', content: [] }] });
+    activity({ type: 'agent_settled', aborted: false });
+  });
+}
+
+let control = '';
+socket.setEncoding('utf8');
+socket.on('data', chunk => {
+  control += chunk;
+  let end;
+  while ((end = control.indexOf('\n')) !== -1) {
+    const message = JSON.parse(control.slice(0, end)); control = control.slice(end + 1);
+    if (message.type === 'prompt') prompt(message.text);
+  }
+});
+socket.on('connect', () => {
+  send({ type: 'editorInstalled', editor: 'default', bindings: {} });
+  frame(true);
+  setTimeout(session, Number(process.env.PI_FIXTURE_SLOW_START ?? 0));
+});
+
+process.stdin.setRawMode?.(true);
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', data => {
+  // Barriers and other APC messages are not text.
+  const text = data.replace(/\x1b_[^\x1b]*\x1b\\/g, '');
+  for (const character of text) {
+    if (character === '\r') { const value = draft; draft = ''; if (value) prompt(value); }
+    else if (character === '\x7f') draft = draft.slice(0, -1);
+    else if (character >= ' ') draft += character;
+  }
+  frame();
+});
+process.stdout.on('resize', () => frame());
+process.on('SIGTERM', () => { save(); process.exit(0); });
+setInterval(() => {}, 1 << 30);

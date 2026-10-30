@@ -97,24 +97,22 @@ test('CLI version reports 0.2.0 without opening a connection', async t => {
   assert.deepEqual(output, [`pi-remote 0.2.0 (Pi ${PI_VERSION}, protocol ${PROTOCOL_VERSION})`]);
 });
 
-test('help separates power-user/debug commands from everyday use', async t => {
+test('help describes the everyday commands and the slot keys', async t => {
   const output: string[] = [];
   t.mock.method(console, 'log', (value: string) => { output.push(value); });
   await main(['--help']);
-  const [everyday, advanced] = output.join('\n').split('Power-user / debugging commands:');
-  assert.match(everyday, /Everyday commands:/);
-  assert.match(everyday, /pi-remote attach \[--host HOST\] \[SLOT\]/);
-  assert.doesNotMatch(everyday, /pi-remote (?:rpc|watch) /);
-  assert.match(advanced, /pi-remote rpc \[--host HOST\] SLOT/);
-  assert.match(advanced, /pi-remote watch \[--host HOST\] SLOT/);
-  assert.match(advanced, /pi-remote\/config\.json/);
-  assert.match(advanced, /Use attach for normal interactive work/);
-  assert.match(advanced, /--no-bell/);
+  const help = output.join('\n');
+  assert.match(help, /Everyday commands:/);
+  assert.match(help, /pi-remote attach \[--host HOST\] \[SLOT\]/);
+  assert.doesNotMatch(help, /pi-remote (?:rpc|watch) /);
+  assert.match(help, /pi-remote\/config\.json/);
+  assert.match(help, /--no-bell/);
+  assert.match(help, /Ctrl\+\//);
 });
 
-test('shell completion labels rpc and watch as power-user/debug commands', async () => {
+test('shell completion offers only everyday commands', async () => {
   const items = await completeWords(['']);
-  for (const command of ['rpc', 'watch']) assert.match(items.find(item => item.value === command)!.label, /^Power-user\/debug:/);
+  for (const command of ['rpc', 'watch']) assert.equal(items.find(item => item.value === command), undefined);
   assert.equal(items.find(item => item.value === 'attach')!.label, 'Command');
 });
 
@@ -127,9 +125,9 @@ test('host comes only from --host, then the default; --local ignores both', () =
 });
 
 test('commands accept unambiguous prefixes; internal commands need exact names', () => {
-  const cases: [string, string][] = [['n', 'new'], ['ne', 'new'], ['a', 'attach'], ['k', 'kill'], ['l', 'ls'], ['r', 'resume'], ['resu', 'resume'], ['rp', 'rpc'], ['rest', 'restart-daemon'], ['w', 'watch'], ['c', 'completion'], ['compl', 'completion'], ['h', 'help'], ['v', 'version'], ['complete', 'complete'], ['fs', 'fs'], ['daemon', 'daemon'], ['bridge', 'bridge']];
+  const cases: [string, string][] = [['n', 'new'], ['ne', 'new'], ['a', 'attach'], ['k', 'kill'], ['l', 'ls'], ['r', 'resume'], ['resu', 'resume'], ['rest', 'restart-daemon'], ['c', 'completion'], ['compl', 'completion'], ['h', 'help'], ['v', 'version'], ['complete', 'complete'], ['fs', 'fs'], ['daemon', 'daemon'], ['bridge', 'bridge']];
   for (const [input, command] of cases) assert.equal(resolveCommand(input), command, input);
-  for (const input of ['d', 'b', 'f', 'x', 'newer', '']) assert.throws(() => resolveCommand(input), /Unknown command/, input);
+  for (const input of ['d', 'b', 'f', 'x', 'newer', '', 'rpc', 'watch']) assert.throws(() => resolveCommand(input), /Unknown command/, input);
   assert.throws(() => resolveCommand('re'), /Ambiguous command 're': resume, restart-daemon/);
   assert.deepEqual(matchCommand('zz').candidates, []);
 });
@@ -256,8 +254,8 @@ test('completion reads host defaults and connection flags without confusing opti
   }
 });
 
-test('attach, kill, watch, and rpc offer running slots with cwd/name/state labels', async () => {
-  for (const command of ['attach', 'kill', 'watch', 'rpc']) {
+test('attach, kill, and resume offer slots with cwd/name/state labels', async () => {
+  for (const command of ['attach', 'kill']) {
     const remote = fakeRemote();
     const result = await completeWords([command, '--host', 'alias', ''], { connect: remote.connect });
     assert.deepEqual(result.map(item => item.value), ['19', '3']);
@@ -285,7 +283,7 @@ test('resume completion offers only stopped slots with a saved session', async (
 });
 
 test('completion does not contact remote hosts for unrelated tokens, missing hosts, or forwarded Pi flags', async () => {
-  for (const words of [['new', '--cwd', ''], ['attach', ''], ['new', '--host', 'host', '--', '--cwd', ''], ['attach', '--host', ''], ['new', '--host', 'host', '--ui-config', ''], ['rpc', '--host', 'host', '19', ''], ['new', '--host', 'host', ''], ['unknown', '--host', 'host', '']]) {
+  for (const words of [['new', '--cwd', ''], ['attach', ''], ['new', '--host', 'host', '--', '--cwd', ''], ['attach', '--host', ''], ['new', '--host', 'host', '--ui-config', ''], ['new', '--host', 'host', ''], ['unknown', '--host', 'host', '']]) {
     const remote = fakeRemote();
     assert.deepEqual(await completeWords(words, { connect: remote.connect, defaultHost: '' }), []);
     assert.deepEqual(remote.connections, []);
@@ -448,10 +446,10 @@ test('fish complete -C handles --cwd=, unfinished quotes, escaped spaces, remote
   }
 });
 
-test('fish complete -C: attach/kill/watch/rpc list running slots by stable short number with descriptive labels', { timeout: 20000 }, async t => {
+test('fish complete -C: attach/kill list running slots by stable short number with descriptive labels', { timeout: 20000 }, async t => {
   if (!await hasExecutable(fishPath)) { t.skip('fish is not installed'); return; }
   const fixture = await shellFixture(t);
-  for (const command of ['attach', 'kill', 'watch', 'rpc']) {
+  for (const command of ['attach', 'kill']) {
     const { stdout } = await exec(fishPath, ['--no-config', '-c', `source ${shellQuote(join(root, 'completions/pi-remote.fish'))}; complete -C "$PI_REMOTE_LINE"`], { env: { ...fixture.env, PI_REMOTE_LINE: `pi-remote ${command} --host alias ` }, cwd: root });
     assert.deepEqual(stdout.trim().split('\n').map(line => line.split('\t')[0]).sort(), ['19', '3']);
     assert.match(stdout, /19\trunning · Fix quoted paths · \/remote\/project with spaces/);
@@ -513,19 +511,14 @@ test('internal complete command uses the standard SSH hello and read-only RPC, w
   assert.deepEqual(requests[0].params, { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION });
 });
 
-test('CLI ls displays short numbers and resolves numeric rpc slots to UUIDs before attach', { timeout: 10000 }, async t => {
+test('CLI ls displays short numbers', { timeout: 10000 }, async t => {
   const fixture = await fakeSsh(t);
   const cli = [...nodeModuleArgs(import.meta.url, '../../src/cli/main')];
   const listing = await exec(process.execPath, [...cli, 'l', '--host', 'alias'], { env: fixture.env, cwd: root });
   assert.match(listing.stdout, /^\s*19  ● running   Fix quoted paths  \/remote\/project with spaces  \d+d  1234abcd$/m);
   const json = await exec(process.execPath, [...cli, 'ls', '--host', 'alias', '--json'], { env: fixture.env, cwd: root });
   assert.equal(JSON.parse(json.stdout)[0].number, 19);
-  await writeFile(fixture.log, '');
-  await exec(process.execPath, [...cli, 'rpc', '--host', 'alias', '19', '{"type":"get_state"}'], { env: fixture.env, cwd: root });
-  const requests = (await readFile(fixture.log, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-  assert.deepEqual(requests.map(request => request.method), ['hello', 'list', 'list', 'attach', 'rpc']);
-  assert.equal(requests[3].params.slotId, '1234abcd-a');
-  assert.equal(requests[4].params.slotId, '1234abcd-a');
+  await assert.rejects(exec(process.execPath, [...cli, 'rpc', '--host', 'alias', '19', '{}'], { env: fixture.env, cwd: root }), /Unknown command/);
 });
 
 test('CLI takes the default host from the XDG config file, with PI_REMOTE_HOST and --host taking precedence', { timeout: 15000 }, async t => {

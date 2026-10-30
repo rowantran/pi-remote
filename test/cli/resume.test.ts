@@ -70,7 +70,7 @@ test('opening a session creates a slot, attaches if another slot owns it, and ex
   const created: any[] = [];
   const ok = { request: async (_method: string, params: any) => { created.push(params); return slot(9, 'starting'); } } as any;
   assert.deepEqual((await openSession(ok, choice, ['--model', 'm'])).slotId, 'id-9');
-  assert.deepEqual(created, [{ cwd: '/work', args: ['--model', 'm'], sessionPath: '/sessions/a.jsonl', native: true }]);
+  assert.deepEqual(created, [{ cwd: '/work', args: ['--model', 'm'], sessionPath: '/sessions/a.jsonl' }]);
   const owned = { request: async () => { throw new Error('Session is already open in slot 8844ca51-7b8d-47da-b1b9-3e111d70779b; attach to that slot instead'); } } as any;
   assert.deepEqual(await openSession(owned, choice), { slotId: '8844ca51-7b8d-47da-b1b9-3e111d70779b', existing: true });
   const missing = { request: async () => { throw new Error("ENOENT: no such file or directory, realpath '/sessions/a.jsonl'"); } } as any;

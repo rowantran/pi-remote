@@ -22,7 +22,7 @@ export interface SessionViewEvents {
 }
 
 /**
- * The phone view of a native slot: Pi renders at the phone's width (the phone takes the size
+ * The phone view of a slot: Pi renders at the phone's width (the phone takes the size
  * when it attaches or sends), and the phone scrolls Pi's transcript locally. Prompts come from
  * the native text box and replace Pi's editor text before Enter.
  */
@@ -56,13 +56,13 @@ export class SessionView {
 
   async attach(): Promise<void> {
     this.client.start();
-    const attachment = await this.connection.request('attach_native', {
+    const attachment = await this.connection.request('attach', {
       slotId: this.slot.id, columns: this.terminal.columns, rows: this.terminal.rows, answers: this.answers,
     });
     this.apply(attachment);
     this.setWorking(attachment.busy === true);
     this.unsubscribe.push(this.connection.onEvent((event: RemoteEvent) => this.event(event)));
-    this.unsubscribe.push(this.connection.onNativeReconnect?.(next => { this.client.reset(); this.apply(next); this.setWorking(next.busy === true); }) ?? (() => {}));
+    this.unsubscribe.push(this.connection.onReconnect?.(next => { this.client.reset(); this.apply(next); this.setWorking(next.busy === true); }) ?? (() => {}));
     // Typing on the phone is the native text box. Pi gets the phone's size when it sends.
   }
 

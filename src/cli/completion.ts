@@ -14,14 +14,12 @@ export { numberSlots, slotNumber, type NumberedSlot };
 
 export const VALUE_OPTIONS = ['--host', '--remote-bin', '--state-dir', '--cwd', '--session', '--ui-extension', '--ui-config', '--theme'] as const;
 export const BOOLEAN_OPTIONS = ['--local', '--json', '--no-attach', '--no-reconnect', '--no-bell', '--all', '--force', '--help'] as const;
-export const COMMANDS = ['new', 'ls', 'attach', 'resume', 'kill', 'watch', 'rpc', 'restart-daemon', 'completion', 'help', 'version'] as const;
+export const COMMANDS = ['new', 'ls', 'attach', 'resume', 'kill', 'restart-daemon', 'completion', 'help', 'version'] as const;
 const COMMAND_LABELS: Partial<Record<typeof COMMANDS[number], string>> = {
   resume: 'Reopen a stopped or stored session',
-  rpc: 'Power-user/debug: send a JSON command',
-  watch: 'Power-user/debug: stream session events as JSON',
   'restart-daemon': 'Run the installed release; reopen idle slots',
 };
-const SLOT_COMMANDS = new Set(['attach', 'resume', 'kill', 'watch', 'rpc']);
+const SLOT_COMMANDS = new Set(['attach', 'resume', 'kill']);
 /** Everyday shortcuts that win over prefix matching: r would otherwise be ambiguous. */
 const ALIASES: Readonly<Record<string, typeof COMMANDS[number]>> = { r: 'resume' };
 /** Server/internal commands: exact names only, never matched by a prefix. */

@@ -9,8 +9,7 @@ import { connectCompatibleSsh } from '../client/compat-client.js';
 import { connectCompatibleLocal } from './connections.js';
 import { ReconnectingConnection } from '../client/reconnect.js';
 import { releaseName, restartDaemon } from '../client/restart-daemon.js';
-import { PI_VERSION, PROTOCOL_VERSION, errorText, type SlotInfo, type Snapshot, type RemoteConnection } from '../protocol/types.js';
-import type { AttachContext } from '../tui/side-launcher.js';
+import { PI_VERSION, PROTOCOL_VERSION, errorText, type RemoteConnection, type SlotInfo } from '../protocol/types.js';
 import { FuzzyPicker, runPicker, type PickerItem, type PickerOptions } from '../tui/fuzzy-picker.js';
 import { formatSlotList, listSummary, slotColumns, slotItems } from '../tui/slot-table.js';
 import { terminalPaint } from '../tui/table.js';
@@ -18,7 +17,7 @@ import { openSession, pickResume, resumeSlot, type ResumeChoice } from './resume
 import { sessionDirArg } from '../daemon/session-dirs.js';
 import { formatLatency, statusSampler } from '../tui/host-status.js';
 
-const HELP = `pi-remote — local terminal UI, persistent remote Pi RPC processes
+const HELP = `pi-remote — Pi's own interface for persistent remote Pi processes, with local typing and scrolling
 
 Everyday commands:
   pi-remote [--host HOST]
@@ -44,13 +43,6 @@ Everyday commands:
     Read the theme from this server's pi-remote config.
     Use 'pi-remote serve --help' for pairing, device revocation, and security.
 
-Power-user / debugging commands:
-  pi-remote rpc [--host HOST] SLOT '{"type":"get_state"}'
-    Send one JSON command and print its response.
-  pi-remote watch [--host HOST] SLOT
-    Print a session snapshot, then stream live events as JSON.
-  These are for scripts and debugging. Use attach for normal interactive work.
-
 Any unambiguous command prefix works: n = new, a = attach, k = kill, l = ls, rest = restart-daemon.
 r is short for resume.
 
@@ -67,20 +59,22 @@ Options:
   --json               Machine-readable list/create output
   --no-attach          Create a slot and print its ID without opening the TUI
   --force              restart-daemon: interrupt busy slots
-  --ui-extension PATH  Load a local presentation adapter (repeatable)
+  --ui-extension PATH  Local copy of an extension that sets Pi's editor (repeatable)
   --ui-config PATH     Alternate UI config (does not change host/cwd defaults)
-  --theme NAME         Local UI theme, or a LIGHT/DARK pair
+  --theme NAME         Theme for the local editor and scrolling, or a LIGHT/DARK pair
+                       (default: Pi's theme setting on this machine)
   --no-reconnect       Disable automatic client reconnection
-  --no-bell            Disable bells for remote completion and blocking dialogs
+  --no-bell            Do not ring the terminal bell when Pi rings it
 
 Configuration:
   $XDG_CONFIG_HOME/pi-remote/config.json (default ~/.config/pi-remote/config.json)
   sets connection defaults and local UI settings:
-    {"host": "devbox", "cwd": "~/project", "extensions": [], "theme": "dark",
-     "bell": true, "sideSplit": "auto"}
+    {"host": "devbox", "cwd": "~/project", "extensions": [], "theme": "dark", "bell": true}
+  "extensions" are local copies of extensions that replace Pi's editor (for example a
+  prompt caret), so typing stays local. Other extension features run in remote Pi.
   Host precedence: --host, then PI_REMOTE_HOST, then the config file.
   Directory precedence: --cwd, then PI_REMOTE_CWD, then the config file.
-  --ui-config overrides only UI settings; --ui-extension adds trusted adapters.
+  --ui-config overrides only UI settings; --ui-extension adds editor extensions.
   The bell defaults to on; --no-bell overrides the config.
 
 SLOT is a stable number from ls, a full UUID, or a unique UUID prefix.
@@ -100,11 +94,12 @@ Completion installation (prints scripts; never edits shell configuration):
         Source that file from your shell configuration.
 
 Server-only commands: bridge, daemon. These start automatically.
-Ctrl+D or /detach exits the local UI WITHOUT stopping remote work. Ctrl+C clears the prompt.
-Explicit 'kill', or /quit in the UI, stops remote Pi. SSH authentication uses your existing config.
+Ctrl+D (empty editor) or /detach closes the local UI WITHOUT stopping remote work. Ctrl+/ or
+/status shows the connection. Explicit 'kill', or Pi's /quit, stops remote Pi. SSH
+authentication uses your existing config.
 Requires matching Pi ${PI_VERSION} on both machines.
 `;
-export interface UiOptions { presentationPaths?: string[]; presentationConfig?: string; theme?: string; host?: string; bell?: boolean; attachContext?: AttachContext }
+export interface UiOptions { presentationPaths?: string[]; presentationConfig?: string; theme?: string; host?: string; bell?: boolean }
 export interface Options { positionals: string[]; piArgs: string[]; values: Map<string,string>; flags: Set<string>; ui: UiOptions }
 export function parseOptions(args: string[]): Options {
   const options: Options = { positionals: [], piArgs: [], values: new Map(), flags: new Set(), ui: {} };
@@ -210,7 +205,7 @@ export async function resolveSlot(connection: Pick<RemoteConnection, 'request'>,
 }
 export { formatSlotList };
 
-/** Only interactive attach/new request transcript filtering; watch/rpc stay raw. */
+/** Interactive attach, new and resume open the terminal UI. */
 export function usesTerminalUi(command: string, flags: ReadonlySet<string>, stdinIsTTY = Boolean(process.stdin.isTTY), stdoutIsTTY = Boolean(process.stdout.isTTY)): boolean {
   return stdinIsTTY && stdoutIsTTY && (command === 'attach' || command === 'home' || ((command === 'new' || command === 'resume') && !flags.has('--no-attach')));
 }
@@ -248,10 +243,10 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const stateDir = options.values.get('--state-dir');
   if (command === 'daemon') { await runDaemon({ stateDir: stateDir ?? defaultStateDir(), executable: process.env.PI_REMOTE_PI_BIN ?? 'pi' }); return; }
   if (command === 'bridge') { await bridge(stateDir); return; }
-  if (!['home', 'new', 'ls', 'attach', 'resume', 'kill', 'rpc', 'watch', 'restart-daemon'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
+  if (!['home', 'new', 'ls', 'attach', 'resume', 'kill', 'restart-daemon'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
   const local = options.flags.has('--local');
   const host = selectHost({ host: options.values.get('--host'), local, defaultHost: local ? undefined : defaultHost() });
-  const maxPositionals = command === 'rpc' ? 2 : ['attach', 'resume', 'kill', 'watch'].includes(command) ? 1 : 0;
+  const maxPositionals = ['attach', 'resume', 'kill'].includes(command) ? 1 : 0;
   if (options.positionals.length > maxPositionals) throw new Error(`Too many arguments. Use --host HOST to select a host. See --help.`);
   if (!local && !host) throw new Error(`No host. Use --host HOST, set PI_REMOTE_HOST, add {"host": "HOST"} to ${configPath()}, or use --local.`);
   const factory = () => options.flags.has('--local') ? connectCompatibleLocal(stateDir) : connectCompatibleSsh({ host: host!, remoteBin: options.values.get('--remote-bin'), stateDir });
@@ -273,7 +268,6 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     load: (sampler => () => sampler.sample(terminalPaint()))(statusSampler(connection, host ?? 'local',
       [['connect', `${formatLatency(performance.now() - connectStarted)} (${local ? 'daemon handshake' : 'SSH and daemon handshake'})`]])),
   };
-  let removeSignal: (() => void) | undefined;
   try {
     if (command === 'ls') {
       const started = performance.now();
@@ -332,7 +326,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (command === 'new' || createCwd) {
       const cwd = createCwd ?? cwdDefault;
       if (!cwd) throw missingCwd(local);
-      const slot = await connection.request('create', { cwd, args: options.piArgs, sessionPath: options.values.get('--session'), native: true });
+      const slot = await connection.request('create', { cwd, args: options.piArgs, sessionPath: options.values.get('--session') });
       slotId = slot.id;
       if (options.flags.has('--no-attach') || !process.stdin.isTTY || !process.stdout.isTTY) {
         console.log(options.flags.has('--json') ? JSON.stringify(slot, null, 2) : slot.id);
@@ -340,47 +334,13 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       }
     } else slotId ??= await resolveSlot(connection, options.positionals.shift(), command === 'attach', { host, details });
     if (command === 'kill') { await connection.request('kill', { slotId }); console.log(`Stopped ${slotId}`); return; }
-    if (!['home', 'new', 'attach', 'resume', 'rpc', 'watch'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
+    if (!['home', 'new', 'attach', 'resume'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
+    if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('attach needs a local terminal.');
     const slot = (await connection.request('list')).find(info => info.id === slotId);
-    if (slot?.native) {
-      if (command === 'rpc' || command === 'watch') throw new Error(`${command} needs an RPC slot; slot ${slot.number ?? slotId} runs Pi's own interface`);
-      if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('attach needs a local terminal.');
-      const { runTerminalSession } = await import('../tui/terminal-session.js');
-      await runTerminalSession(connection, slot, { ...options.ui, host: host ?? 'local' });
-      return;
-    }
-    const snapshot = await connection.request('attach', { slotId, protocol: PROTOCOL_VERSION, piVersion: PI_VERSION,
-      ...(usesTerminalUi(command, options.flags) ? { filterTranscript: true } : {}),
-    });
-    // Power-user/debug interface: one explicit JSON command, not an interactive session.
-    if (command === 'rpc') {
-      const json = options.positionals.shift();
-      if (!json) throw new Error('rpc requires a JSON Pi RPC command');
-      const result = await connection.request('rpc', { slotId, command: JSON.parse(json) });
-      console.log(JSON.stringify(result ?? null));
-      return;
-    }
-    // Power-user/debug observer: snapshot and event JSON, without terminal controls.
-    if (command === 'watch') {
-      console.log(JSON.stringify({ type: 'snapshot', ...snapshot }));
-      const unsubscribe = connection.onEvent(event => { if (event.seq > snapshot.seq) console.log(JSON.stringify(event)); });
-      await new Promise<void>(resolve => {
-        const stop = () => resolve();
-        process.once('SIGINT', stop);
-        process.once('SIGTERM', stop);
-        const disconnect = connection.onDisconnect(() => resolve());
-        removeSignal = () => { process.off('SIGINT', stop); process.off('SIGTERM', stop); disconnect(); unsubscribe(); };
-      });
-      return;
-    }
-    if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('attach needs a local terminal. Use watch or rpc for headless access.');
-    const { runTui } = await import('../tui/tui.js');
-    const startTui: (connection: RemoteConnection, slotId: string, snapshot: Snapshot, options?: UiOptions) => Promise<void> = runTui;
-    await startTui(connection, slotId, snapshot, { ...options.ui, ...(host ? { host } : {}),
-      attachContext: { ...options.ui, host, local, stateDir: local ? resolve(stateDir ?? defaultStateDir()) : stateDir,
-        remoteBin: options.values.get('--remote-bin'), reconnect: !options.flags.has('--no-reconnect') },
-    });
-  } finally { removeSignal?.(); connection.close(); }
+    if (!slot) throw new Error('Slot not found');
+    const { runTerminalSession } = await import('../tui/terminal-session.js');
+    await runTerminalSession(connection, slot, { ...options.ui, host: host ?? 'local' });
+  } finally { connection.close(); }
 }
 
 // Daemon launches this compiled module directly; the bin launcher imports it instead.

@@ -2,7 +2,7 @@
   "name": "pi-remote",
   "version": "0.2.0",
   "private": true,
-  "description": "Local terminal client for persistent, unmodified remote Pi RPC processes",
+  "description": "Pi's own interface for persistent remote Pi processes, with local typing and scrolling",
   "type": "module",
   "bin": {
     "pi-remote": "bin/pi-remote"
@@ -16,9 +16,6 @@
     "test": "node --import tsx --test 'test/**/*.test.ts'",
     "test:mobile": "npm run build && node --import tsx test/smoke/phone.ts",
     "test:push": "npm run build && node --import tsx test/smoke/web-push.ts",
-    "test:golden": "node --import tsx test/bench/golden-transcript.ts",
-    "test:scroll": "node --import tsx test/bench/scroll-benchmark.ts",
-    "test:native-scroll": "node --import tsx test/bench/native-scroll-benchmark.ts",
     "verify": "npm run check && npm test && npm run build"
   },
   "engines": {

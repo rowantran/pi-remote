@@ -17,7 +17,7 @@ class BrowserSocket extends EventTarget {
   }
   send(text: string) {
     const record = JSON.parse(text); this.sent.push(record);
-    if (record.method === 'hello') queueMicrotask(() => this.record({ type: 'result', id: record.id, success: true, data: { protocol: 1, piVersion: '1.4.0', pid: 2 } }));
+    if (record.method === 'hello') queueMicrotask(() => this.record({ type: 'result', id: record.id, success: true, data: { protocol: 2, piVersion: '1.4.0', pid: 2 } }));
   }
   record(record: unknown) { this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(record) })); }
   close() { this.closed = true; this.readyState = 3; this.dispatchEvent(new Event('close')); }
@@ -35,7 +35,7 @@ test('browser transport handshakes, buffers early events, correlates replies, an
   const connection = await WebSocketConnection.connect();
   const socket = BrowserSocket.latest;
   assert.equal(socket.url, 'wss://devbox.example.test/ws');
-  assert.deepEqual(socket.sent[0].params, { protocol: 1, piVersion: '1.4.0' });
+  assert.deepEqual(socket.sent[0].params, { protocol: 2, piVersion: '1.4.0' });
   const event = { type: 'event', slotId: 'slot-a', seq: 7, event: { type: 'agent_start' } };
   socket.record(event);
   const events: unknown[] = [];

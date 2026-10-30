@@ -49,7 +49,7 @@ export function resumeSlot(slot: NumberedSlot): ResumeChoice {
  * there instead; a session must never run in two Pi processes. */
 export async function openSession(connection: Connection, choice: Extract<ResumeChoice, { kind: 'open' }>, args: string[] = []): Promise<{ slotId: string; slot?: SlotInfo; existing: boolean }> {
   try {
-    const slot = await connection.request('create', { cwd: choice.cwd, args, sessionPath: choice.sessionPath, native: true });
+    const slot = await connection.request('create', { cwd: choice.cwd, args, sessionPath: choice.sessionPath });
     return { slotId: slot.id, slot, existing: false };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

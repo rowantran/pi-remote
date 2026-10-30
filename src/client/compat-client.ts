@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { connectSsh, type SshOptions } from './connection.js';
 import { shellQuote } from '../protocol/shell.js';
 import type { DaemonMethod, FileMethod, MethodResult, RequestArgs } from '../protocol/methods.js';
-import type { ConnectionRetry, RecordValue, RemoteConnection, RemoteEvent, Snapshot, SlotInfo } from '../protocol/types.js';
+import type { ConnectionRetry, RecordValue, RemoteConnection, RemoteEvent, SlotInfo } from '../protocol/types.js';
 
 const FILE_METHODS: ReadonlySet<string> = new Set<FileMethod>(['complete_path', 'read_attachment', 'filesystem_metadata']);
 const isFileMethod = (method: string): method is FileMethod => FILE_METHODS.has(method);
@@ -12,13 +12,11 @@ export class CompatibleConnection implements RemoteConnection {
   private slots = new Map<string, SlotInfo>();
   private legacyFiles = false;
   get reconnecting(): boolean | undefined { return this.connection.reconnecting; }
-  onReconnect?: (listener: (snapshot: Snapshot) => void) => () => void;
   onRetry?: (listener: (retry: ConnectionRetry) => void) => () => void;
-  onNativeReconnect?: RemoteConnection['onNativeReconnect'];
+  onReconnect?: RemoteConnection['onReconnect'];
   constructor(private connection: RemoteConnection, private sideband: (method: FileMethod, params: RecordValue) => Promise<MethodResult<FileMethod>>) {
-    if (connection.onReconnect) this.onReconnect = listener => connection.onReconnect!(listener);
     if (connection.onRetry) this.onRetry = listener => connection.onRetry!(listener);
-    if (connection.onNativeReconnect) this.onNativeReconnect = listener => connection.onNativeReconnect!(listener);
+    if (connection.onReconnect) this.onReconnect = listener => connection.onReconnect!(listener);
   }
   async request<M extends DaemonMethod>(method: M, ...args: RequestArgs<M>): Promise<MethodResult<M>> {
     const params = (args[0] ?? {}) as RecordValue;
@@ -26,9 +24,9 @@ export class CompatibleConnection implements RemoteConnection {
       try {
         const result = await this.connection.request(method, ...args);
         if (method === 'list' && Array.isArray(result)) for (const slot of result) this.slots.set(slot.id, slot);
-        if ((method === 'attach' || method === 'snapshot') && (result as Snapshot)?.slot) {
-          const snapshot = result as Snapshot;
-          this.slots.set(snapshot.slot.id, snapshot.slot);
+        if (method === 'attach' && (result as { slot?: SlotInfo })?.slot) {
+          const slot = (result as { slot: SlotInfo }).slot;
+          this.slots.set(slot.id, slot);
         }
         return result;
       } catch (error: any) {

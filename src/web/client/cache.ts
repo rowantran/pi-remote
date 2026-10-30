@@ -5,7 +5,7 @@ import type { DaemonMethod, MethodResult, RequestArgs } from '../../protocol/met
 const DATABASE = 'pi-remote-transcripts';
 const STORE = 'snapshots';
 const MAX_BYTES = 8 * 1024 * 1024;
-/** A native slot's screen: frames and the session, without prompt history or the draft. */
+/** A slot's screen: frames and the session, without prompt history or the draft. */
 export interface SavedScreen { slot: SlotInfo; messages: CompanionMessage[] }
 interface Cached { slotId: string; savedAt: number; screen?: SavedScreen }
 function database(): Promise<IDBDatabase> {
@@ -31,7 +31,7 @@ export class TranscriptCache {
   private generation = 0;
   private pendingScreen?: SavedScreen;
   private scheduledScreen = false;
-  /** Save a native slot's screen when the browser is idle; only the latest one is written. */
+  /** Save a slot's screen when the browser is idle; only the latest one is written. */
   scheduleScreen(slot: SlotInfo, messages: CompanionMessage[]): void {
     this.pendingScreen = { slot, messages: messages.filter(message => message.type === 'frame' || message.type === 'session') };
     if (this.scheduledScreen) return;
