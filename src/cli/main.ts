@@ -332,7 +332,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (command === 'new' || createCwd) {
       const cwd = createCwd ?? cwdDefault;
       if (!cwd) throw missingCwd(local);
-      const slot = await connection.request('create', { cwd, args: options.piArgs, sessionPath: options.values.get('--session') });
+      const slot = await connection.request('create', { cwd, args: options.piArgs, sessionPath: options.values.get('--session'), native: true });
       slotId = slot.id;
       if (options.flags.has('--no-attach') || !process.stdin.isTTY || !process.stdout.isTTY) {
         console.log(options.flags.has('--json') ? JSON.stringify(slot, null, 2) : slot.id);
@@ -341,6 +341,14 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     } else slotId ??= await resolveSlot(connection, options.positionals.shift(), command === 'attach', { host, details });
     if (command === 'kill') { await connection.request('kill', { slotId }); console.log(`Stopped ${slotId}`); return; }
     if (!['home', 'new', 'attach', 'resume', 'rpc', 'watch'].includes(command)) throw new Error(`Unknown command '${command}'. See --help.`);
+    const slot = (await connection.request('list')).find(info => info.id === slotId);
+    if (slot?.native) {
+      if (command === 'rpc' || command === 'watch') throw new Error(`${command} needs an RPC slot; slot ${slot.number ?? slotId} runs Pi's own interface`);
+      if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('attach needs a local terminal.');
+      const { runTerminalSession } = await import('../tui/terminal-session.js');
+      await runTerminalSession(connection, slot, { ...options.ui, host: host ?? 'local' });
+      return;
+    }
     const snapshot = await connection.request('attach', { slotId, protocol: PROTOCOL_VERSION, piVersion: PI_VERSION,
       ...(usesTerminalUi(command, options.flags) ? { filterTranscript: true } : {}),
     });

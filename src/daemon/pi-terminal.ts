@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawn, type IPty } from 'node-pty';
 import { readJsonl } from '../protocol/jsonl.js';
+import { TerminalOutputFilter } from './terminal-output.js';
 import { COMPANION_SOCKET_ENV, type CompanionMessage, type ControlMessage, type RgbColor, type TerminalAnswers } from '../protocol/companion.js';
 export type { RgbColor, TerminalAnswers } from '../protocol/companion.js';
 
@@ -85,6 +86,7 @@ export class PiTerminal {
   private companion?: Socket;
   private socketDir?: string;
   private queryTail = '';
+  private output = new TerminalOutputFilter();
   private exited?: Promise<void>;
   private size: { columns: number; rows: number };
 
@@ -169,6 +171,7 @@ export class PiTerminal {
     const reply = answerQueries(text, this.options.answers, this.queryTail.length);
     this.queryTail = text.slice(-QUERY_TAIL_BYTES);
     if (reply) this.pty?.write(reply);
+    for (const message of this.output.feed(data)) this.onMessage?.(message);
   }
 
   private cleanup(): void {

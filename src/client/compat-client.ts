@@ -14,9 +14,11 @@ export class CompatibleConnection implements RemoteConnection {
   get reconnecting(): boolean | undefined { return this.connection.reconnecting; }
   onReconnect?: (listener: (snapshot: Snapshot) => void) => () => void;
   onRetry?: (listener: (retry: ConnectionRetry) => void) => () => void;
+  onNativeReconnect?: RemoteConnection['onNativeReconnect'];
   constructor(private connection: RemoteConnection, private sideband: (method: FileMethod, params: RecordValue) => Promise<MethodResult<FileMethod>>) {
     if (connection.onReconnect) this.onReconnect = listener => connection.onReconnect!(listener);
     if (connection.onRetry) this.onRetry = listener => connection.onRetry!(listener);
+    if (connection.onNativeReconnect) this.onNativeReconnect = listener => connection.onNativeReconnect!(listener);
   }
   async request<M extends DaemonMethod>(method: M, ...args: RequestArgs<M>): Promise<MethodResult<M>> {
     const params = (args[0] ?? {}) as RecordValue;

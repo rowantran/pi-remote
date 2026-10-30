@@ -1,8 +1,8 @@
 import { createServer, type Server, type Socket } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { mkdir, readFile, realpath, rename, rm, stat, writeFile, chmod, lstat } from 'node:fs/promises';
-import { availableParallelism, freemem, homedir, hostname, loadavg, totalmem, uptime } from 'node:os';
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile, chmod, lstat } from 'node:fs/promises';
+import { availableParallelism, freemem, homedir, hostname, loadavg, tmpdir, totalmem, uptime } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -44,6 +44,7 @@ const RPC_ONLY = 'This slot is not a native slot';
 const KITTY_FLAGS = 7;
 /** Terminal size until a client attaches. */
 const DEFAULT_SIZE = { columns: 120, rows: 40 };
+const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 
 /** One native slot's running Pi: its terminal host, its screen copy, and the client that sets its size. */
 interface PiRuntime { host: PiTerminal; screen: ScreenState; owner?: Peer }
@@ -500,6 +501,14 @@ export class Supervisor {
 
   /** Apply a companion message to the slot, then pass it to the slot's native clients. */
   private companionMessage(slot: Slot, message: CompanionMessage): void {
+    // A clipboard write and a pi-remote command belong to the client that acted last.
+    if ((message.type === 'terminal' && message.kind === 'clipboard') || message.type === 'clientAction') {
+      const owner = slot.runtime!.owner;
+      if (owner && !owner.socket.destroyed && owner.slotId === slot.id) {
+        this.send(owner, { type: 'event', slotId: slot.id, seq: ++slot.seq, event: { type: 'screen', message } });
+      }
+      return;
+    }
     slot.runtime!.screen.apply(message);
     if (message.type === 'session') {
       const state = { sessionId: message.sessionId, sessionFile: message.sessionFile, sessionName: message.sessionName, messageCount: message.entryCount ?? 0 };
@@ -1064,6 +1073,12 @@ export class Supervisor {
             data = {} satisfies MethodResult<'input'>;
             break;
           }
+          case 'upload': {
+            const slot = this.terminalSlot(params.slotId);
+            if (peer.slotId !== slot.id || !peer.terminal) throw new Error('Attach before uploading');
+            data = { path: await writeUpload(params) } satisfies MethodResult<'upload'>;
+            break;
+          }
           case 'resize': {
             const slot = this.terminalSlot(params.slotId);
             if (peer.slotId !== slot.id || !peer.terminal) throw new Error('Attach before resizing');
@@ -1102,6 +1117,20 @@ export class Supervisor {
     await close;
     await rm(socketPath(this.stateDir), { force: true });
   }
+}
+
+/**
+ * Store a file the client pasted (a clipboard image or a copied file) where Pi can read it,
+ * like Pi's own clipboard paste does: a private temporary directory on this machine.
+ */
+async function writeUpload(params: RecordValue): Promise<string> {
+  const name = string(params.name, 'name').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[.-]+/, '').slice(0, 100) || 'pasted';
+  const data = string(params.data, 'data');
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length > Math.ceil(MAX_UPLOAD_BYTES / 3) * 4) throw new Error('Upload must be base64, at most 8 MiB');
+  const directory = await mkdtemp(join(tmpdir(), 'pi-remote-paste-'));
+  const path = join(directory, name);
+  await writeFile(path, Buffer.from(data, 'base64'), { mode: 0o600 });
+  return path;
 }
 
 function clientTerminal(params: RecordValue): ClientTerminal {

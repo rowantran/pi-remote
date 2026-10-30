@@ -5,7 +5,7 @@ import {
   visibleWidth, VStack, type KeybindingDefinitions,
 } from '@earendil-works/pi-tui';
 import {
-  applyDiff, EDITOR_SECTION, encodeBarrier, SECTION_COUNT, sameEditorState,
+  applyDiff, EDITOR_SECTION, encodeBarrier, encodeSetText, SECTION_COUNT, sameEditorState,
   type CompanionMessage, type EditorState,
 } from '../protocol/companion.js';
 
@@ -39,13 +39,13 @@ class RemoteLines implements Component {
  * A key sent to Pi's editor and not yet confirmed. `state` is the local editor state after
  * the key, or undefined when the client did not apply the key locally (Pi decides alone).
  */
-interface PendingKey { id: number; data: string; state?: EditorState }
+interface PendingKey { id: number; data: string; state?: EditorState; setText?: string }
 
 /** Keys that act on Pi's autocomplete dropdown while it is open. */
 const DROPDOWN_KEYS = ['tui.select.up', 'tui.select.down', 'tui.select.cancel', 'tui.select.confirm', 'tui.input.tab'] as const;
 
 /** Copy of Pi's fullscreen layout (createChatViewport, Pi 1.0.4 to 1.4.0). */
-function chatViewport(sections: Component[], theme?: () => Theme | undefined): { root: Component; transcript: ScrollView } {
+function chatViewport(sections: Component[], theme?: () => Theme | undefined, banner?: Component): { root: Component; transcript: ScrollView } {
   const [document, pendingMessages, status, widgetsAbove, editor, widgetsBelow, footer] = sections;
   const style = (color: 'scrollbarTrack' | 'scrollbarThumb') => (text: string) => theme?.()?.fg(color, text) ?? text;
   const transcript = new ScrollView(document!, {
@@ -53,6 +53,7 @@ function chatViewport(sections: Component[], theme?: () => Theme | undefined): {
     scrollbarTrackStyle: style('scrollbarTrack'), scrollbarThumbStyle: style('scrollbarThumb'),
   });
   const dock = new VStack([
+    ...(banner ? [{ component: banner, shrink: 1, minSize: 0 }] : []),
     { component: pendingMessages!, shrink: 1, minSize: 0 },
     { component: status!, shrink: 1, minSize: 0 },
     { component: widgetsAbove!, shrink: 1, minSize: 0 },
@@ -183,6 +184,27 @@ export interface PiScreenOptions {
   status?: StatusSource;
   /** Local copy of the remote's theme, for the parts of Pi's fullscreen renderer that run locally. */
   theme?: () => Theme | undefined;
+  /** Re-encodes one key for Pi before it is sent (see toKittyInput). */
+  encodeKey?: (data: string) => string;
+  /** Ctrl+D with an empty editor, or /detach in Pi: leave without stopping Pi. */
+  onDetach?: () => void;
+  /** Output Pi wrote for a real terminal: bell, title, notification, progress, clipboard. */
+  onTerminalOutput?: (data: string) => void;
+  /** Pi's external-editor key: edit `text` locally and return the result. */
+  editExternally?: (text: string) => Promise<string>;
+  /** Pi's clipboard-paste key: read the local clipboard and return text to insert. */
+  pasteClipboard?: () => Promise<string | undefined>;
+  /** Shows a short message to the user, for example a failed paste. */
+  notify?: (message: string) => void;
+}
+
+/** One line above the editor area for connection problems; empty when there is nothing to say. */
+class Banner implements Component {
+  text?: string;
+  render(width: number): string[] {
+    return this.text ? [truncateToWidth(`\x1b[33m${this.text}\x1b[39m`, width, '…')] : [];
+  }
+  invalidate(): void {}
 }
 
 /** The options Pi's own fullscreen renderer uses (createInteractiveTui, Pi 1.4.0). */
@@ -231,6 +253,9 @@ export class PiScreen {
   /** The last facts the companion sent about Pi and its session. */
   session?: Extract<CompanionMessage, { type: 'session' }>;
   readonly traffic = { messages: 0, bytes: 0 };
+  private readonly banner = new Banner();
+  /** The last editor text Pi reported, for Ctrl+D when the editor is not local. */
+  private remoteText = '';
 
   constructor(readonly terminal: Terminal, private readonly link: PiScreenLink, private readonly options: PiScreenOptions = {}) {
     setKeybindings(this.keybindings);
@@ -239,7 +264,7 @@ export class PiScreen {
     for (let index = 0; index < SECTION_COUNT; index++) this.sections.push(index === EDITOR_SECTION ? this.slot.remote : new RemoteLines());
     const components: Component[] = this.sections.map((section, index) => (index === EDITOR_SECTION ? this.slot : section));
     for (const component of components) this.tui.addChild(component);
-    this.tui.setLayoutRoot(chatViewport(components, () => options.theme?.()).root);
+    this.tui.setLayoutRoot(chatViewport(components, () => options.theme?.(), this.banner).root);
     this.tui.setFocus(this.slot);
   }
 
@@ -258,7 +283,25 @@ export class PiScreen {
 
   stop(): void {
     process.stdout.off('resize', this.onResize);
+    if (this.statusPanel) { clearInterval(this.statusPanel.timer); this.statusPanel = undefined; }
     this.tui.stop();
+  }
+
+  /** A connection problem to show above the editor; undefined clears it. */
+  setBanner(text: string | undefined): void {
+    if (this.banner.text === text) return;
+    this.banner.text = text;
+    this.tui.requestRender();
+  }
+
+  /** Forget the screen before a new attachment rebuilds it (after a reconnect). */
+  reset(): void {
+    this.pending = [];
+    this.outgoing = [];
+    this.layout = 'unknown';
+    this.editorFocused = false;
+    for (const section of this.sections) section.set([], section.width);
+    this.tui.requestRender();
   }
 
   /** Unconfirmed editor keys and the layout state, for the status panel. */
@@ -273,7 +316,12 @@ export class PiScreen {
       case 'session': this.session = message; break;
       case 'editorInstalled': this.installEditor(message.editor, message.bindings); break;
       case 'frame': this.applyFrame(message); break;
-      case 'editor': this.confirm(message.barrier, message.state); break;
+      case 'editor': this.remoteText = message.state.text; this.confirm(message.barrier, message.state); break;
+      case 'clientAction':
+        if (message.action === 'detach') this.options.onDetach?.();
+        else if (message.action === 'status' && !this.statusPanel) this.toggleStatus();
+        break;
+      case 'terminal': this.options.onTerminalOutput?.(message.data); break;
       case 'editorChrome': {
         const editor = this.editor;
         if (!editor) break;
@@ -292,10 +340,16 @@ export class PiScreen {
     if (data === '\x1c') { this.options.onQuit?.(); return; }
     if (this.options.status && matchesKey(data, STATUS_KEY)) { this.toggleStatus(); return; }
     const editor = this.editor;
-    if (!editor || !this.editorLocal) { this.send(data); return; }
+    const editing = this.layout === 'known' && this.editorFocused;
+    if (editing && this.options.onDetach && this.keybindings.matches(data, 'app.exit')
+      && (editor && this.editorLocal ? editor.getText() : this.remoteText) === '') { this.options.onDetach(); return; }
+    // These Pi actions read or start something on the machine Pi runs on. Do them here instead.
+    if (editing && this.options.editExternally && this.keybindings.matches(data, 'app.editor.external')) { void this.editExternally(); return; }
+    if (editing && this.options.pasteClipboard && this.keybindings.matches(data, 'app.clipboard.pasteImage')) { void this.paste(); return; }
+    if (!editor || !this.editorLocal) { this.send(this.encode(data)); return; }
     // Pi's editor gets the same key; the barrier lets it report the state it reached.
     const id = ++this.barrier;
-    this.send(data + encodeBarrier(`${this.tag}:${id}`));
+    this.send(this.encode(data) + encodeBarrier(`${this.tag}:${id}`));
     // While Pi shows its dropdown, these keys act on the dropdown, which only Pi has.
     // Leave the local editor alone and show Pi's result when it arrives.
     if (this.dropdownRows > 0 && DROPDOWN_KEYS.some(binding => this.keybindings.matches(data, binding))) {
@@ -305,6 +359,32 @@ export class PiScreen {
     editor.handleInput(data);
     this.pending.push({ id, data, state: editorState(editor) });
     this.tui.requestRender();
+  }
+
+  private encode(data: string): string { return this.options.encodeKey?.(data) ?? data; }
+
+  private async editExternally(): Promise<void> {
+    const current = this.editor && this.editorLocal ? this.editor.getText() : this.remoteText;
+    let text: string;
+    try { text = await this.options.editExternally!(current); }
+    catch (error) { this.options.notify?.(error instanceof Error ? error.message : String(error)); return; }
+    this.tui.requestRender(true);
+    text = text.replace(/\n$/, '');
+    const id = ++this.barrier;
+    this.send(encodeSetText(text) + encodeBarrier(`${this.tag}:${id}`));
+    const editor = this.editor;
+    if (editor && this.editorLocal) {
+      editor.setText(text);
+      this.pending.push({ id, data: '', setText: text, state: editorState(editor) });
+    } else this.pending.push({ id, data: '' });
+    this.tui.requestRender();
+  }
+
+  private async paste(): Promise<void> {
+    let text: string | undefined;
+    try { text = await this.options.pasteClipboard!(); }
+    catch (error) { this.options.notify?.(error instanceof Error ? error.message : String(error)); return; }
+    if (text) this.input(`\x1b[200~${text}\x1b[201~`);
   }
 
   /**
@@ -401,7 +481,8 @@ export class PiScreen {
     setEditorState(editor, state);
     for (const key of rest) {
       if (!key.state) continue;
-      editor.handleInput(key.data);
+      if (key.setText !== undefined) editor.setText(key.setText);
+      else editor.handleInput(key.data);
       key.state = editorState(editor);
     }
   }

@@ -1,10 +1,10 @@
 /**
- * Screen comparison: stock Pi in fullscreen mode versus the native client showing the same
- * stock Pi (regular mode, with the companion) in the same size of terminal. Both run the
- * pinned Pi CLI from node_modules with an offline fixture provider, in headless terminals.
+ * Screen comparison: stock Pi in fullscreen mode versus `pi-remote new --local`, which runs the
+ * same stock Pi in a local daemon's PTY and attaches the client. Both use the pinned Pi CLI
+ * from node_modules with an offline fixture provider, in headless terminals of the same size.
  */
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -65,16 +65,22 @@ async function settle(screens: Screen[], ready: (text: string) => boolean, label
   throw new Error(`${label}: screens did not settle\n${screens.map(text).join('\n=====\n')}`);
 }
 
-function assertSame(stock: Screen, native: Screen, label: string): void {
-  assert.equal(text(native), text(stock), `${label}: text differs`);
-  assert.equal(capture(native), capture(stock), `${label}: colors or attributes differ`);
+function assertSame(stock: Screen, remote: Screen, label: string): void {
+  assert.equal(text(remote), text(stock), `${label}: text differs`);
+  assert.equal(capture(remote), capture(stock), `${label}: colors or attributes differ`);
 }
 
-test('the native client shows the same screen as stock Pi', { timeout: 120_000 }, async t => {
-  const root = await mkdtemp(join(tmpdir(), 'pi-remote-native-screen-'));
+test('pi-remote shows the same screen as stock Pi', { timeout: 120_000 }, async t => {
+  // /tmp keeps the daemon's Unix socket path short.
+  const root = await mkdtemp(join(await realpath('/tmp'), 'pi-remote-screen-'));
+  const stateDir = join(root, 'state');
   const screens: Screen[] = [];
   t.after(async () => {
     for (const screen of screens) if (!screen.exited) screen.pty.kill();
+    // The CLI started a detached local daemon; stop it (it stops the Pi it runs).
+    const pid = Number(await readFile(join(stateDir, 'daemon.lock/pid'), 'utf8').catch(() => '0'));
+    if (pid > 0) { try { process.kill(pid, 'SIGTERM'); } catch { /* Already stopped. */ } }
+    for (let n = 0; pid > 0 && n < 100; n++) { try { process.kill(pid, 0); } catch { break; } await new Promise(resolve => setTimeout(resolve, 50)); }
     await rm(root, { recursive: true, force: true });
   });
   const workspace = join(root, 'workspace');
@@ -92,31 +98,31 @@ test('the native client shows the same screen as stock Pi', { timeout: 120_000 }
   };
   const piArgs = ['--offline', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes', '--no-context-files',
     '--no-approve', '--extension', fixture, '--model', 'golden-local/transcript', '--thinking', 'medium', '--tools', 'bash'];
-  // The native host starts `pi` itself; point it at the pinned CLI.
+  // The daemon starts `pi` itself; point it at the pinned CLI.
   const piBin = join(root, 'pi');
   await writeFile(piBin, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(piCli)} "$@"\n`);
   await chmod(piBin, 0o755);
 
   const stock = open(process.execPath, [piCli, ...piArgs, '--tui-mode', 'fullscreen', '--session-dir', join(root, 'stock-sessions')],
     await environment('stock'), workspace);
-  const native = open(process.execPath, ['--import', import.meta.resolve('tsx'), join(repo, 'test/tui/harness.ts'),
-    '--pi', piBin, '--cwd', workspace, '--', ...piArgs, '--session-dir', join(root, 'native-sessions')],
-    await environment('native'), workspace);
-  screens.push(stock, native);
-  const both = (data: string) => { stock.pty.write(data); native.pty.write(data); };
+  const remote = open(process.execPath, ['--import', import.meta.resolve('tsx'), join(repo, 'src/cli/main.ts'),
+    'new', '--local', '--cwd', workspace, '--state-dir', stateDir, '--', ...piArgs, '--session-dir', join(root, 'remote-sessions')],
+    { ...await environment('remote'), PI_REMOTE_PI_BIN: piBin }, workspace);
+  screens.push(stock, remote);
+  const both = (data: string) => { stock.pty.write(data); remote.pty.write(data); };
 
   await settle(screens, screen => screen.includes('transcript'), 'startup');
-  assertSame(stock, native, 'startup');
+  assertSame(stock, remote, 'startup');
 
   both('!echo REMOTE_SCREEN_OK'); both('\r');
   await settle(screens, screen => screen.split('REMOTE_SCREEN_OK').length > 2, 'shell command');
-  assertSame(stock, native, 'shell command');
+  assertSame(stock, remote, 'shell command');
 
   both('draft text');
   await settle(screens, screen => screen.includes('draft text'), 'draft');
-  assertSame(stock, native, 'draft');
+  assertSame(stock, remote, 'draft');
 
   both('\x15'); both('/model'); both('\r');
   await settle(screens, screen => screen.includes('golden-local'), 'model picker');
-  assertSame(stock, native, 'model picker');
+  assertSame(stock, remote, 'model picker');
 });

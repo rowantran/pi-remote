@@ -178,3 +178,53 @@ test('restart_daemon reopens slots from their session files', { timeout: 120_000
   await client.attach(created.id);
   await client.until(() => client.text().includes('GOLDEN_SECOND_DONE'), 'the restored transcript');
 });
+
+test('the terminal client attaches to a slot, edits locally, reconnects, and detaches', { timeout: 120_000 }, async t => {
+  const { stateDir, created, root } = await setup(t);
+  const { ReconnectingConnection } = await import('../../src/client/reconnect.js');
+  const { connectLocal } = await import('../../src/cli/connections.js');
+  const { runTerminalSession } = await import('../../src/tui/terminal-session.js');
+  const sockets: { destroy(): void }[] = [];
+  const connection = await ReconnectingConnection.connect(async () => {
+    const inner = await connectLocal(stateDir);
+    sockets.push({ destroy: () => inner.close() });
+    return inner;
+  }, { minDelayMs: 50, maxDelayMs: 200 });
+  t.after(() => connection.close());
+  const writes: string[] = [];
+  let input: (data: string) => void = () => {};
+  const terminal = {
+    columns: 90, rows: 30, kittyProtocolActive: true,
+    start(onInput: (data: string) => void) { input = onInput; }, stop() {}, async drainInput() {},
+    write(data: string) { writes.push(data); },
+    moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {}, clearFromCursor() {}, clearScreen() {},
+    setTitle() {}, setProgress() {}, setProgramStatus() {},
+  };
+  const output: string[] = [];
+  const write = process.stdout.write;
+  process.stdout.write = ((chunk: string) => { output.push(String(chunk)); return true; }) as typeof process.stdout.write;
+  t.after(() => { process.stdout.write = write; });
+  const screen = () => strip(writes.join(''));
+  const until = async (check: () => boolean, label: string) => {
+    for (const deadline = Date.now() + 20_000; !check();) {
+      if (Date.now() > deadline) throw new Error(`Timed out waiting for ${label}`);
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  };
+  const done = runTerminalSession(connection, created, { terminal: terminal as never, theme: 'dark', presentationConfig: join(root, 'no-config.json') });
+  await until(() => screen().includes('transcript'), 'the footer');
+  for (const key of 'local draft') input(key);
+  await until(() => screen().includes('local draft'), 'the local draft');
+  // Lose the transport: the client reattaches to the same slot and keeps the draft Pi has.
+  sockets.at(-1)!.destroy();
+  await until(() => sockets.length > 1, 'a new connection');
+  await new Promise(resolve => setTimeout(resolve, 500));
+  input('!');
+  await until(() => screen().includes('local draft!'), 'typing after the reconnect');
+  for (let n = 0; n < 'local draft!'.length; n++) input('\x7f');
+  await new Promise(resolve => setTimeout(resolve, 300));
+  input('\x04'); // Ctrl+D with an empty editor detaches.
+  await done;
+  assert.match(output.join(''), new RegExp(`Detached from slot 1 / ${created.id}`));
+  assert.equal((await connection.request('list')).find(slot => slot.id === created.id)?.status, 'running', 'Pi keeps running');
+});
