@@ -13,7 +13,6 @@ import type { DaemonMethod } from '../../protocol/methods.js';
 import { defaultBrowserConfig, type BrowserConfig } from './browser-config.js';
 import { DEVICE_COOKIE, DEVICE_FILE, DeviceStore, deviceCookie, deviceToken, type Device } from './devices.js';
 import { listenPrivate, privateDirectory } from './private-state.js';
-import { ServerPresentation } from './presentation.js';
 import { TabError, TabStore, handleTabsApi } from './tabs.js';
 import { checkTailscale } from './tailscale.js';
 
@@ -141,15 +140,6 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   const devices = new DeviceStore(stateDir, options.now);
   await devices.list(); // validate existing state before serving anything
   const tabs = await TabStore.open(stateDir, devices);
-  const presentation = new ServerPresentation({ uiConfig: options.uiConfig });
-  async function readPresentation() {
-    try { return await presentation.read(); }
-    catch (error) {
-      // Details stay in the owner's local service log, never in HTTP responses.
-      console.error('[pi-remote serve] Presentation build failed:', error instanceof Error ? error.message : String(error));
-      throw error;
-    }
-  }
   const now = options.now ?? Date.now;
   const peers = new Set<Peer>();
   const sockets = new Set<Socket>();
@@ -236,24 +226,10 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
         const device = await getDevice(request, login);
         if (!device) throw new HttpError(401, 'Device pairing required');
         if (path === '/api/config' && request.method === 'GET') {
-          let config: BrowserConfig;
-          try { config = (await readPresentation()).config; }
-          catch {
-            // A broken optional renderer must not prevent listing/attaching sessions.
-            config = await defaultBrowserConfig({ uiConfig: options.uiConfig });
-            config.presentationError = 'Phone presentation unavailable; using built-in display. Check the web server logs.';
-          }
+          // Theme files and safe settings only: Pi renders sessions itself.
+          const config: BrowserConfig = await defaultBrowserConfig({ uiConfig: options.uiConfig });
           if (Buffer.byteLength(JSON.stringify(config)) > MAX_WEB_BYTES) throw new Error('Browser config exceeds limit');
           json(response, 200, config);
-        } else if (path === '/api/presentation.js') {
-          if (request.method !== 'GET') throw new HttpError(405, 'Method not allowed');
-          const current = await readPresentation();
-          const query = new URL(request.url!, origin).searchParams;
-          // Never serve changed source under the hash from an earlier config response.
-          if (!current?.bundle || query.getAll('v').length !== 1 || query.get('v') !== current.config.presentation?.hash) throw new HttpError(404, 'Presentation bundle not found');
-          response.setHeader('Content-Type', 'text/javascript; charset=utf-8');
-          response.setHeader('Content-Length', Buffer.byteLength(current.bundle));
-          response.end(current.bundle);
         } else if (path === '/api/tabs' || path.startsWith('/api/tabs/')) {
           if (!await handleTabsApi(tabs, request, response, device.id, readJsonBody)) throw new HttpError(404, 'Not found');
         } else if (path === '/api/logout' && request.method === 'POST') {

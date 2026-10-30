@@ -1,8 +1,7 @@
 import './shims/globals.js';
-import { RemoteTui } from '../../tui/tui.js';
 import { ReconnectingConnection } from '../../client/reconnect.js';
 import { configureVirtualFiles } from './shims/vfs.js';
-import { browserPresentationOptions, browserTerminalTheme, loadBrowserPresentation, presentationWarning, type BrowserPresentationConfig } from './presentation.js';
+import { applyPhoneAppearance, browserTerminalTheme, type BrowserConfig } from './presentation.js';
 import { WebSocketConnection } from './connection.js';
 import { XtermTerminal } from './terminal.js';
 import { NativeInput } from './input.js';
@@ -24,8 +23,7 @@ const status = element('status');
 const pairDialog = element<HTMLDialogElement>('pair-dialog');
 const slotsDialog = element<HTMLDialogElement>('slots-dialog');
 const menuDialog = element<HTMLDialogElement>('menu-dialog');
-let client: RemoteTui | undefined;
-/** The view of a slot that runs Pi's own interface; `client` is for older RPC slots. */
+/** Pi's own interface for the open session. */
 let sessionView: SessionView | undefined;
 let transport: WebSocketConnection | undefined;
 let connection: ReconnectingConnection | undefined;
@@ -174,7 +172,7 @@ async function closeTab(slotId: string): Promise<void> {
 }
 function clearDisplay(): void {
   nativeInput.release();
-  client?.detach(); client = undefined; sessionView?.dispose(); sessionView = undefined; connection?.close(); connection = undefined;
+  sessionView?.dispose(); sessionView = undefined; connection?.close(); connection = undefined;
   removeTouch?.dispose(); removeTouch = undefined;
   terminal?.dispose(); terminal = undefined;
 }
@@ -182,10 +180,7 @@ async function attach(reference: string, offline = false): Promise<void> {
   const generation = ++attaching;
   clearDisplay(); currentSlot = undefined;
   status.textContent = 'Connecting…';
-  const presentation = await browserPresentationOptions(report);
-  if (generation !== attaching) return;
-  const cached = await transcriptCache.load(reference);
-  const cachedScreen = cached ? undefined : await transcriptCache.loadScreen(reference);
+  const cachedScreen = await transcriptCache.loadScreen(reference);
   if (generation !== attaching) return;
   if (cachedScreen) {
     try {
@@ -196,24 +191,9 @@ async function attach(reference: string, offline = false): Promise<void> {
       status.textContent = 'Saved · reconnecting';
     } catch { clearDisplay(); }
   }
-  if (cached) {
-    try {
-      const readOnly = new ReadOnlyConnection();
-      const draft = nativeInput.prepare(cached.slot.id);
-      currentSlot = cached.slot.id; tabs.setActive(cached.slot.id);
-      element('session-name').textContent = slotLabel(cached.slot, 'Saved session');
-      terminal = new XtermTerminal(element('terminal'), undefined, browserTerminalTheme()); terminal.useNativeInput();
-      client = new RemoteTui(readOnly, cached.slot.id, cached, terminal, { ...presentation, externalInput: nativeInput.callbacks });
-      nativeInput.bind(client, readOnly, cached.slot.id, draft); nativeInput.setConnected(false);
-      const preview = client;
-      removeTouch = installTouchScroll(element('terminal'), terminal, lines => preview.scrollTranscript(lines));
-      void preview.run().catch(() => {}); void preview.initialize().catch(() => {});
-      status.textContent = 'Saved · reconnecting';
-    } catch { clearDisplay(); }
-  }
   if (offline) {
-    status.textContent = cached || cachedScreen ? 'Saved · offline' : 'Offline';
-    report(cached || cachedScreen ? 'Saved transcript only. Sending is disabled until the devbox reconnects.' : 'Offline. No saved transcript is available for this session.');
+    status.textContent = cachedScreen ? 'Saved · offline' : 'Offline';
+    report(cachedScreen ? 'Saved transcript only. Sending is disabled until the devbox reconnects.' : 'Offline. No saved transcript is available for this session.');
     return;
   }
   const conn = await makeConnection(value => { if (generation === attaching) transport = value; });
@@ -225,28 +205,7 @@ async function attach(reference: string, offline = false): Promise<void> {
     // Viewing a session opens it as a tab, which also subscribes this device to its notifications.
     await tabs.open(slot.id);
     if (generation !== attaching) { conn.close(); return; }
-    if (slot.native) { await attachSession(conn, slot, generation); return; }
-    const snapshot = await conn.request('attach', { slotId: slot.id, filterTranscript: true });
-    if (generation !== attaching) { conn.close(); return; }
-    clearDisplay();
-    currentSlot = slot.id; connection = conn; tabs.setActive(slot.id);
-    try { localStorage.setItem(LAST_SLOT, slot.id); } catch {}
-    if (!location.hash) history.replaceState(null, '', `/#${new URLSearchParams({ slot: slot.id })}`);
-    element('session-name').textContent = slotLabel(slot);
-    notice.hidden = !presentationWarning;
-    const draft = nativeInput.prepare(slot.id);
-    terminal = new XtermTerminal(element('terminal'), undefined, browserTerminalTheme());
-    terminal.useNativeInput();
-    client = new RemoteTui(conn, slot.id, snapshot, terminal, { ...presentation, host: location.hostname, externalInput: nativeInput.callbacks, onSnapshot: snapshot => transcriptCache.schedule(snapshot) });
-    nativeInput.bind(client, conn, slot.id, draft);
-    const scrollClient = client;
-    removeTouch = installTouchScroll(element('terminal'), terminal, lines => scrollClient.scrollTranscript(lines));
-    status.textContent = 'Connected';
-    conn.onDisconnect(() => { if (connection === conn) { status.textContent = 'Reconnecting…'; nativeInput.setConnected(false); } });
-    conn.onReconnect(() => { if (connection === conn) { status.textContent = 'Connected'; nativeInput.setConnected(true); } });
-    const thisClient = client;
-    void thisClient.run().then(() => { if (client === thisClient) { status.textContent = thisClient.stoppedSlot ? 'Stopped' : 'Detached'; nativeInput.release(); } }).catch(report);
-    void thisClient.initialize().catch(report);
+    await attachSession(conn, slot, generation);
   } catch (error) { conn.close(); throw error; }
 }
 /** Pi's own interface in the terminal area; touch scrolling stays on the phone. */
@@ -284,10 +243,9 @@ async function boot(): Promise<void> {
   try {
     const auth = await api<{ paired?: boolean; authenticated?: boolean }>('/api/status');
     if (auth.paired === false || auth.authenticated === false) { ready = false; offlinePreview = false; attaching++; currentSlot = undefined; clearDisplay(); void transcriptCache.clear(); if (!pairDialog.open) pairDialog.showModal(); return; }
-    const config = await api<BrowserPresentationConfig>('/api/config');
+    const config = await api<BrowserConfig>('/api/config');
     configureVirtualFiles(config);
-    await loadBrowserPresentation(config, report);
-    await browserPresentationOptions(report);
+    await applyPhoneAppearance(report);
     await tabs.load();
   } catch (error) {
     // Fetch rejection, not an online HTTP 401/403, permits a device-local read-only preview.
@@ -333,15 +291,15 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-key]'))
   button.addEventListener('click', () => {
     const key = button.dataset.key!;
     if (menuDialog.contains(button)) menuDialog.close();
-    if (sessionView) sessionView.sendKey(keys[key]!); else terminal?.sendKey(keys[key]!);
+    sessionView?.sendKey(keys[key]!);
   });
 }
-nativeInput.onStop = () => { if (sessionView) sessionView.sendKey(keys.escape!); else terminal?.sendKey(keys.escape!); };
-element('composer').addEventListener('submit', () => { removeTouch?.stop(); client?.followLatest(); sessionView?.followLatest(); });
+nativeInput.onStop = () => sessionView?.sendKey(keys.escape!);
+element('composer').addEventListener('submit', () => { removeTouch?.stop(); sessionView?.followLatest(); });
 // Hardware keyboards keep native text navigation; only explicit command-Enter submits.
 nativeInput.textarea.addEventListener('keydown', event => {
   // A hardware keyboard's Escape keeps its laptop meaning (interrupt or cancel).
-  if (event.key === 'Escape' && !event.isComposing) { event.preventDefault(); if (sessionView) sessionView.sendKey(keys.escape!); else terminal?.sendKey(keys.escape!); return; }
+  if (event.key === 'Escape' && !event.isComposing) { event.preventDefault(); sessionView?.sendKey(keys.escape!); return; }
   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.isComposing) { event.preventDefault(); void nativeInput.submit(); }
 });
 window.addEventListener('hashchange', () => { const slot = desiredSlot(); if (ready && slot) void attach(slot).catch(report); });

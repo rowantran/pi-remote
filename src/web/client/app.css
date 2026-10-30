@@ -51,13 +51,10 @@ input, textarea { display: block; width: 100%; margin-top: 6px; padding: 10px; f
 #send:disabled { background: #333; color: #888; opacity: 1; }
 #stop { background: #dedede; color: #161616; font-size: 13px; }
 #send[hidden], #stop[hidden] { display: none; }
-#completions { flex: 0 0 auto; overflow-x: auto; white-space: nowrap; padding: 4px; max-height: 56px; }
-#completions button { font-size: 13px; margin-right: 4px; }
 #terminal.touch-terminal { touch-action: none; -webkit-user-select: none; user-select: none; }
 #terminal.touch-terminal .xterm-helper-textarea { pointer-events: none; }
 .choices { display: grid; gap: 4px; max-height: 50dvh; overflow: auto; margin: 8px 0; }
 .choices button { text-align: left; overflow-wrap: anywhere; }
-#action-content textarea { min-height: 110px; }
 code { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
 @media (min-width: 800px) { #terminal { padding: 8px; } }
 /* Theme colors only: keep presentation independent of composer layout. */

@@ -41,7 +41,7 @@ Everyday commands:
   pi-remote completion fish|zsh|bash
   pi-remote serve --origin HTTPS_URL --allow-user TAILSCALE_LOGIN [--ui-config PATH]
     Serve the browser client through a private Unix socket and Tailscale Serve.
-    Read themes and presentation extensions from this server's pi-remote config.
+    Read the theme from this server's pi-remote config.
     Use 'pi-remote serve --help' for pairing, device revocation, and security.
 
 Power-user / debugging commands:
