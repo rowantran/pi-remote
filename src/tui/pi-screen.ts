@@ -198,6 +198,28 @@ export interface PiScreenOptions {
   notify?: (message: string) => void;
 }
 
+/** Forwards every call to `terminal`, and also reports resizes. */
+class ResizeWatcher implements Terminal {
+  constructor(private readonly terminal: Terminal, private readonly resized: () => void) {}
+  start(onInput: (data: string) => void, onResize: () => void): void { this.terminal.start(onInput, () => { onResize(); this.resized(); }); }
+  stop(): void { this.terminal.stop(); }
+  drainInput(maxMs?: number, idleMs?: number): Promise<void> { return this.terminal.drainInput(maxMs, idleMs); }
+  write(data: string): void { this.terminal.write(data); }
+  get columns(): number { return this.terminal.columns; }
+  get rows(): number { return this.terminal.rows; }
+  get kittyProtocolActive(): boolean { return this.terminal.kittyProtocolActive; }
+  moveBy(lines: number): void { this.terminal.moveBy(lines); }
+  hideCursor(): void { this.terminal.hideCursor(); }
+  showCursor(): void { this.terminal.showCursor(); }
+  clearLine(): void { this.terminal.clearLine(); }
+  clearFromCursor(): void { this.terminal.clearFromCursor(); }
+  clearScreen(): void { this.terminal.clearScreen(); }
+  setTitle(title: string): void { this.terminal.setTitle(title); }
+  setProgress(active: boolean): void { this.terminal.setProgress(active); }
+  setProgramStatus(status: Parameters<Terminal['setProgramStatus']>[0]): void { this.terminal.setProgramStatus(status); }
+  get restoreOnExit(): Terminal["restoreOnExit"] { return this.terminal.restoreOnExit?.bind(this.terminal); }
+}
+
 /** One line above the editor area for connection problems; empty when there is nothing to say. */
 class Banner implements Component {
   text?: string;
@@ -254,17 +276,21 @@ export class PiScreen {
   session?: Extract<CompanionMessage, { type: 'session' }>;
   readonly traffic = { messages: 0, bytes: 0 };
   private readonly banner = new Banner();
+  private readonly transcript: ScrollView;
   /** The last editor text Pi reported, for Ctrl+D when the editor is not local. */
   private remoteText = '';
 
   constructor(readonly terminal: Terminal, private readonly link: PiScreenLink, private readonly options: PiScreenOptions = {}) {
     setKeybindings(this.keybindings);
-    this.tui = new TuiAltScreen(terminal, false, undefined, rendererOptions(() => options.theme?.()));
+    // Learn about resizes from the terminal itself (a process terminal or a browser one).
+    this.tui = new TuiAltScreen(new ResizeWatcher(terminal, () => this.onResize()), false, undefined, rendererOptions(() => options.theme?.()));
     this.slot = new EditorSlot(this);
     for (let index = 0; index < SECTION_COUNT; index++) this.sections.push(index === EDITOR_SECTION ? this.slot.remote : new RemoteLines());
     const components: Component[] = this.sections.map((section, index) => (index === EDITOR_SECTION ? this.slot : section));
     for (const component of components) this.tui.addChild(component);
-    this.tui.setLayoutRoot(chatViewport(components, () => options.theme?.(), this.banner).root);
+    const viewport = chatViewport(components, () => options.theme?.(), this.banner);
+    this.transcript = viewport.transcript;
+    this.tui.setLayoutRoot(viewport.root);
     this.tui.setFocus(this.slot);
   }
 
@@ -276,13 +302,9 @@ export class PiScreen {
   /** True when keys go to the local editor first. */
   get editorLocal(): boolean { return this.layout === 'known' && this.editorFocused && this.editor !== undefined; }
 
-  start(): void {
-    this.tui.start();
-    process.stdout.on('resize', this.onResize);
-  }
+  start(): void { this.tui.start(); }
 
   stop(): void {
-    process.stdout.off('resize', this.onResize);
     if (this.statusPanel) { clearInterval(this.statusPanel.timer); this.statusPanel = undefined; }
     this.tui.stop();
   }
@@ -303,6 +325,12 @@ export class PiScreen {
     for (const section of this.sections) section.set([], section.width);
     this.tui.requestRender();
   }
+
+  /** Scroll the transcript locally; positive is down. */
+  scrollTranscript(lines: number): void { this.transcript.scrollBy(lines); this.tui.requestRender(); }
+  followLatest(): void { this.transcript.scrollToEnd(); this.tui.requestRender(); }
+  /** True while Pi's editor has focus; false while a picker or dialog has it. */
+  get editorFocusedOnPi(): boolean { return this.editorFocused; }
 
   /** Unconfirmed editor keys and the layout state, for the status panel. */
   get unconfirmedKeys(): number { return this.pending.length; }
@@ -369,7 +397,11 @@ export class PiScreen {
     try { text = await this.options.editExternally!(current); }
     catch (error) { this.options.notify?.(error instanceof Error ? error.message : String(error)); return; }
     this.tui.requestRender(true);
-    text = text.replace(/\n$/, '');
+    this.replaceEditorText(text.replace(/\n$/, ''));
+  }
+
+  /** Replace the text in Pi's editor, in order with keys, and show it locally at once. */
+  replaceEditorText(text: string): void {
     const id = ++this.barrier;
     this.send(encodeSetText(text) + encodeBarrier(`${this.tag}:${id}`));
     const editor = this.editor;

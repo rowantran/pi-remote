@@ -9,7 +9,10 @@ import { NativeInput } from './input.js';
 import { installTouchScroll } from './touch.js';
 import { Notifications } from './notifications.js';
 import { TranscriptCache, ReadOnlyConnection } from './cache.js';
+import type { RemoteConnection } from '../../protocol/types.js';
 import { SessionTabs, slotLabel } from './tabs.js';
+import { SessionView } from './session-view.js';
+import type { SlotInfo } from '../../protocol/types.js';
 
 function element<T extends HTMLElement = HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -22,6 +25,8 @@ const pairDialog = element<HTMLDialogElement>('pair-dialog');
 const slotsDialog = element<HTMLDialogElement>('slots-dialog');
 const menuDialog = element<HTMLDialogElement>('menu-dialog');
 let client: RemoteTui | undefined;
+/** The view of a slot that runs Pi's own interface; `client` is for older RPC slots. */
+let sessionView: SessionView | undefined;
 let transport: WebSocketConnection | undefined;
 let connection: ReconnectingConnection | undefined;
 let terminal: XtermTerminal | undefined;
@@ -147,7 +152,7 @@ async function createSession(): Promise<void> {
   try {
     const conn = await dialogConnection();
     // Sent once. If the result is unknown, the session may exist: never retry automatically.
-    const slot = await conn.request('create', { cwd });
+    const slot = await conn.request('create', { cwd, native: true });
     rememberDirectory(cwd);
     if (slot.status === 'exited') throw new Error(`Pi exited during startup: ${slot.error ?? 'unknown error'}`);
     slotsDialog.close();
@@ -169,7 +174,7 @@ async function closeTab(slotId: string): Promise<void> {
 }
 function clearDisplay(): void {
   nativeInput.release();
-  client?.detach(); client = undefined; connection?.close(); connection = undefined;
+  client?.detach(); client = undefined; sessionView?.dispose(); sessionView = undefined; connection?.close(); connection = undefined;
   removeTouch?.dispose(); removeTouch = undefined;
   terminal?.dispose(); terminal = undefined;
 }
@@ -180,7 +185,17 @@ async function attach(reference: string, offline = false): Promise<void> {
   const presentation = await browserPresentationOptions(report);
   if (generation !== attaching) return;
   const cached = await transcriptCache.load(reference);
+  const cachedScreen = cached ? undefined : await transcriptCache.loadScreen(reference);
   if (generation !== attaching) return;
+  if (cachedScreen) {
+    try {
+      currentSlot = cachedScreen.slot.id; tabs.setActive(cachedScreen.slot.id);
+      element('session-name').textContent = slotLabel(cachedScreen.slot, 'Saved session');
+      showSession(new ReadOnlyConnection(), cachedScreen.slot).preview(cachedScreen.messages);
+      nativeInput.prepare(cachedScreen.slot.id); nativeInput.setConnected(false);
+      status.textContent = 'Saved · reconnecting';
+    } catch { clearDisplay(); }
+  }
   if (cached) {
     try {
       const readOnly = new ReadOnlyConnection();
@@ -197,8 +212,8 @@ async function attach(reference: string, offline = false): Promise<void> {
     } catch { clearDisplay(); }
   }
   if (offline) {
-    status.textContent = cached ? 'Saved · offline' : 'Offline';
-    report(cached ? 'Saved transcript only. Sending is disabled until the devbox reconnects.' : 'Offline. No saved transcript is available for this session.');
+    status.textContent = cached || cachedScreen ? 'Saved · offline' : 'Offline';
+    report(cached || cachedScreen ? 'Saved transcript only. Sending is disabled until the devbox reconnects.' : 'Offline. No saved transcript is available for this session.');
     return;
   }
   const conn = await makeConnection(value => { if (generation === attaching) transport = value; });
@@ -210,6 +225,7 @@ async function attach(reference: string, offline = false): Promise<void> {
     // Viewing a session opens it as a tab, which also subscribes this device to its notifications.
     await tabs.open(slot.id);
     if (generation !== attaching) { conn.close(); return; }
+    if (slot.native) { await attachSession(conn, slot, generation); return; }
     const snapshot = await conn.request('attach', { slotId: slot.id, filterTranscript: true });
     if (generation !== attaching) { conn.close(); return; }
     clearDisplay();
@@ -232,6 +248,37 @@ async function attach(reference: string, offline = false): Promise<void> {
     void thisClient.run().then(() => { if (client === thisClient) { status.textContent = thisClient.stoppedSlot ? 'Stopped' : 'Detached'; nativeInput.release(); } }).catch(report);
     void thisClient.initialize().catch(report);
   } catch (error) { conn.close(); throw error; }
+}
+/** Pi's own interface in the terminal area; touch scrolling stays on the phone. */
+function showSession(conn: RemoteConnection, slot: SlotInfo): SessionView {
+  terminal = new XtermTerminal(element('terminal'), undefined, browserTerminalTheme());
+  terminal.useNativeInput();
+  const theme = browserTerminalTheme();
+  const view = new SessionView(conn, slot, terminal, { background: theme.background, foreground: theme.foreground }, {
+    onPickerChange: active => nativeInput.callbacks.onTerminalDialogChange?.(active),
+    onWorkingChange: working => nativeInput.callbacks.onWorkingChange?.(working),
+    onStopped: () => { if (sessionView === view) { status.textContent = 'Stopped'; nativeInput.release(); } },
+    onScreen: messages => transcriptCache.scheduleScreen(slot, messages),
+  });
+  sessionView = view;
+  removeTouch = installTouchScroll(element('terminal'), terminal, lines => view.scrollTranscript(lines));
+  return view;
+}
+async function attachSession(conn: ReconnectingConnection, slot: SlotInfo, generation: number): Promise<void> {
+  clearDisplay();
+  currentSlot = slot.id; connection = conn; tabs.setActive(slot.id);
+  try { localStorage.setItem(LAST_SLOT, slot.id); } catch {}
+  if (!location.hash) history.replaceState(null, '', `/#${new URLSearchParams({ slot: slot.id })}`);
+  element('session-name').textContent = slotLabel(slot);
+  notice.hidden = true;
+  const draft = nativeInput.prepare(slot.id);
+  const view = showSession(conn, slot);
+  await view.attach();
+  if (generation !== attaching) return;
+  nativeInput.bindSession(view, slot.id, draft);
+  status.textContent = 'Connected';
+  conn.onDisconnect(() => { if (connection === conn) { status.textContent = 'Reconnecting…'; nativeInput.setConnected(false); } });
+  conn.onNativeReconnect(() => { if (connection === conn) { status.textContent = 'Connected'; nativeInput.setConnected(true); } });
 }
 async function boot(): Promise<void> {
   try {
@@ -286,15 +333,15 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-key]'))
   button.addEventListener('click', () => {
     const key = button.dataset.key!;
     if (menuDialog.contains(button)) menuDialog.close();
-    terminal?.sendKey(keys[key]!);
+    if (sessionView) sessionView.sendKey(keys[key]!); else terminal?.sendKey(keys[key]!);
   });
 }
-nativeInput.onStop = () => terminal?.sendKey(keys.escape!);
-element('composer').addEventListener('submit', () => { removeTouch?.stop(); client?.followLatest(); });
+nativeInput.onStop = () => { if (sessionView) sessionView.sendKey(keys.escape!); else terminal?.sendKey(keys.escape!); };
+element('composer').addEventListener('submit', () => { removeTouch?.stop(); client?.followLatest(); sessionView?.followLatest(); });
 // Hardware keyboards keep native text navigation; only explicit command-Enter submits.
 nativeInput.textarea.addEventListener('keydown', event => {
   // A hardware keyboard's Escape keeps its laptop meaning (interrupt or cancel).
-  if (event.key === 'Escape' && !event.isComposing) { event.preventDefault(); terminal?.sendKey(keys.escape!); return; }
+  if (event.key === 'Escape' && !event.isComposing) { event.preventDefault(); if (sessionView) sessionView.sendKey(keys.escape!); else terminal?.sendKey(keys.escape!); return; }
   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.isComposing) { event.preventDefault(); void nativeInput.submit(); }
 });
 window.addEventListener('hashchange', () => { const slot = desiredSlot(); if (ready && slot) void attach(slot).catch(report); });

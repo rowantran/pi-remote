@@ -1,4 +1,5 @@
-import type { RemoteConnection, Snapshot } from '../../protocol/types.js';
+import type { RemoteConnection, SlotInfo, Snapshot } from '../../protocol/types.js';
+import type { CompanionMessage } from '../../protocol/companion.js';
 import type { DaemonMethod, MethodResult, RequestArgs } from '../../protocol/methods.js';
 import { filterSnapshot } from '../../protocol/transcript-filter.js';
 import { emptyLive } from '../../protocol/live.js';
@@ -6,7 +7,9 @@ import { emptyLive } from '../../protocol/live.js';
 const DATABASE = 'pi-remote-transcripts';
 const STORE = 'snapshots';
 const MAX_BYTES = 8 * 1024 * 1024;
-interface Cached { slotId: string; savedAt: number; snapshot: Snapshot }
+/** A native slot's screen: frames and the session, without prompt history or the draft. */
+export interface SavedScreen { slot: SlotInfo; messages: CompanionMessage[] }
+interface Cached { slotId: string; savedAt: number; snapshot?: Snapshot; screen?: SavedScreen }
 function database(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DATABASE, 1);
@@ -53,18 +56,49 @@ export class TranscriptCache {
     if ('requestIdleCallback' in window) window.requestIdleCallback(save, { timeout: 3000 });
     else setTimeout(save, 0);
   }
-  private async save(snapshot: Snapshot, generation: number): Promise<void> {
-    if (snapshot.historyComplete !== true) return;
+  private pendingScreen?: SavedScreen;
+  private scheduledScreen = false;
+  /** Save a native slot's screen when the browser is idle; only the latest one is written. */
+  scheduleScreen(slot: SlotInfo, messages: CompanionMessage[]): void {
+    this.pendingScreen = { slot, messages: messages.filter(message => message.type === 'frame' || message.type === 'session') };
+    if (this.scheduledScreen) return;
+    this.scheduledScreen = true;
+    const generation = this.generation;
+    const save = () => {
+      this.scheduledScreen = false;
+      const latest = this.pendingScreen; this.pendingScreen = undefined;
+      if (generation === this.generation && latest) void this.put({ slotId: latest.slot.id, savedAt: Date.now(), screen: latest }, generation);
+    };
+    if ('requestIdleCallback' in window) window.requestIdleCallback(save, { timeout: 3000 });
+    else setTimeout(save, 0);
+  }
+  async loadScreen(reference: string): Promise<SavedScreen | undefined> {
     let db: IDBDatabase | undefined;
     try {
-      // Clear interaction and running-state artifacts; saved bytes are a read-only preview.
-      const display = snapshotForCache(snapshot);
-      const bytes = new TextEncoder().encode(JSON.stringify(display)).length;
+      db = await database();
+      const records = await transaction<Cached[]>(db, 'readonly', (store, accept) => {
+        const request = store.getAll(); request.onsuccess = () => accept(request.result);
+      });
+      const screen = records.find(record => record.screen && (record.slotId === reference || String(record.screen.slot?.number) === reference))?.screen;
+      return screen?.slot?.id && Array.isArray(screen.messages) ? screen : undefined;
+    } catch { return undefined; }
+    finally { db?.close(); }
+  }
+  private async save(snapshot: Snapshot, generation: number): Promise<void> {
+    if (snapshot.historyComplete !== true) return;
+    // Clear interaction and running-state artifacts; saved bytes are a read-only preview.
+    const display = snapshotForCache(snapshot);
+    await this.put({ slotId: display.slot.id, savedAt: Date.now(), snapshot: display }, generation);
+  }
+  private async put(record: Cached, generation: number): Promise<void> {
+    let db: IDBDatabase | undefined;
+    try {
+      const bytes = new TextEncoder().encode(JSON.stringify(record)).length;
       if (bytes > MAX_BYTES) return;
       db = await database();
       if (generation !== this.generation) return;
       await transaction<void>(db, 'readwrite', store => {
-        store.put({ slotId: display.slot.id, savedAt: Date.now(), snapshot: display } satisfies Cached);
+        store.put(record);
         const all = store.getAll();
         all.onsuccess = () => {
           const records = (all.result as Cached[]).sort((a, b) => b.savedAt - a.savedAt);
@@ -89,7 +123,7 @@ export class TranscriptCache {
     finally { db?.close(); }
   }
   async clear(): Promise<void> {
-    this.generation++; this.pending = undefined;
+    this.generation++; this.pending = undefined; this.pendingScreen = undefined;
     let db: IDBDatabase | undefined;
     try { db = await database(); await transaction<void>(db, 'readwrite', store => { store.clear(); }); }
     catch {} finally { db?.close(); }

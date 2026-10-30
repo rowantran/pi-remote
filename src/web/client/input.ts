@@ -7,8 +7,12 @@ const commands = ['help', 'model', 'thinking', 'new', 'fork', 'tree', 'resume', 
 
 /** iOS owns editing, selection, autocorrection, composition, and dictation. No keystrokes
  * from this field are forwarded to the terminal. Only explicit Send submits a prompt. */
+/** A slot that runs Pi's own interface: the text box replaces Pi's editor text and presses Enter. */
+export interface ComposerTarget { submit(text: string): Promise<void> }
+
 export class NativeInput {
   private client?: RemoteTui;
+  private target?: ComposerTarget;
   private slotId?: string;
   private connected = false;
   private submitting = false;
@@ -75,9 +79,9 @@ export class NativeInput {
     onWorkingChange: (working: boolean) => { this.working = working; this.updateControls(); },
   };
 
-  release(): void { this.client = undefined; this.working = false; this.setConnected(false); this.hideSuggestions(); }
+  release(): void { this.client = undefined; this.target = undefined; this.working = false; this.setConnected(false); this.hideSuggestions(); }
   prepare(slotId: string): string {
-    this.client = undefined; this.slotId = slotId; this.connected = false; this.provider = undefined; this.working = false;
+    this.client = undefined; this.target = undefined; this.slotId = slotId; this.connected = false; this.provider = undefined; this.working = false;
     this.hideSuggestions(); this.updateControls();
     try { return localStorage.getItem(`pi-remote-draft:${slotId}`) ?? ''; } catch { return ''; }
   }
@@ -89,6 +93,11 @@ export class NativeInput {
       completePath: prefix => connection.request('complete_path', { slotId, prefix }),
     });
     client.setDraft(draft); this.setConnected(true);
+  }
+  /** Pi's own interface: no remote command list; dialogs and pickers show in the terminal. */
+  bindSession(target: ComposerTarget, slotId: string, draft: string): void {
+    this.target = target; this.slotId = slotId;
+    this.textarea.value = draft; this.resize(); this.setConnected(true);
   }
   setConnected(connected: boolean): void {
     this.connected = connected; this.updateControls();
@@ -107,21 +116,27 @@ export class NativeInput {
     this.textarea.style.height = `${Math.min(Math.max(36, this.textarea.scrollHeight + borders), limit)}px`;
   }
   private updateControls(): void {
-    this.sendButton.disabled = !this.connected || !this.client || this.submitting || this.composing || !this.textarea.value.trim() || this.terminalDialog;
+    const bound = !!(this.client || this.target);
+    this.sendButton.disabled = !this.connected || !bound || this.submitting || this.composing || !this.textarea.value.trim() || this.terminalDialog;
     this.textarea.disabled = this.terminalDialog;
     this.pickerKeys.hidden = !this.terminalDialog;
     // Like a chat app: an empty composer offers Stop while Pi works; typing brings Send back (steering).
-    const stop = this.working && this.connected && !!this.client && !this.terminalDialog && !this.textarea.value.trim();
+    const stop = this.working && this.connected && bound && !this.terminalDialog && !this.textarea.value.trim();
     this.stopButton.hidden = !stop; this.sendButton.hidden = stop;
     this.textarea.placeholder = this.terminalDialog ? 'Choose with the buttons above' : this.connected ? 'Message Pi' : 'Draft saved · reconnecting';
   }
   async submit(): Promise<void> {
-    if (this.sendButton.disabled || !this.client) return;
-    const client = this.client;
+    if (this.sendButton.disabled || !(this.client || this.target)) return;
+    const client = this.client, target = this.target;
     this.submitting = true; this.hideSuggestions(); this.updateControls();
     // Return to the compact bar, like iMessage: dismiss the keyboard during the tap itself.
     this.textarea.blur();
-    try { client.setDraft(this.textarea.value); await client.submitDraft('steer'); }
+    try {
+      if (target) {
+        await target.submit(this.textarea.value);
+        this.textarea.value = ''; this.saveDraft(''); this.resize();
+      } else { client!.setDraft(this.textarea.value); await client!.submitDraft('steer'); }
+    }
     catch (error) { this.report(error); }
     finally { this.submitting = false; this.updateControls(); }
   }
