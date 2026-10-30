@@ -16,6 +16,7 @@ import { remoteSessionEnv } from '../protocol/remote-session.js';
 import { socketPath } from '../protocol/paths.js';
 import type { FileMethod, MethodResult, SessionInfo } from '../protocol/methods.js';
 import { defaultSessionDir, sessionDirArg, sideSessionDir, withSessionDir } from './session-dirs.js';
+import { forkSideSession } from './side-fork.js';
 import { PI_VERSION, PROTOCOL_VERSION, errorText, type CreateOptions, type HistoryCursor, type LiveState, type RecordValue, type Request, type SlotInfo, type Snapshot, type RemoteEvent, type ServerRecord } from '../protocol/types.js';
 
 // SessionManager returns Dates; JSON serialization produces the protocol's ISO strings.
@@ -382,18 +383,27 @@ export class Supervisor {
     } catch (error) { throw new Error(`Cannot create side: parent session file is not persisted or readable. Save a conversation first. ${errorText(error)}`); }
     const sessionDir = sideSessionDir(parent.cwd, { ...process.env, ...this.options.env });
     await mkdir(sessionDir, { recursive: true, mode: 0o700 });
-    const latest = await this.refreshState(parent);
-    checkParent();
-    if (latest.sessionId !== state.sessionId || latest.sessionFile !== state.sessionFile
-      || options.expectedParentSessionId !== undefined && latest.sessionId !== options.expectedParentSessionId) throw new Error('Parent session changed while creating side; no side was launched');
-    // Final checks and launch are synchronous. Never reserve or mutate the parent's file:
-    // stock --fork reads only its persisted history, even when the parent is busy.
+    // Never reserve or mutate the parent's file: the fork reads only its persisted
+    // history, even when the parent is busy.
+    let sessionFile: string;
+    try { sessionFile = await forkSideSession(source, parent.cwd, sessionDir); }
+    catch (error) { throw new Error(`Cannot create side: ${errorText(error)}`); }
+    try {
+      const latest = await this.refreshState(parent);
+      checkParent();
+      if (latest.sessionId !== state.sessionId || latest.sessionFile !== state.sessionFile
+        || options.expectedParentSessionId !== undefined && latest.sessionId !== options.expectedParentSessionId) throw new Error('Parent session changed while creating side; no side was launched');
+    } catch (error) {
+      await rm(sessionFile, { force: true });
+      throw error;
+    }
+    // Final checks and launch are synchronous.
     const slot: Slot = { id: randomUUID(), number: this.nextSlotNumber++, parentSlotId: parent.id,
-      cwd: parent.cwd, createdAt: new Date().toISOString(), args: withSessionDir(parent.args, sessionDir),
+      cwd: parent.cwd, createdAt: new Date().toISOString(), args: withSessionDir(parent.args, sessionDir), sessionFile,
       status: 'starting', live: emptyLive(), ui: new Map(), timers: new Map(), seq: 0, state: {},
       changing: false, restarting: false, mutations: 0, incarnation: 0, creating: true };
     this.slots.set(slot.id, slot);
-    try { this.launch(slot, source, options.prompt); }
+    try { this.launch(slot, options.prompt); }
     catch (error) { this.finishExit(slot, new Error(errorText(error))); }
     await this.startupGrace(slot);
     // Once allocated, always return the ID. A launch/prompt/save failure is not a safe
@@ -413,14 +423,14 @@ export class Supervisor {
     return this.info(slot);
   }
 
-  private launch(slot: Slot, forkPath?: string, prompt?: string): void {
+  private launch(slot: Slot, prompt?: string): void {
     if (slot.stopping || this.stopping) throw new Error('Slot is stopping; not launching Pi');
     const incarnation = ++slot.incarnation;
     slot.activityAborted = false; slot.activityRetryError = false;
     slot.initialPrompt = prompt !== undefined ? { message: prompt, incarnation } : undefined;
     const launch: PiLaunch = { executable: this.options.executable ?? 'pi', prefixArgs: this.options.prefixArgs, cwd: slot.cwd,
       env: { ...this.options.env, ...remoteSessionEnv({ host: hostname(), slotId: slot.id, slotNumber: slot.number }) },
-      args: [...slot.args, ...(forkPath ? ['--fork', forkPath] : slot.sessionFile ? ['--session', slot.sessionFile] : [])] };
+      args: [...slot.args, ...(slot.sessionFile ? ['--session', slot.sessionFile] : [])] };
     slot.process = new PiProcess(launch, event => {
       if (incarnation === slot.incarnation) this.recordEvent(slot, event);
     }, error => {
