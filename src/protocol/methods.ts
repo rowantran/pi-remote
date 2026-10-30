@@ -10,7 +10,9 @@ export interface ClientTerminal { columns: number; rows: number; answers?: Termi
  * attach_native result. `messages` rebuild the current screen from nothing; live messages
  * follow as `{ type: 'screen', message }` events with a higher seq.
  */
-export interface SlotAttachment { slot: SlotInfo; messages: CompanionMessage[]; seq: number }
+export interface SlotAttachment { slot: SlotInfo; messages: CompanionMessage[]; seq: number;
+  /** Pi is running or compacting. Later changes arrive as agent_start and agent_settled events. */
+  busy?: boolean }
 
 /** Session catalogue data after JSON serialization; no upstream runtime dependency. */
 export interface SessionInfo {

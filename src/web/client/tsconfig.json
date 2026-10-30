@@ -4,8 +4,29 @@
     "composite": false,
     "rootDir": ".",
     "noEmit": true,
-    "lib": ["ES2023", "DOM", "DOM.Iterable"]
+    "lib": [
+      "ES2023",
+      "DOM",
+      "DOM.Iterable"
+    ]
   },
-  "include": ["main.ts", "connection.ts", "terminal.ts"],
-  "references": [{ "path": "../shared" }, { "path": "../../protocol" }, { "path": "../../client" }, { "path": "../../tui" }]
+  "include": [
+    "main.ts",
+    "connection.ts",
+    "terminal.ts"
+  ],
+  "references": [
+    {
+      "path": "../shared"
+    },
+    {
+      "path": "../../protocol"
+    },
+    {
+      "path": "../../client"
+    },
+    {
+      "path": "../../tui"
+    }
+  ]
 }

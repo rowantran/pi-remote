@@ -16,6 +16,7 @@ export { ToolExecutionComponent } from 'pi-coding-agent-dist/modes/interactive/c
 export { TreeSelectorComponent } from 'pi-coding-agent-dist/modes/interactive/components/tree-selector.js';
 export { UserMessageComponent } from 'pi-coding-agent-dist/modes/interactive/components/user-message.js';
 export { Theme, getMarkdownTheme, getSelectListTheme, getSettingsListTheme, getLanguageFromPath, highlightCode, initTheme } from 'pi-coding-agent-dist/modes/interactive/theme/theme.js';
+export { keyText } from 'pi-coding-agent-dist/modes/interactive/components/keybinding-hints.js';
 export { buildSessionProjection } from 'pi-coding-agent-dist/core/session-manager.js';
 import {
   createShellRenderers, editRenderers, findRenderers, grepRenderers, lsRenderers, readRenderers, writeRenderers,

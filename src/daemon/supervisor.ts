@@ -1061,7 +1061,7 @@ export class Supervisor {
             slot.detachedAt = undefined;
             if (!slot.runtime.owner || slot.runtime.owner.socket.destroyed) this.takeSize(slot, peer);
             // Synchronous: no companion message can arrive between this cut and live events.
-            data = { slot: this.info(slot), messages: slot.runtime.screen.snapshot(), seq: slot.seq } satisfies MethodResult<'attach_native'>;
+            data = { slot: this.info(slot), messages: slot.runtime.screen.snapshot(), seq: slot.seq, busy: slot.live.busy || slot.live.compacting } satisfies MethodResult<'attach_native'>;
             break;
           }
           case 'input': {
