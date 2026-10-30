@@ -6,8 +6,8 @@ import { dirname, join } from 'node:path';
 import { spawn, type IPty } from 'node-pty';
 import { readJsonl } from '../protocol/jsonl.js';
 import { TerminalOutputFilter } from './terminal-output.js';
-import { COMPANION_SOCKET_ENV, type CompanionMessage, type ControlMessage, type RgbColor, type TerminalAnswers } from '../protocol/companion.js';
-export type { RgbColor, TerminalAnswers } from '../protocol/companion.js';
+import { PI_EXTENSION_SOCKET_ENV, type PiExtensionMessage, type ControlMessage, type RgbColor, type TerminalAnswers } from '../protocol/pi-extension.js';
+export type { RgbColor, TerminalAnswers } from '../protocol/pi-extension.js';
 
 export interface PiTerminalOptions {
   executable: string;
@@ -16,7 +16,7 @@ export interface PiTerminalOptions {
   /** Extra Pi CLI arguments, after the ones the host adds. */
   args: string[];
   cwd: string;
-  companionPath: string;
+  extensionPath: string;
   columns: number;
   rows: number;
   env?: NodeJS.ProcessEnv;
@@ -74,16 +74,16 @@ export function ensureSpawnHelper(): void {
 }
 
 /**
- * Runs the stock interactive Pi CLI in a PTY with the companion extension loaded, and
- * relays the companion's messages. The PTY carries keys in; its output is discarded
- * except for terminal queries, because the client draws from the companion's frames.
+ * Runs the stock interactive Pi CLI in a PTY with pi-remote's Pi extension loaded, and
+ * relays the Pi extension's messages. The PTY carries keys in; its output is discarded
+ * except for terminal queries, because the client draws from the Pi extension's frames.
  */
 export class PiTerminal {
-  onMessage?: (message: CompanionMessage) => void;
+  onMessage?: (message: PiExtensionMessage) => void;
   onExit?: (code: number, signal?: number) => void;
   private pty?: IPty;
   private server?: Server;
-  private companion?: Socket;
+  private extensionSocket?: Socket;
   private socketDir?: string;
   private queryTail = '';
   private output = new TerminalOutputFilter();
@@ -99,25 +99,25 @@ export class PiTerminal {
   get rows(): number { return this.size.rows; }
 
   async start(): Promise<void> {
-    this.socketDir = mkdtempSync(join(tmpdir(), 'pi-remote-companion-'));
-    const socketPath = join(this.socketDir, 'companion.sock');
+    this.socketDir = mkdtempSync(join(tmpdir(), 'pi-remote-extension-'));
+    const socketPath = join(this.socketDir, 'pi-extension.sock');
     this.server = createServer(socket => {
-      // One companion per Pi process. A second connection is unexpected; keep the first.
-      if (this.companion) { socket.destroy(); return; }
-      this.companion = socket;
-      readJsonl(socket, record => this.onMessage?.(record as CompanionMessage), error => {
-        console.error(`pi-remote: companion message error: ${error.message}`);
+      // One Pi extension per Pi process. A second connection is unexpected; keep the first.
+      if (this.extensionSocket) { socket.destroy(); return; }
+      this.extensionSocket = socket;
+      readJsonl(socket, record => this.onMessage?.(record as PiExtensionMessage), error => {
+        console.error(`pi-remote: Pi extension message error: ${error.message}`);
       }, { recover: true });
     });
     await new Promise<void>((resolve, reject) => {
       this.server!.once('error', reject);
       this.server!.listen(socketPath, () => { this.server!.off('error', reject); resolve(); });
     });
-    const { executable, prefixArgs = [], args, cwd, companionPath, columns, rows, env } = this.options;
+    const { executable, prefixArgs = [], args, cwd, extensionPath, columns, rows, env } = this.options;
     ensureSpawnHelper();
-    this.pty = spawn(executable, [...prefixArgs, '--tui-mode', 'regular', '-e', companionPath, ...args], {
+    this.pty = spawn(executable, [...prefixArgs, '--tui-mode', 'regular', '-e', extensionPath, ...args], {
       name: 'xterm-256color', cols: columns, rows, cwd,
-      env: { ...process.env, ...env, [COMPANION_SOCKET_ENV]: socketPath, COLORTERM: 'truecolor' } as Record<string, string>,
+      env: { ...process.env, ...env, [PI_EXTENSION_SOCKET_ENV]: socketPath, COLORTERM: 'truecolor' } as Record<string, string>,
     });
     this.pty.onData(data => this.handleOutput(data));
     this.exited = new Promise(resolve => {
@@ -125,10 +125,10 @@ export class PiTerminal {
     });
   }
 
-  /** Sends a message to the companion inside Pi. Dropped when the companion is not connected. */
+  /** Sends a message to the Pi extension inside Pi. Dropped when the Pi extension is not connected. */
   control(message: ControlMessage): boolean {
-    if (!this.companion || this.companion.destroyed) return false;
-    this.companion.write(`${JSON.stringify(message)}\n`);
+    if (!this.extensionSocket || this.extensionSocket.destroyed) return false;
+    this.extensionSocket.write(`${JSON.stringify(message)}\n`);
     return true;
   }
 
@@ -175,7 +175,7 @@ export class PiTerminal {
   }
 
   private cleanup(): void {
-    this.companion?.destroy();
+    this.extensionSocket?.destroy();
     this.server?.close();
     if (this.socketDir) rmSync(this.socketDir, { recursive: true, force: true });
   }

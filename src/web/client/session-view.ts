@@ -2,7 +2,7 @@ import { PiScreen } from '../../tui/pi-screen.js';
 import { ScreenState } from '../../protocol/screen.js';
 import { toKittyInput } from '../../tui/kitty-keys.js';
 import type { SlotAttachment } from '../../protocol/methods.js';
-import type { CompanionMessage, RgbColor } from '../../protocol/companion.js';
+import type { PiExtensionMessage, RgbColor } from '../../protocol/pi-extension.js';
 import type { RemoteConnection, RemoteEvent, SlotInfo } from '../../protocol/types.js';
 import type { XtermTerminal } from './terminal.js';
 
@@ -18,7 +18,7 @@ export interface SessionViewEvents {
   /** Pi stopped (the slot exited). */
   onStopped?: () => void;
   /** The current screen, for the device-local offline preview. */
-  onScreen?: (messages: CompanionMessage[]) => void;
+  onScreen?: (messages: PiExtensionMessage[]) => void;
 }
 
 /**
@@ -49,7 +49,7 @@ export class SessionView {
   }
 
   /** Show saved screen messages without a connection (offline preview). */
-  preview(messages: CompanionMessage[]): void {
+  preview(messages: PiExtensionMessage[]): void {
     this.client.start();
     for (const message of messages) this.client.receive(message);
   }
@@ -97,7 +97,7 @@ export class SessionView {
     else if (record.type === 'remote_slot_exit') this.events.onStopped?.();
   }
 
-  private receive(message: CompanionMessage): void {
+  private receive(message: PiExtensionMessage): void {
     this.client.receive(message, JSON.stringify(message).length);
     this.screen.apply(message);
     const picker = this.client.layoutKnown && !this.client.editorFocusedOnPi;

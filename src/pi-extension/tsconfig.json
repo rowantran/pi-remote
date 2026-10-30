@@ -2,8 +2,8 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "rootDir": ".",
-    "outDir": "../../dist/companion",
-    "tsBuildInfoFile": "../../dist/.tsbuildinfo/companion.tsbuildinfo"
+    "outDir": "../../dist/pi-extension",
+    "tsBuildInfoFile": "../../dist/.tsbuildinfo/pi-extension.tsbuildinfo"
   },
   "include": [
     "**/*.ts"

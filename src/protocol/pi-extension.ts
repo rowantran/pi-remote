@@ -1,7 +1,7 @@
 /**
- * Messages between the companion extension (inside the remote Pi process) and the
+ * Messages between pi-remote's Pi extension (inside the remote Pi process) and the
  * pi-remote host that owns that Pi process. Keep this file free of imports: Pi loads
- * the companion through its own module loader, and this file is loaded with it.
+ * the Pi extension through its own module loader, and this file is loaded with it.
  */
 
 export interface RgbColor { r: number; g: number; b: number }
@@ -17,8 +17,8 @@ export interface TerminalAnswers {
   cell?: { width: number; height: number };
 }
 
-/** Environment variable with the Unix socket path the companion connects to. */
-export const COMPANION_SOCKET_ENV = 'PI_REMOTE_COMPANION_SOCKET';
+/** Environment variable with the Unix socket path the Pi extension connects to. */
+export const PI_EXTENSION_SOCKET_ENV = 'PI_REMOTE_EXTENSION_SOCKET';
 
 /**
  * Pi's interactive mode mounts these root children, in this order, in both its regular
@@ -33,7 +33,7 @@ export interface LineDiff { start: number; remove: number; insert: string[] }
 
 export interface EditorState { text: string; cursor: { line: number; col: number } }
 
-export type CompanionMessage =
+export type PiExtensionMessage =
   /**
    * Sent when Pi creates an editor in its editor slot. `bindings` are the remote's resolved
    * keybindings. `editor` says whether the editor is Pi's default or one an extension set.
@@ -81,11 +81,11 @@ export type CompanionMessage =
   /**
    * Terminal output Pi wrote to its PTY that only a real terminal can act on: a bell, the
    * window title, a desktop notification, progress, or a clipboard write (OSC 52). Added by
-   * the host, not the companion. `data` is the escape sequence to write to the local terminal.
+   * the host, not the Pi extension. `data` is the escape sequence to write to the local terminal.
    */
   | { type: 'terminal'; kind: 'bell' | 'title' | 'notify' | 'progress' | 'clipboard'; data: string };
 
-/** Messages from the host to the companion. */
+/** Messages from the host to the Pi extension. */
 export type ControlMessage =
   /** Send `text` to the agent as a user message (pi.sendUserMessage). */
   | { type: 'prompt'; text: string };

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ScreenState } from '../../src/protocol/screen.js';
-import type { CompanionMessage } from '../../src/protocol/companion.js';
+import type { PiExtensionMessage } from '../../src/protocol/pi-extension.js';
 
-const frame = (sections: Extract<CompanionMessage, { type: 'frame' }>['sections'], reset = false): CompanionMessage => ({
+const frame = (sections: Extract<PiExtensionMessage, { type: 'frame' }>['sections'], reset = false): PiExtensionMessage => ({
   type: 'frame', width: 80, layout: 'known', reset, sections, editorFocused: true, dropdownRows: 0, hardwareCursor: false,
 });
 
@@ -17,7 +17,7 @@ test('a snapshot rebuilds the current screen, editor, history and session from n
   const copy = new ScreenState();
   for (const message of state.snapshot()) copy.apply(message);
   assert.deepEqual(copy.snapshot(), state.snapshot());
-  const rebuilt = state.snapshot().find(message => message.type === 'frame') as Extract<CompanionMessage, { type: 'frame' }>;
+  const rebuilt = state.snapshot().find(message => message.type === 'frame') as Extract<PiExtensionMessage, { type: 'frame' }>;
   assert.equal(rebuilt.reset, true);
   assert.deepEqual(rebuilt.sections[0]!.insert, ['a', 'B', 'c']);
   assert.deepEqual(state.snapshot().map(message => message.type), ['editorInstalled', 'history', 'frame', 'editor']);

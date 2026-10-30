@@ -53,7 +53,7 @@ try {
     staticDir: join(repo, 'dist/web/') });
   push = await PushService.open({ stateDir: webState, origin: proxy.origin, devices: web.devices, tabs: web.tabs, allowedLogins: ['rowan@example.test'],
     send: async (subscription, payload) => { sent.push({ endpoint: subscription.endpoint, payload: JSON.parse(String(payload)) }); return { statusCode: 201, body: '', headers: {} }; } });
-  // Notifications come from the companion's lifecycle events through the read-only activity stream.
+  // Notifications come from the Pi extension's lifecycle events through the read-only activity stream.
   let active!: () => void;
   const monitoring = new Promise<void>(resolve => { active = resolve; });
   monitor = startActivityMonitor({

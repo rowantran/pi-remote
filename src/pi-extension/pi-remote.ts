@@ -1,5 +1,5 @@
 /**
- * pi-remote companion: a Pi extension that pi-remote loads into the remote Pi process.
+ * pi-remote's Pi extension, which pi-remote loads into each slot's Pi process.
  *
  * It does not change what Pi does. It reports what Pi draws, section by section, and
  * puts a stand-in editor in Pi's editor slot so that the client can edit text locally:
@@ -16,9 +16,9 @@ import { createConnection, type Socket } from 'node:net';
 import { hostname } from 'node:os';
 import { appendFileSync } from 'node:fs';
 import {
-  decodeBarrier, decodeSetText, diffLines, EDITOR_SECTION, COMPANION_SOCKET_ENV, SECTION_COUNT, sameEditorState,
-  type CompanionMessage, type ControlMessage, type EditorState, type LineDiff,
-} from '../protocol/companion.js';
+  decodeBarrier, decodeSetText, diffLines, EDITOR_SECTION, PI_EXTENSION_SOCKET_ENV, SECTION_COUNT, sameEditorState,
+  type PiExtensionMessage, type ControlMessage, type EditorState, type LineDiff,
+} from '../protocol/pi-extension.js';
 
 class Channel {
   private socket: Socket;
@@ -51,7 +51,7 @@ class Channel {
     this.socket.unref();
   }
 
-  send(message: CompanionMessage): void {
+  send(message: PiExtensionMessage): void {
     if (this.failed) return;
     const line = `${JSON.stringify(message)}\n`;
     if (this.connected) this.socket.write(line);
@@ -123,8 +123,8 @@ class Bridge {
 
   /** Called by Pi for each terminal input sequence, before the focused component. */
   input(data: string): { consume: true } | undefined {
-    // Development aid: PI_REMOTE_COMPANION_DEBUG=FILE logs each input with the editor text before it.
-    if (process.env.PI_REMOTE_COMPANION_DEBUG) appendFileSync(process.env.PI_REMOTE_COMPANION_DEBUG, `${JSON.stringify({ input: data, text: this.editor?.getText() })}\n`);
+    // Development aid: PI_REMOTE_EXTENSION_DEBUG=FILE logs each input with the editor text before it.
+    if (process.env.PI_REMOTE_EXTENSION_DEBUG) appendFileSync(process.env.PI_REMOTE_EXTENSION_DEBUG, `${JSON.stringify({ input: data, text: this.editor?.getText() })}\n`);
     const text = decodeSetText(data);
     if (text !== undefined) {
       this.editor?.setText(text);
@@ -222,7 +222,7 @@ class Bridge {
 
   private reportChrome(editor: ObservedEditor): void {
     const [before, after] = (editor.borderColor?.('\u0000') ?? '\u0000').split('\u0000');
-    const message: CompanionMessage = {
+    const message: PiExtensionMessage = {
       type: 'editorChrome', border: [before ?? '', after ?? ''],
       paddingX: editor.getPaddingX?.() ?? 0, autocompleteMaxVisible: editor.getAutocompleteMaxVisible?.() ?? 5,
     };
@@ -246,8 +246,8 @@ type EditorFactory = NonNullable<Parameters<ExtensionUIContext['setEditorCompone
 const PATCHED = Symbol('pi-remote.patched');
 
 /**
- * Puts an editor that the companion can observe in Pi's editor slot. Other extensions may
- * set their own editor; the companion wraps their factory instead of replacing it, so their
+ * Puts an editor that the Pi extension can observe in Pi's editor slot. Other extensions may
+ * set their own editor; the Pi extension wraps their factory instead of replacing it, so their
  * editor stays in use. Pi passes one shared UI object to every extension in a session.
  */
 function installEditor(ui: ExtensionUIContext & { [PATCHED]?: true }, bridge: Bridge): void {
@@ -270,7 +270,7 @@ function installEditor(ui: ExtensionUIContext & { [PATCHED]?: true }, bridge: Br
   setEditorComponent(wrap(undefined));
 }
 
-function sessionMessage(ctx: ExtensionContext): CompanionMessage {
+function sessionMessage(ctx: ExtensionContext): PiExtensionMessage {
   const sessions = ctx.sessionManager;
   const env = process.env;
   return {
@@ -281,7 +281,7 @@ function sessionMessage(ctx: ExtensionContext): CompanionMessage {
   };
 }
 
-type ActivityEvent = Extract<CompanionMessage, { type: 'activity' }>['event'];
+type ActivityEvent = Extract<PiExtensionMessage, { type: 'activity' }>['event'];
 
 /** Only what notifications need from a message: never text, thinking, or tool arguments. */
 function redactedMessage(message: any): Record<string, unknown> | undefined {
@@ -318,8 +318,8 @@ function reportActivity(pi: ExtensionAPI, send: (event: ActivityEvent) => void):
   pi.on('ui_prompt_end', () => { send({ type: 'remote_dialog_resolved', id: `dialog-${dialog}` }); });
 }
 
-export default function piRemoteCompanion(pi: ExtensionAPI): void {
-  const socketPath = process.env[COMPANION_SOCKET_ENV];
+export default function piRemoteExtension(pi: ExtensionAPI): void {
+  const socketPath = process.env[PI_EXTENSION_SOCKET_ENV];
   if (!socketPath) return;
   const bridge = new Bridge(new Channel(socketPath, message => {
     if (message.type === 'prompt') { try { pi.sendUserMessage(message.text); } catch { /* Reported through activity and the screen. */ } }

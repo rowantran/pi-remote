@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applyDiff, decodeBarrier, diffLines, encodeBarrier } from '../../src/protocol/companion.js';
+import { applyDiff, decodeBarrier, diffLines, encodeBarrier } from '../../src/protocol/pi-extension.js';
 
 test('line diffs reproduce the new lines for random edits', () => {
   for (let i = 0; i < 5000; i++) {

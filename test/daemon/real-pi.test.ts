@@ -13,7 +13,7 @@ import { Supervisor } from '../../src/daemon/supervisor.js';
 import { ScreenState } from '../../src/protocol/screen.js';
 import { readJsonl, writeJsonl } from '../../src/protocol/jsonl.js';
 import { socketPath } from '../../src/protocol/paths.js';
-import { EDITOR_SECTION, type CompanionMessage } from '../../src/protocol/companion.js';
+import { EDITOR_SECTION, type PiExtensionMessage } from '../../src/protocol/pi-extension.js';
 import { PI_VERSION, PROTOCOL_VERSION, type RecordValue, type SlotInfo } from '../../src/protocol/types.js';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
@@ -53,7 +53,7 @@ class Client {
   }
   async attach(slotId: string, columns = 100, rows = 30): Promise<RecordValue> {
     const result = await this.request('attach', { slotId, columns, rows });
-    for (const message of result.messages as CompanionMessage[]) this.screen.apply(message);
+    for (const message of result.messages as PiExtensionMessage[]) this.screen.apply(message);
     return result;
   }
   /** Every screen line, as plain text. */

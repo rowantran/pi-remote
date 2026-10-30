@@ -133,7 +133,7 @@ test('private Unix socket, strict hello, and reserved launch arguments', { timeo
   assert.deepEqual(await peer.request('list'), []);
 });
 
-test('each Pi process starts in a terminal with the companion and the pi-remote session environment', { timeout: 10_000 }, async t => {
+test('each Pi process starts in a terminal with the Pi extension and the pi-remote session environment', { timeout: 10_000 }, async t => {
   const { create, launchLog } = await setup(t);
   const first = await create(), second = await create();
   const launches = (await readFile(launchLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
@@ -141,7 +141,7 @@ test('each Pi process starts in a terminal with the companion and the pi-remote 
     PI_REMOTE_SESSION: '1', PI_REMOTE_SESSION_HOST: hostname(), PI_REMOTE_SESSION_SLOT: info.id, PI_REMOTE_SESSION_SLOT_NUMBER: String(info.number),
   })));
   assert.deepEqual(launches[0].args.slice(0, 3), ['--tui-mode', 'regular', '-e']);
-  assert.match(launches[0].args[3], /companion[\\/]index\.(ts|js)$/);
+  assert.match(launches[0].args[3], /pi-extension[\\/]pi-remote\.(ts|js)$/);
   assert.ok(first.pid && first.pid !== second.pid);
 });
 

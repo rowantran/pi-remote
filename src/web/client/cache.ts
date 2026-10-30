@@ -1,12 +1,12 @@
 import type { RemoteConnection, SlotInfo } from '../../protocol/types.js';
-import type { CompanionMessage } from '../../protocol/companion.js';
+import type { PiExtensionMessage } from '../../protocol/pi-extension.js';
 import type { DaemonMethod, MethodResult, RequestArgs } from '../../protocol/methods.js';
 
 const DATABASE = 'pi-remote-transcripts';
 const STORE = 'snapshots';
 const MAX_BYTES = 8 * 1024 * 1024;
 /** A slot's screen: frames and the session, without prompt history or the draft. */
-export interface SavedScreen { slot: SlotInfo; messages: CompanionMessage[] }
+export interface SavedScreen { slot: SlotInfo; messages: PiExtensionMessage[] }
 interface Cached { slotId: string; savedAt: number; screen?: SavedScreen }
 function database(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -32,7 +32,7 @@ export class TranscriptCache {
   private pendingScreen?: SavedScreen;
   private scheduledScreen = false;
   /** Save a slot's screen when the browser is idle; only the latest one is written. */
-  scheduleScreen(slot: SlotInfo, messages: CompanionMessage[]): void {
+  scheduleScreen(slot: SlotInfo, messages: PiExtensionMessage[]): void {
     this.pendingScreen = { slot, messages: messages.filter(message => message.type === 'frame' || message.type === 'session') };
     if (this.scheduledScreen) return;
     this.scheduledScreen = true;
