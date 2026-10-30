@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -11,6 +11,7 @@ import { Supervisor, type DaemonOptions } from '../../src/daemon/supervisor.js';
 import { socketPath } from '../../src/protocol/paths.js';
 import { PI_VERSION, PROTOCOL_VERSION, type RecordValue, type SlotInfo } from '../../src/protocol/types.js';
 import { sessionDirArg, sideSessionDir, withSessionDir } from '../../src/daemon/session-dirs.js';
+import { SIDE_BOUNDARY_TEXT, SIDE_BOUNDARY_TYPE } from '../../src/daemon/side-fork.js';
 
 const fixture = fileURLToPath(new URL('../fixtures/fixture-pi.mjs', import.meta.url));
 async function until<T>(read: () => Promise<T>, predicate: (value: T) => boolean, timeout = 4000): Promise<T> {
@@ -88,12 +89,19 @@ test('side forks persisted busy parent without changing it, inherits args, and d
   const sideDir = sideSessionDir(root, daemonOptions.env);
   assert.ok(side.sessionFile!.startsWith(sideDir + '/'));
   const launches = await records(log), launch = launches.find(record => record.pid === side.pid)!;
-  assert.deepEqual(launch.args, ['--mode', 'rpc', '--model', 'fixture', '--thinking', 'high', '--session-dir', sideDir, '--fork', main.sessionFile]);
+  assert.deepEqual(launch.args, ['--mode', 'rpc', '--model', 'fixture', '--thinking', 'high', '--session-dir', sideDir, '--session', side.sessionFile]);
   assert.equal(await readFile(main.sessionFile!, 'utf8'), original);
   const savedSide = await records(side.sessionFile!);
+  const inherited = original.trim().split('\n').map(line => JSON.parse(line));
   assert.equal(savedSide[0].parentSession, main.sessionFile);
-  assert.notEqual(savedSide[0].id, (await records(main.sessionFile!))[0].id);
-  assert.deepEqual(savedSide.slice(1), (await records(main.sessionFile!)).slice(1));
+  assert.equal(savedSide[0].cwd, main.cwd);
+  assert.equal(savedSide[0].version, inherited[0].version);
+  assert.notEqual(savedSide[0].id, inherited[0].id);
+  assert.deepEqual(savedSide.slice(1, -1), inherited.slice(1));
+  const boundary = savedSide.at(-1)!;
+  assert.deepEqual({ type: boundary.type, customType: boundary.customType, content: boundary.content, display: boundary.display, parentId: boundary.parentId },
+    { type: 'custom_message', customType: SIDE_BOUNDARY_TYPE, content: SIDE_BOUNDARY_TEXT, display: true, parentId: inherited.at(-1).id });
+  assert.ok(!inherited.some(entry => entry.id === boundary.id));
   const mainState = await rpc(main.id, { type: 'get_state' });
   assert.equal(mainState.isStreaming, true);
   const stored = JSON.parse(await readFile(join(root, 'slots.json'), 'utf8'));
@@ -167,9 +175,10 @@ test('startup dialogs preserve side process and delay its initial prompt until r
   const side = await createSide(main.id, 'after startup');
   assert.equal(side.status, 'starting');
   assert.ok(side.pid);
-  assert.equal(side.sessionFile, undefined, 'Never persist the parent file as the new side file');
+  assert.notEqual(side.sessionFile, main.sessionFile, 'Never persist the parent file as the new side file');
+  assert.ok(side.sessionFile!.startsWith(sideSessionDir(root, { PI_CODING_AGENT_DIR: join(root, 'agent') }) + '/'));
   const stored = JSON.parse(await readFile(join(root, 'slots.json'), 'utf8'));
-  assert.equal(stored.find((slot: any) => slot.id === side.id).sessionFile, undefined);
+  assert.equal(stored.find((slot: any) => slot.id === side.id).sessionFile, side.sessionFile);
   assert.equal((await records(commands)).filter(record => record.pid === side.pid && record.command.type === 'prompt').length, 0);
   const sidePeer = await connect();
   const snapshot = await sidePeer.request('attach', { slotId: side.id });
@@ -350,8 +359,9 @@ test('pruned side numbers survive restart, and crash side records are pruned wit
 
 test('parent exit or session change during create validation cannot launch a side', { timeout: 15_000 }, async t => {
   for (const action of ['exit', 'change', 'reload', 'daemon-restart']) await t.test(action, async t => {
-    const { peer, parent, createSide, rpc, supervisor, log } = await setup(t);
+    const { root, peer, parent, createSide, rpc, supervisor, log, daemonOptions } = await setup(t);
     const main = await parent();
+    const sideDir = sideSessionDir(root, daemonOptions.env);
     const internal = supervisor as any;
     const checkVersion = internal.checkVersion.bind(supervisor);
     let resume!: () => void, entered!: () => void;
@@ -368,8 +378,29 @@ test('parent exit or session change during create validation cannot launch a sid
     resume();
     const result = await creating;
     assert.ok(action === 'daemon-restart' ? 'value' in result : 'error' in result);
-    assert.equal((await records(log)).filter(record => record.args.includes('--fork')).length, action === 'daemon-restart' ? 1 : 0);
+    assert.equal((await records(log)).filter(record => sessionDirArg(record.args) === sideDir).length, action === 'daemon-restart' ? 1 : 0);
+    assert.equal((await readdir(sideDir).catch(() => [])).length, action === 'daemon-restart' ? 1 : 0);
   });
+});
+
+test('a parent change after the side file is written removes the file and launches nothing', { timeout: 15_000 }, async t => {
+  const { root, parent, createSide, rpc, supervisor, log, daemonOptions } = await setup(t);
+  const main = await parent();
+  const sideDir = sideSessionDir(root, daemonOptions.env);
+  const internal = supervisor as any;
+  const refreshState = internal.refreshState.bind(supervisor);
+  let refreshes = 0;
+  internal.refreshState = async (slot: unknown) => {
+    // The second refresh is the final check, after the side file exists.
+    if (++refreshes === 2) {
+      assert.equal((await readdir(sideDir)).length, 1);
+      await rpc(main.id, { type: 'new_session' });
+    }
+    return refreshState(slot);
+  };
+  await assert.rejects(createSide(main.id), /Parent session changed/);
+  assert.deepEqual(await readdir(sideDir), []);
+  assert.equal((await records(log)).length, 1);
 });
 
 test('side startup failure returns allocated ID, not a retryable create error', async t => {
@@ -508,7 +539,7 @@ test('parent session change during final path validation prevents launch', async
   assert.equal((await records(log)).length, 1);
 });
 
-test('stock Pi CLI forks with provenance and keeps new_session, fork, resume and reload in side storage', { timeout: 45_000 }, async t => {
+test('stock Pi CLI opens the side fork with provenance and boundary, and keeps new_session, fork, resume and reload in side storage', { timeout: 45_000 }, async t => {
   const cli = join(dirname(fileURLToPath(import.meta.resolve('@earendil-works/pi-coding-agent'))), 'cli.js');
   const provider = fileURLToPath(new URL('../golden/fixture-provider.ts', import.meta.url));
   const { root, parent, peer, createSide, connect, daemonOptions } = await setup(t, {
@@ -532,7 +563,10 @@ test('stock Pi CLI forks with provenance and keeps new_session, fork, resume and
   assert.equal(forked[0].parentSession, sourceFile);
   assert.notEqual(forked[0].id, parentSnapshot.state.sessionId);
   assert.ok(forked.some(entry => JSON.stringify(entry.message?.content ?? '').includes('GOLDEN_SECOND_USER parent context')));
-  assert.equal(await readFile(sourceFile, 'utf8'), source, 'CLI --fork never modifies the parent');
+  assert.equal(await readFile(sourceFile, 'utf8'), source, 'side creation never modifies the parent');
+  const sideMessages = (await sidePeer.request('rpc', { slotId: side.id, command: { type: 'get_messages' } })).messages;
+  assert.deepEqual(sideMessages.map((message: RecordValue) => message.role).filter((role: string) => role !== 'system'), ['user', 'assistant', 'custom']);
+  assert.equal(sideMessages.at(-1).content, SIDE_BOUNDARY_TEXT);
   const normal = await peer.request('sessions', { slotId: main.id });
   assert.ok(normal.some((session: any) => session.path === sourceFile));
   assert.ok(!normal.some((session: any) => session.path === sideState.sessionFile));

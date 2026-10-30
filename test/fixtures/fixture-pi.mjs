@@ -343,7 +343,8 @@ const consume = chunk => {
     catch (error) { send({ type: 'response', command: 'parse', success: false, error: String(error) }); }
   }
 };
-if (args.includes('--fixture-startup-dialog') && forkPath) {
+// A new side starts from a file that ends with the daemon's boundary message.
+if (args.includes('--fixture-startup-dialog') && (forkPath || entries.at(-1)?.customType === 'side-boundary')) {
   pendingDialogs.set('fixture-startup-dialog', { startup: true });
   send({ type: 'extension_ui_request', id: 'fixture-startup-dialog', method: 'confirm', title: 'Side startup', message: 'Ready?' });
 }
