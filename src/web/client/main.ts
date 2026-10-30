@@ -150,7 +150,7 @@ async function createSession(): Promise<void> {
   try {
     const conn = await dialogConnection();
     // Sent once. If the result is unknown, the session may exist: never retry automatically.
-    const slot = await conn.request('create', { cwd, native: true });
+    const slot = await conn.request('create', { cwd });
     rememberDirectory(cwd);
     if (slot.status === 'exited') throw new Error(`Pi exited during startup: ${slot.error ?? 'unknown error'}`);
     slotsDialog.close();
@@ -237,7 +237,7 @@ async function attachSession(conn: ReconnectingConnection, slot: SlotInfo, gener
   nativeInput.bindSession(view, slot.id, draft);
   status.textContent = 'Connected';
   conn.onDisconnect(() => { if (connection === conn) { status.textContent = 'Reconnecting…'; nativeInput.setConnected(false); } });
-  conn.onNativeReconnect(() => { if (connection === conn) { status.textContent = 'Connected'; nativeInput.setConnected(true); } });
+  conn.onReconnect(() => { if (connection === conn) { status.textContent = 'Connected'; nativeInput.setConnected(true); } });
 }
 async function boot(): Promise<void> {
   try {

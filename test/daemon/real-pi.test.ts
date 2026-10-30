@@ -52,7 +52,7 @@ class Client {
     return new Promise<T>((resolve, reject) => { this.pending.set(id, { resolve, reject }); writeJsonl(this.socket, { type: 'request', id, method, params }); });
   }
   async attach(slotId: string, columns = 100, rows = 30): Promise<RecordValue> {
-    const result = await this.request('attach_native', { slotId, columns, rows });
+    const result = await this.request('attach', { slotId, columns, rows });
     for (const message of result.messages as CompanionMessage[]) this.screen.apply(message);
     return result;
   }
@@ -94,7 +94,7 @@ async function setup(t: import('node:test').TestContext) {
   const first = await connect();
   const args = ['--offline', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes', '--no-context-files',
     '--no-approve', '--extension', fixture, '--model', 'golden-local/transcript', '--tools', 'bash', '--session-dir', join(root, 'sessions')];
-  const created: SlotInfo = await first.request('create', { cwd: workspace, args, native: true });
+  const created: SlotInfo = await first.request('create', { cwd: workspace, args });
   const listed = async (client = first) => (await client.request<SlotInfo[]>('list')).find(slot => slot.id === created.id)!;
   const running = async (client = first) => {
     for (const deadline = Date.now() + 20_000; (await listed(client)).status !== 'running';) {
@@ -114,9 +114,7 @@ async function setup(t: import('node:test').TestContext) {
 
 test('slots run Pi in a PTY and share its screen, size and activity with clients', { timeout: 120_000 }, async t => {
   const { stateDir, created, first, connect, listed } = await setup(t);
-  assert.equal(created.native, true);
   assert.ok((await listed()).pid! > 0);
-  await assert.rejects(first.request('attach', { slotId: created.id }), /native/, 'RPC attach refuses native slots');
 
   await first.attach(created.id);
   await first.until(() => first.text().includes('transcript'), 'the footer');
@@ -153,9 +151,6 @@ test('slots run Pi in a PTY and share its screen, size and activity with clients
   assert.ok(session.sessionFile);
   assert.ok(first.screen.snapshot().some(message => message.type === 'frame' && message.sections[EDITOR_SECTION]));
 
-  // Stored metadata keeps the slot kind for reopening after a daemon restart.
-  const stored = JSON.parse(await readFile(join(stateDir, 'slots.json'), 'utf8'));
-  assert.equal(stored.find((slot: RecordValue) => slot.id === created.id).native, true);
 
   await first.request('kill', { slotId: created.id });
   assert.equal((await listed()).status, 'exited');
@@ -174,7 +169,6 @@ test('restart_daemon reopens slots from their session files', { timeout: 120_000
   await restart();
   const client = await connect();
   await running(client);
-  assert.equal((await listed(client)).native, true);
   await client.attach(created.id);
   await client.until(() => client.text().includes('GOLDEN_SECOND_DONE'), 'the restored transcript');
 });

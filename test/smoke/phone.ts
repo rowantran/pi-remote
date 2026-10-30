@@ -1,5 +1,5 @@
 /**
- * Phone client on a native slot: real browser → TLS test proxy → web socket → daemon →
+ * Phone client on a slot: real browser → TLS test proxy → web socket → daemon →
  * stock pinned Pi (offline fixture provider) in a PTY. Requires `npm run build` first.
  *
  *   npm run build && node --import tsx test/smoke/phone.ts
@@ -42,7 +42,7 @@ try {
   control = new Connection(socket, socket, () => socket.destroy()); await handshake(control);
   const args = ['--offline', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes', '--no-context-files', '--no-approve',
     '--extension', join(repo, 'test/golden/fixture-provider.ts'), '--model', 'golden-local/transcript', '--tools', 'bash', '--session-dir', join(dir, 'sessions')];
-  const slot: SlotInfo = await control.request('create', { cwd: workspace, args, native: true });
+  const slot: SlotInfo = await control.request('create', { cwd: workspace, args });
   for (let n = 0; (await control.request('list')).find(info => info.id === slot.id)?.status !== 'running'; n++) {
     assert.ok(n < 200, 'slot starts'); await new Promise(resolve => setTimeout(resolve, 100));
   }

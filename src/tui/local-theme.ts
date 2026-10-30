@@ -4,7 +4,16 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Theme, initTheme } from '@earendil-works/pi-coding-agent';
 import type { RgbColor, TerminalColors, TerminalColorScheme } from '@earendil-works/pi-tui';
-import { createPresentationTheme } from './presentation.js';
+
+/** A theme from the terminal's own colors, for the `system` theme. Public Theme constructor only. */
+export function createPresentationTheme(): Theme {
+  const foreground = 'accent border borderAccent borderMuted success error warning muted dim text thinkingText scrollbarTrack scrollbarThumb searchMatchText userMessageText customMessageText customMessageLabel toolTitle toolOutput mdHeading mdLink mdLinkUrl mdCode mdCodeBlock mdCodeBlockBorder mdQuote mdQuoteBorder mdHr mdListBullet toolDiffAdded toolDiffRemoved toolDiffContext syntaxComment syntaxKeyword syntaxFunction syntaxVariable syntaxString syntaxNumber syntaxType syntaxOperator syntaxPunctuation thinkingOff thinkingMinimal thinkingLow thinkingMedium thinkingHigh thinkingXhigh thinkingMax bashMode'.split(' ');
+  const background = 'selectedBg searchMatchBg userMessageBg customMessageBg toolPendingBg toolSuccessBg toolErrorBg'.split(' ');
+  return new Theme(
+    { ...Object.fromEntries(foreground.map(key => [key, ''])), accent: 6, muted: 8, dim: 8, success: 2, error: 1, warning: 3 } as any,
+    Object.fromEntries(background.map(key => [key, ''])) as any, '256color', { name: 'remote-default' },
+  );
+}
 
 const BACKGROUNDS = new Set('selectedBg searchMatchBg userMessageBg customMessageBg toolPendingBg toolSuccessBg toolErrorBg'.split(' '));
 const OPTIONAL: Record<string, string> = { scrollbarTrack: 'muted', scrollbarThumb: 'text', searchMatchText: 'text', searchMatchBg: 'selectedBg', thinkingMax: 'thinkingXhigh' };

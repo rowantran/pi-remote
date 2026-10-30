@@ -2,7 +2,8 @@ import type { DaemonMethod, MethodResult, RequestArgs } from './methods.js';
 
 /** Routing envelope for Pi RPC. Filtered snapshots/events omit assistant signatures;
  * raw RPC replies and the authoritative Pi history remain unchanged. */
-export const PROTOCOL_VERSION = 1;
+/** 2: every slot runs Pi's own interface (attach); the RPC slot methods are gone. */
+export const PROTOCOL_VERSION = 2;
 export const PI_VERSION = "1.4.0";
 export type RecordValue = Record<string, any>;
 export interface Request { type: "request"; id: string; method: string; params?: RecordValue }
@@ -25,39 +26,8 @@ export interface SlotInfo {
   sessionName?: string;
   error?: string;
   clients: number;
-  /** Pi runs its own interactive UI, shown through attach_native. Absent for RPC slots. */
-  native?: boolean;
 }
-export interface LiveState {
-  busy: boolean;
-  compacting: boolean;
-  messages: RecordValue[];
-  tools: Record<string, RecordValue>;
-  steering: string[];
-  followUp: string[];
-  bash?: Record<string, RecordValue>;
-}
-/** Last entry in a verified, complete history checkpoint (not the active leaf). */
-export interface HistoryCursor { sessionId: string; entryId: string }
-export interface Snapshot {
-  slot: SlotInfo;
-  state: RecordValue;
-  entries: RecordValue[];
-  /** When present, entries append to this checkpoint. Omission means a full replacement. */
-  historyDelta?: HistoryCursor;
-  leafId: string | null;
-  live: LiveState;
-  ui: RecordValue[];
-  seq: number;
-  /** Baseline/tail separation: true covers completed messages through seq, leaving only unfinished
-   * live messages. False preserves a cached baseline and uncheckpointed tail during a transition.
-   * Only legacy daemons omit this marker. */
-  historyComplete?: boolean;
-  presentation?: { models?: RecordValue[]; stats?: RecordValue; gitBranch?: string; homeDir?: string; [key: string]: any };
-}
-export interface CreateOptions { cwd?: string; args?: string[]; sessionPath?: string; parentSlotId?: string; prompt?: string; expectedParentSessionId?: string;
-  /** Run Pi's own interactive UI (see attach_native). Side slots inherit their parent's kind. */
-  native?: boolean }
+export interface CreateOptions { cwd?: string; args?: string[]; sessionPath?: string; parentSlotId?: string; prompt?: string; expectedParentSessionId?: string }
 /** A failed recovery attempt and the delay before the next attempt. */
 export interface ConnectionRetry { attempt: number; error: Error; nextDelayMs: number }
 export interface RemoteConnection {
@@ -65,9 +35,8 @@ export interface RemoteConnection {
   request<M extends DaemonMethod>(method: M, ...args: RequestArgs<M>): Promise<MethodResult<M>>;
   onEvent(listener: (event: RemoteEvent) => void): () => void;
   onDisconnect(listener: (error: Error) => void): () => void;
-  onReconnect?(listener: (snapshot: Snapshot) => void): () => void;
-  /** Native attachments only: the new attachment after a reconnect. */
-  onNativeReconnect?(listener: (attachment: import('./methods.js').SlotAttachment) => void): () => void;
+  /** The new attachment after a reconnect. */
+  onReconnect?(listener: (attachment: import('./methods.js').SlotAttachment) => void): () => void;
   onRetry?(listener: (retry: ConnectionRetry) => void): () => void;
   close(): void;
 }

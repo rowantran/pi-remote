@@ -1,4 +1,4 @@
-import type { ConnectionRetry, RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../protocol/types.js';
+import type { ConnectionRetry, RecordValue, RemoteConnection, RemoteEvent } from '../protocol/types.js';
 import type { DaemonMethod, MethodResult, SlotAttachment, ClientTerminal, RequestArgs } from '../protocol/methods.js';
 
 export interface ReconnectOptions { minDelayMs?: number; maxDelayMs?: number }
@@ -19,22 +19,19 @@ const incompatible = (error: Error): boolean =>
 const unavailableSlot = (error: Error): boolean =>
   /\b(?:slot (?:not found|is not running|has exited)|(?:unknown|missing|exited) slot|session not found|daemon restarted|Pi exited)\b/i.test(error.message);
 
-/** Reattach an existing slot, never replay a command or create a replacement Pi process. */
+/** Reattach an existing slot after transport loss; never replay input or create a replacement Pi process. */
 export class ReconnectingConnection implements RemoteConnection {
   private state: State = 'connected';
   private current?: Generation;
   private error?: Error;
   private slotId?: string;
-  private filterTranscript = false;
   private exited = false;
   private snapshotSeq = -1;
-  private recoveredSnapshot?: Snapshot;
-  /** Set by attach_native: reattach natively, with the latest terminal size and answers. */
+  /** Set by attach: reattach with the latest terminal size and answers. */
   private attachedTerminal?: ClientTerminal;
-  private nativeReconnects = new Set<(attachment: SlotAttachment) => void>();
+  private reconnects = new Set<(attachment: SlotAttachment) => void>();
   private events = new Set<(event: RemoteEvent) => void>();
   private disconnects = new Set<(error: Error) => void>();
-  private reconnects = new Set<(snapshot: Snapshot) => void>();
   private retries = new Set<(retry: ConnectionRetry) => void>();
   private latestRetry?: ConnectionRetry;
   private backlog: RemoteEvent[] = [];
@@ -70,7 +67,7 @@ export class ReconnectingConnection implements RemoteConnection {
     const params = (args[0] ?? {}) as RecordValue;
     const generation = this.current;
     if (this.state !== 'connected' || !generation) throw this.error ?? new Error('Disconnected. Nothing was sent.');
-    const attaching = method === 'attach' || method === 'attach_native';
+    const attaching = method === 'attach';
     if (attaching) {
       if (generation.buffering) throw new Error('Attachment already in progress');
       generation.buffering = true;
@@ -80,13 +77,11 @@ export class ReconnectingConnection implements RemoteConnection {
       const result = await generation.connection.request(method, ...args);
       if (this.current !== generation) throw new Error(`${generation.error?.message ?? 'Connection closed'} The result of an in-flight command may be unknown; it was not retried.`);
       if (attaching) {
-        const snapshot = result as Snapshot | SlotAttachment;
-        this.validateSnapshot(snapshot, params.slotId);
-        this.slotId = snapshot.slot.id;
-        this.filterTranscript = params.filterTranscript === true;
-        this.attachedTerminal = method === 'attach_native' ? clientTerminal(params) : undefined;
-        this.recoveredSnapshot = undefined;
-        this.acceptSnapshot(snapshot);
+        const attachment = result as SlotAttachment;
+        this.validateSnapshot(attachment, params.slotId);
+        this.slotId = attachment.slot.id;
+        this.attachedTerminal = clientTerminal(params);
+        this.acceptSnapshot(attachment);
         generation.buffering = false;
         this.drain();
       }
@@ -118,19 +113,10 @@ export class ReconnectingConnection implements RemoteConnection {
     return () => { this.disconnects.delete(listener); };
   }
 
-  /** Subscribe before onEvent. Late subscribers receive the latest recovered snapshot first. */
-  onReconnect(listener: (snapshot: Snapshot) => void): () => void {
-    if (this.state !== 'closed' && this.state !== 'terminal') {
-      this.reconnects.add(listener);
-      if (this.state === 'connected' && this.recoveredSnapshot) this.call(listener, this.recoveredSnapshot);
-    }
-    return () => { this.reconnects.delete(listener); };
-  }
-
   /** Called with the new attachment after each reconnect. Subscribe before onEvent. */
-  onNativeReconnect(listener: (attachment: SlotAttachment) => void): () => void {
-    if (this.state !== 'closed' && this.state !== 'terminal') this.nativeReconnects.add(listener);
-    return () => { this.nativeReconnects.delete(listener); };
+  onReconnect(listener: (attachment: SlotAttachment) => void): () => void {
+    if (this.state !== 'closed' && this.state !== 'terminal') this.reconnects.add(listener);
+    return () => { this.reconnects.delete(listener); };
   }
 
   /** Late subscribers receive only the latest failed attempt, while still recovering. */
@@ -158,10 +144,8 @@ export class ReconnectingConnection implements RemoteConnection {
     this.events.clear();
     this.disconnects.clear();
     this.reconnects.clear();
-    this.nativeReconnects.clear();
     this.retries.clear();
     this.latestRetry = undefined;
-    this.recoveredSnapshot = undefined;
   }
 
   private install(connection: RemoteConnection, buffering: boolean): Generation {
@@ -243,25 +227,16 @@ export class ReconnectingConnection implements RemoteConnection {
         if (this.state !== 'recovering') { connection.close(); return; }
         generation = this.install(connection, true);
         if (this.current !== generation) throw generation.error ?? new Error('Connection closed');
-        const terminal = this.attachedTerminal;
-        const snapshot = terminal
-          ? await connection.request('attach_native', { slotId, ...terminal })
-          : await connection.request('attach', { slotId, ...(this.filterTranscript ? { filterTranscript: true } : {}) });
+        const attachment = await connection.request('attach', { slotId, ...this.attachedTerminal! });
         if (this.current !== generation || this.state !== 'recovering') throw generation.error ?? new Error('Connection closed');
-        this.validateSnapshot(snapshot, slotId);
-        this.acceptSnapshot(snapshot);
-        if (!terminal) this.recoveredSnapshot = snapshot as Snapshot;
+        this.validateSnapshot(attachment, slotId);
+        this.acceptSnapshot(attachment);
         this.state = 'connected';
         this.error = undefined;
         this.latestRetry = undefined;
-        if (terminal) {
-          for (const listener of [...this.nativeReconnects]) {
-            if (this.current !== generation) break;
-            this.call(listener, snapshot as SlotAttachment);
-          }
-        } else for (const listener of [...this.reconnects]) {
+        for (const listener of [...this.reconnects]) {
           if (this.current !== generation) break;
-          this.call(listener, snapshot as Snapshot);
+          this.call(listener, attachment);
         }
         if (this.current === generation) {
           generation.buffering = false;
@@ -301,12 +276,12 @@ export class ReconnectingConnection implements RemoteConnection {
     });
   }
 
-  private validateSnapshot(snapshot: Snapshot | SlotAttachment, slotId: string): void {
+  private validateSnapshot(snapshot: SlotAttachment, slotId: string): void {
     if (!snapshot?.slot || snapshot.slot.id !== slotId || !Number.isSafeInteger(snapshot.seq) || snapshot.seq < 0) throw new Error('Invalid attach snapshot');
     if (snapshot.slot.status === 'exited') throw new Error(snapshot.slot.error ?? 'Slot is not running');
   }
 
-  private acceptSnapshot(snapshot: Snapshot | SlotAttachment): void {
+  private acceptSnapshot(snapshot: SlotAttachment): void {
     this.snapshotSeq = snapshot.seq;
     this.backlog = this.backlog.filter(event => event.slotId === snapshot.slot.id && event.seq > snapshot.seq);
     this.exited = this.backlog.some(event => event.event.type === 'remote_slot_exit');

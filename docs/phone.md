@@ -1,8 +1,10 @@
 # Phone client
 
-The browser client paints the existing Pi transcript locally. It connects over WebSocket to a
-`pi-remote serve` process on the devbox; that process connects to the same daemon as the laptop
-client. Closing a tab or losing the network detaches the client, not the remote Pi process.
+The browser client shows **Pi's own interface** for a session, at the phone's width. It connects
+over WebSocket to a `pi-remote serve` process on the devbox; that process connects to the same
+daemon as the laptop client. Pi renders on the devbox; the phone scrolls the transcript locally and
+sends prompts from a native text box. Closing a tab or losing the network detaches the client, not
+the remote Pi process.
 
 ## Security model
 
@@ -32,9 +34,8 @@ iPhone → authenticated Tailscale connection → Tailscale Serve HTTPS
   cookie and closes its WebSockets.
 - Mutations and WebSocket upgrades require the exact configured Origin. Host validation, a
   self-only Content Security Policy, no CORS, and no third-party scripts limit browser attacks.
-- The app serves only fixed build assets and reduced display configuration (themes and a few
-  presentation preferences), never arbitrary devbox files or credentials. Remote file reads and
-  agent commands require a paired device.
+- The app serves only fixed build assets and theme files for its page colors, never arbitrary
+  devbox files, extension code, or credentials. Session access requires a paired device.
 
 Tests use a separate loopback proxy into the Unix socket, standing in for Tailscale Serve. This
 proxy lives in test code; there is no production flag to turn the application into a TCP server.
@@ -111,10 +112,9 @@ PI=~/.local/share/pi-remote/bin/pi-remote
 ```
 
 Keep existing private web state when migrating from a checkout-based service: the generated unit
-uses the same `~/.pi-remote-web` directory, preserving device pairing and push keys. Configs and
-adapters remain user-owned files; deployment sends only the web service settings, not your
-presentation code or the rest of your config. The web server also works with an older daemon
-(notification support still requires an upgraded daemon).
+uses the same `~/.pi-remote-web` directory, preserving device pairing and push keys. Configs
+remain user-owned files; deployment sends only the web service settings, not the rest of your
+config. The web server needs a daemon from the same release.
 
 For development, `node bin/pi-remote serve --origin HTTPS_ORIGIN --allow-user LOGIN` still works
 from a checkout after `npm run build`. Manually launched servers are not managed by deploy.
@@ -133,76 +133,29 @@ installed app. Do not paste pairing codes into shared logs or commit them.
 
 ## Code layout
 
-- `src/web/client/`: browser app, native input, offline cache, and browser compatibility shims.
-- `src/web/server/`: private HTTP/WebSocket listener, device pairing, open-session tabs, push, and config delivery.
-- `src/web/build/`: app bundler and isolated presentation-build worker.
-- `src/web/shared/`: web-only worker result types, bounded source-file helpers, and browser-safe module-name normalization. The browser imports only the normalizer; the Node-only file helpers remain server/build code.
+- `src/web/client/`: browser app (`session-view.ts` runs PiScreen in xterm.js), text box, offline screen cache, and browser compatibility shims.
+- `src/web/server/`: private HTTP/WebSocket listener, device pairing, open-session tabs, push, and theme delivery.
+- `src/web/build/`: app bundler.
+- `src/web/shared/`: browser-safe module-name normalization.
 
 The built browser assets remain in `dist/web/`. The server and builder have separate TypeScript
 projects: the listener cannot import TUI/build code, and the browser cannot import server/build code.
 
-## Use a normal pi-remote config
+## Theme
 
-The web client reads a normal pi-remote `config.json` **on the devbox**. The default is
-`$XDG_CONFIG_HOME/pi-remote/config.json`, or `~/.config/pi-remote/config.json` when XDG is unset.
-Use the same schema as the terminal client:
+The page colors come from the theme in a normal pi-remote `config.json` **on the devbox**
+(`$XDG_CONFIG_HOME/pi-remote/config.json`, or `~/.config/pi-remote/config.json`), or from Pi's own
+`theme` setting there:
 
 ```json
-{
-  "theme": "gruvbox-light/gruvbox-dark",
-  "extensions": ["./my-ui.ts"],
-  "bell": true
-}
+{ "theme": "gruvbox-light/gruvbox-dark" }
 ```
 
-To use a different file, add `--ui-config /path/to/config.json` to the existing `serve` command.
-There is no upload protocol, sync command, or saved presentation JSON in web state. Copy the
-normal config and your user-owned `my-ui.ts` with `scp`, manage them with dotfiles, or edit them
-on the devbox. Keep the adapter beside `config.json` on both machines; the same relative path
-then works for the laptop and phone. Deployment does not install adapters.
-
-Extension paths resolve on the devbox: `~/` uses its home directory, and relative paths use the
-config file's directory. A laptop-only absolute path will not work on Linux. Extension files and
-their dependencies must already exist on the devbox. Adapters must not import pi-remote source
-files; use public Pi display packages and declare the small
-[`getRemoteWidget` type locally](../README.md#read-remote-widgets-in-a-local-adapter) if needed.
-Update display dependencies separately; editing an extension only on the laptop does not update the phone.
-The web client does not use `host` or `cwd` from the config to select another server or session.
-
-Themes and Pi display preferences (`hideThinkingBlock`, `doubleEscapeAction`, and the theme
-fallback) come from the devbox's `~/.pi/agent`, or `PI_CODING_AGENT_DIR` if set. The phone chooses
-the light or dark member of a theme pair from its appearance setting. Theme colors also set the
-terminal and page colors. Only display settings and sanitized theme data are sent to the browser,
-not the complete config or Pi settings. Do not embed credentials in presentation code.
-
-The server builds the configured extensions into a browser JavaScript module with esbuild,
-which is included as a runtime dependency. It runs their setup in a bounded, short-lived child
-process to trace dynamic `jiti` imports. This creates no Pi session and makes no daemon request.
-The generated module stays in memory. Config, theme, and bundled source changes are picked up
-when the phone reloads; unchanged sources reuse the bundle. Normal config and loaded-source
-edits need no daemon or web-service restart. Remove an extension from the normal config to turn
-it off. A missing config means default display settings and no extensions. Restart the web service
-if you change package/TypeScript resolution settings or add a competing file that changes which
-module an unchanged import resolves to; these are not loaded-source edits.
-
-Import display modules during factory initialization: dynamic imports performed only later by
-an event handler cannot be traced. Browser Node API support is limited to display helpers and
-read-only virtual theme/config files. Unsupported filesystem, process, editor, or worker
-operations throw when called. Runtime agent/provider/tool executor imports fail the build.
-The native phone composer still replaces extension-provided editors such as `prompt-caret`.
-
-**Only configure extensions you trust.** Setup runs with your ordinary devbox privileges. A
-separate child process limits build lifetime, not access to files or credentials. In the browser,
-the extension runs with the paired device's full authority, including authenticated session
-commands. This is trusted same-user code, not a sandbox.
-
-Both `/api/config` and the hash-bound `/api/presentation.js` require identity, trusted Host/Origin,
-and device pairing. Responses are no-store and the service worker never caches the module.
-CSP remains `script-src 'self'`: no eval or inline scripts. Invalid config or a failed server build
-shows a warning and uses the built-in display, never stale renderer code. Safe themes and settings
-remain available; local service logs contain build diagnostics. Fix the source and reload to recover.
-Listing and attaching sessions remain available, and remote work continues independently. A
-browser-side extension load failure also shows a warning and uses the normal display.
+To use a different file, add `--ui-config /path/to/config.json` to the `serve` command. The phone
+picks the light or dark member of a pair from its appearance setting and tells Pi, so Pi's own theme
+pair switches to match while the phone sets the terminal size. Only sanitized theme data and safe
+settings are sent to the browser. The session itself, including every extension's output, is drawn
+by Pi on the devbox; the phone runs no extension code.
 
 ## Phone controls
 
@@ -233,22 +186,25 @@ autocorrect, dictation, selection, composition, and cursor movement. Return inse
 round **↑** button to send; the keyboard closes and the compact bar returns. With a hardware keyboard,
 Command/Ctrl+Enter also sends.
 
-Sending works like Enter in the laptop client: an idle session starts a run, and a running session
-receives the message as steering. While Pi works and the bar is empty, the send button becomes **■
-Stop**, which does what Escape does on the laptop (it interrupts the run and restores queued messages
-to the draft). Type anything and the send button returns. A hardware keyboard's Escape key keeps its
+While Pi works and the bar is empty, the send button becomes **■ Stop**, which sends Escape to Pi
+(it interrupts the run, as on the laptop). Type anything and the send button returns. A hardware keyboard's Escape key keeps its
 laptop meaning. iOS web apps cannot add keys to the system keyboard, so there is no separate Esc row.
 
-Drafts are stored locally per slot and restored after a reload. They are never submitted merely
-because the app reconnects. Send and dialog answers are disabled while disconnected, but you can
-keep editing the draft. A failed/uncertain submission restores its text for inspection, not replay.
+Sending replaces the text in Pi's editor and presses Enter, exactly as if you had typed it in Pi:
+an idle session starts a run, a running session receives it as Pi's Enter does, and slash commands
+such as `/model` open Pi's own picker. When the phone sends or attaches, it becomes the client that
+sets Pi's terminal size, so Pi redraws at the phone's width; a laptop attached at the same time shows
+the narrow lines until you type there.
 
-Drag the transcript to scroll it locally, with momentum. When you are not at the end, the transcript
-shows a **Jump to latest message** pill; tap it to follow new output again. Tool output expansion and
-thinking visibility are in the **⋯** menu. Typing `/` or `@` shows native suggestion buttons for
-commands and remote files. Remote questions and simple choices use native input sheets. The complex
-fork/tree picker still uses the terminal; while it is open, **↑ ↓ Choose Cancel** buttons appear above
-the bar.
+While a Pi picker or dialog has focus, the text box is disabled and **↑ ↓ Choose Cancel** buttons
+drive it. Tool output expansion and thinking visibility are in the **⋯** menu.
+
+Drafts are stored locally per slot and restored after a reload. They are never submitted merely
+because the app reconnects. Sending is disabled while disconnected, but you can keep editing the
+draft.
+
+Drag the transcript to scroll it locally, with momentum. When you are not at the end, Pi's layout
+shows a **Jump to latest message** pill; sending also returns to the latest output.
 
 This app keeps prompt drafts on the device. Use a device passcode and revoke lost devices. Removing
 a device's authorization cannot erase information it already downloaded or copied while authorized.
@@ -292,45 +248,31 @@ delay or suppress alerts. Revocation and unsubscribe prevent future sends/retrie
 notification cannot be recalled. Use **Disable notifications**, **Unpair this device**, or the CLI
 revocation command to stop future delivery.
 
-## Saved transcripts and resume
+## Saved screens
 
 The service worker caches only the fixed app shell. It never caches API responses, pairing requests,
 or WebSocket messages. Online authentication failures are never replaced with cached successes.
-The browser separately keeps up to three verified transcript snapshots in IndexedDB, up to 8 MiB
-each, and per-session drafts in local storage. These bytes can contain private conversation text;
-use a passcode on the phone. **Clear saved transcripts** removes transcript snapshots; **Unpair this
-device** also clears drafts. Revocation cannot erase information already downloaded while authorized.
+The browser keeps the last screen of up to three sessions in IndexedDB (up to 8 MiB each), and
+per-session drafts in local storage. These bytes can contain private conversation text; use a
+passcode on the phone. **Clear saved transcripts** removes saved screens; **Unpair this device**
+also clears drafts.
 
-A saved transcript is a read-only preview while the daemon reconnects, including after an offline
-reload. Sending and answering old questions are disabled. Once authenticated, the daemon's current
-snapshot replaces the preview; neither cached messages nor unsent drafts are submitted to Pi.
-Quota/private-browsing errors only disable caching. iOS can evict local storage; the remote session
-remains authoritative and continues running on the devbox. Server-built presentation bundles and
-settings are not persisted with snapshots; an offline reload uses built-in presentation until
-online authentication and configuration loading succeed again.
+A saved screen is a read-only preview while the daemon reconnects, including after an offline
+reload. Sending is disabled. Once connected, Pi's current screen replaces the preview; nothing is
+submitted to Pi. iOS can evict local storage; the remote session remains authoritative.
 
 ## Compatibility
 
-The browser uses the pinned Pi 1.4.0 transcript components, not an agent in the browser. No provider
-credentials, model calls, tool execution, or Pi session persistence move to the phone. Accepted or
-uncertain commands are never replayed after reconnect.
+The browser runs PiScreen from the pinned Pi 1.4.0 packages in xterm.js; Pi itself, every
+extension, and all model calls and tools stay on the devbox. Unsupported local filesystem/process
+operations throw rather than attempting remote execution. External editors, local path
+attachments, clipboard image paste, and Ghostty splits are not available on the phone.
 
-Some shared laptop modules import Node APIs. The web build selects display modules directly and
-provides narrow read-only browser replacements for themes, paths, and terminal operations.
-Unsupported local filesystem/process operations throw rather than attempting remote execution.
-Server-configured presentation adapters can use traced dynamic imports and the browser's shared Pi display
-modules. Arbitrary Node module loading, external editors, local path attachments, and Ghostty
-splits are not supported. Built-in renderers and remote text widgets remain available.
-
-Run `npm run test:mobile` after installing Playwright's Chromium and WebKit browsers. The smoke
-check uses an isolated daemon, a deterministic Pi-shaped child, and a loopback-only TLS test proxy
-into the Unix listener. It checks pairing, local painting, prompts, work while disconnected,
-reconnect/reload, and no prompt replay. It never accesses real sessions or model credentials.
-`npm run test:presentation` checks server-configured static/dynamic display adapters and light/dark page
-colors in Chromium and WebKit. After building, run
-`node --import tsx test/smoke/presentation-browser.ts --real /path/to/my-ui.ts` on a machine with
-your trusted Rowan adapter's display dependencies and gruvbox themes to check its real presentation.
-The real-adapter smoke requires the explicit path; it has no repository default.
+Run `npm run test:mobile` after installing Playwright's Chromium. The smoke check uses an isolated
+daemon with the pinned Pi CLI and an offline fixture provider, and a loopback-only TLS test proxy
+into the Unix listener. It checks pairing, phone-width rendering, sending a prompt, a `done`
+notification for an open tab, and Pi's `/model` picker with the choice buttons. It never accesses
+real sessions or model credentials.
 `npm run test:push` injects real Chromium service-worker push events through the browser debugging
 protocol and checks displayed notification requests and offline-shell behavior. This is not external
 Web Push or APNs delivery.

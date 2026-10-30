@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
-import type { ConnectionRetry, RecordValue, RemoteConnection, RemoteEvent, Snapshot } from '../../src/protocol/types.js';
+import type { ConnectionRetry, RecordValue, RemoteConnection, RemoteEvent } from '../../src/protocol/types.js';
+import type { SlotAttachment } from '../../src/protocol/methods.js';
 import { ReconnectingConnection } from '../../src/client/reconnect.js';
 
 function deferred<T>() {
@@ -9,13 +10,8 @@ function deferred<T>() {
   const promise = new Promise<T>((accept, fail) => { resolve = accept; reject = fail; });
   return { promise, resolve, reject };
 }
-function snapshot(seq = 0): Snapshot {
-  return {
-    slot: { id: 'slot', cwd: '/work', createdAt: 'now', status: 'running', clients: 1 },
-    state: {}, entries: [], leafId: null,
-    live: { busy: false, compacting: false, messages: [], tools: {}, steering: [], followUp: [] },
-    ui: [], seq,
-  };
+function snapshot(seq = 0): SlotAttachment {
+  return { slot: { id: 'slot', cwd: '/work', createdAt: 'now', status: 'running', clients: 1 }, messages: [], seq };
 }
 function event(seq: number, slotId = 'slot', value: RecordValue = { type: 'message_update' }): RemoteEvent {
   return { type: 'event', slotId, seq, event: value };
@@ -79,41 +75,16 @@ async function setup(t: TestContext, ...attempts: Attempt[]) {
 }
 async function attached(t: TestContext, ...attempts: Attempt[]) {
   const f = await setup(t, ...attempts);
-  await f.connection.request('attach', { slotId: 'slot', protocol: 1, piVersion: 'already negotiated' });
+  await f.connection.request('attach', { slotId: 'slot', columns: 80, rows: 24 });
   return f;
 }
-
-test('reconnect retains transcript filtering opt-in and accepts full replies from older daemons', async t => {
-  const first = new FakeConnection(), second = new FakeConnection();
-  const message = { role: 'assistant', content: [{ type: 'thinking', thinking: 'visible', thinkingSignature: 'opaque' }] };
-  // An older compatible daemon ignores the extra attach option and still returns signatures.
-  first.attachedSnapshot.live.messages = [message];
-  second.attachedSnapshot.live.messages = [message];
-  const { connection } = await setup(t, first, second);
-  const initial = await connection.request('attach', { slotId: 'slot', filterTranscript: true });
-  assert.equal(initial.live.messages[0].content[0].thinkingSignature, 'opaque');
-  let recovered: Snapshot | undefined;
-  connection.onReconnect(value => { recovered = value; });
-  first.drop(); await tick(t, 10);
-  assert.deepEqual(second.calls[0].params, { slotId: 'slot', filterTranscript: true });
-  assert.equal(recovered?.live.messages[0].content[0].thinkingSignature, 'opaque');
-});
-
-test('a later raw attach clears the transcript filtering recovery preference', async t => {
-  const first = new FakeConnection(), second = new FakeConnection();
-  const { connection } = await setup(t, first, second);
-  await connection.request('attach', { slotId: 'slot', filterTranscript: true });
-  await connection.request('attach', { slotId: 'slot', filterTranscript: false });
-  first.drop(); await tick(t, 10);
-  assert.deepEqual(second.calls[0].params, { slotId: 'slot' });
-});
 
 test('initial attach buffers same-chunk events and excludes events covered by its snapshot', async t => {
   const first = new FakeConnection();
   first.autoAttach = false;
   first.initialEvents = [event(1)];
   const { connection } = await setup(t, first);
-  const pending = connection.request('attach', { slotId: 'slot' });
+  const pending = connection.request('attach', { slotId: 'slot', columns: 80, rows: 24 });
   first.emit(event(2));
   first.calls[0].result.resolve(snapshot(2));
   first.emit(event(3));
@@ -142,7 +113,7 @@ test('recovery publishes its snapshot before same-chunk events and filters old s
   assert.deepEqual(received, ['disconnect:SSH transport disappeared']);
   assert.equal(count(), 1);
   await tick(t, 10);
-  assert.deepEqual(second.calls.map(({ method, params }) => ({ method, params })), [{ method: 'attach', params: { slotId: 'slot' } }]);
+  assert.deepEqual(second.calls.map(({ method, params }) => ({ method, params })), [{ method: 'attach', params: { slotId: 'slot', columns: 80, rows: 24 } }]);
   second.emit(event(19));
   second.calls[0].result.resolve(snapshot(20));
   second.emit(event(20));
@@ -196,7 +167,7 @@ test('a failed original attach never enables recovery', async t => {
   const first = new FakeConnection();
   first.autoAttach = false;
   const { connection, count } = await setup(t, first);
-  const rejected = assert.rejects(connection.request('attach', { slotId: 'missing' }), /Slot not found/);
+  const rejected = assert.rejects(connection.request('attach', { slotId: 'missing', columns: 80, rows: 24 }), /Slot not found/);
   first.calls[0].result.reject(new Error('Slot not found'));
   await rejected;
   first.drop();
@@ -395,6 +366,8 @@ test('temporary factory failures back off to the maximum; a handshake timeout is
   const { connection, count } = await attached(t, first, temporary, refused, unavailable, second);
   const retries: ConnectionRetry[] = [];
   connection.onRetry(retry => retries.push(retry));
+  const snapshots: number[] = [];
+  connection.onReconnect(value => snapshots.push(value.seq));
   assert.equal(connection.reconnecting, false);
   first.drop();
   assert.equal(connection.reconnecting, true);
@@ -407,8 +380,6 @@ test('temporary factory failures back off to the maximum; a handshake timeout is
   await tick(t, 1); assert.equal(count(), 4);
   await tick(t, 39); assert.equal(count(), 4);
   await tick(t, 1); assert.equal(count(), 5);
-  const snapshots: number[] = [];
-  connection.onReconnect(value => snapshots.push(value.seq));
   assert.deepEqual(snapshots, [0]);
   assert.equal(connection.reconnecting, false);
   assert.deepEqual(retries, [
@@ -421,7 +392,7 @@ test('temporary factory failures back off to the maximum; a handshake timeout is
   assert.equal(retries.length, 3, 'success clears the latest retry and stops notifications');
 });
 
-test('late subscriptions receive the recovered snapshot and its bounded event backlog in order', async t => {
+test('late event subscriptions receive the bounded event backlog after the recovered attachment, in order', async t => {
   const first = new FakeConnection();
   const second = new FakeConnection();
   second.attachedSnapshot = snapshot(20);
@@ -431,10 +402,8 @@ test('late subscriptions receive the recovered snapshot and its bounded event ba
   await tick(t, 10);
   second.emit(event(22));
   const received: string[] = [];
-  const off = connection.onReconnect(value => received.push(`snapshot:${value.seq}`));
   connection.onEvent(value => received.push(`event:${value.seq}`));
-  off();
-  assert.deepEqual(received, ['snapshot:20', 'event:21', 'event:22']);
+  assert.deepEqual(received, ['event:21', 'event:22']);
 });
 
 test('throwing reconnect listeners do not stop event delivery or later recovery', async t => {
@@ -580,7 +549,7 @@ test('default retry delays are one second through ten seconds, capped at ten sec
     throw new Error('network unavailable');
   });
   t.after(() => connection.close());
-  await connection.request('attach', { slotId: 'slot' });
+  await connection.request('attach', { slotId: 'slot', columns: 80, rows: 24 });
   first.drop();
   let expected = 1;
   for (const delay of [1000, 2000, 4000, 8000, 10_000, 10_000]) {

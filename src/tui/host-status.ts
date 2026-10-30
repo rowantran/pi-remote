@@ -186,7 +186,7 @@ export interface SlotStatus {
 }
 
 /**
- * The status panel for native slots: the same host, latency and daemon rows as the other
+ * The status panel for slots: the same host, latency and daemon rows as the other
  * pickers (statusPanelRows), with Pi's own facts about its session and this client's state.
  */
 export function slotStatusLines(status: SlotStatus, p: Paint): string[] {
