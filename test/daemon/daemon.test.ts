@@ -154,6 +154,8 @@ test('attach returns the current screen; input reaches Pi; events go only to att
   await prompt(one.id, 'hello daemon');
   const screen = await attach(one.id);
   assert.ok(JSON.stringify(screen.messages).includes('echo: hello daemon'));
+  // Pi set the title at startup, before anyone attached; a later attach still gets it.
+  assert.ok(screen.messages.some((message: RecordValue) => message.type === 'terminal' && message.kind === 'title'), 'attach includes the window title');
   assert.equal(screen.busy, false);
   assert.ok(!other.records.some(record => record.type === 'event' && record.slotId === one.id), 'slots isolate their streams');
   await assert.rejects(other.request('input', { slotId: one.id, data: 'x' }), /Attach before sending input/);

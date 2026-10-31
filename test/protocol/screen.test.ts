@@ -31,3 +31,12 @@ test('a new editor clears the history and draft of the previous one', () => {
   state.apply({ type: 'editorInstalled', editor: 'extension', bindings: {} });
   assert.deepEqual(state.snapshot().map(message => message.type), ['editorInstalled']);
 });
+
+test('a snapshot keeps the last window title, but not one-time terminal output', () => {
+  const state = new ScreenState();
+  state.apply({ type: 'terminal', kind: 'title', data: '\x1b]0;π - repo\x07' });
+  state.apply({ type: 'terminal', kind: 'bell', data: '\x07' });
+  state.apply({ type: 'terminal', kind: 'notify', data: '\x1b]9;done\x07' });
+  state.apply({ type: 'terminal', kind: 'title', data: '\x1b]0;π - renamed - repo\x07' });
+  assert.deepEqual(state.snapshot(), [{ type: 'terminal', kind: 'title', data: '\x1b]0;π - renamed - repo\x07' }]);
+});
