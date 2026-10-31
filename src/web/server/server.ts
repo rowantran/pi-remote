@@ -7,7 +7,7 @@ import type { Socket } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
 import { Connection, handshake } from '../../client/connection.js';
-import { ensureDaemon } from '../../daemon/launch.js';
+import { connectDaemon, DaemonNotRunningError } from '../../daemon/launch.js';
 import { MAX_FRAME_BYTES } from '../../protocol/jsonl.js';
 import type { DaemonMethod } from '../../protocol/methods.js';
 import { defaultBrowserConfig, type BrowserConfig } from './browser-config.js';
@@ -275,7 +275,8 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       ws.send(text, error => { if (error) fail('WebSocket output failed', 1011); });
     }
     const connected = (async () => {
-      const socket = await (options.openDaemon ?? (() => ensureDaemon(options.daemonStateDir)))();
+      // Never start the daemon here: it would inherit this service's environment.
+      const socket = await (options.openDaemon ?? (() => connectDaemon(options.daemonStateDir)))();
       const connection = new Connection(socket, socket, () => socket.destroy());
       peer.connection = connection;
       if (closing || ws.readyState !== WebSocket.OPEN) { connection.close(); throw new Error('WebSocket closed'); }
@@ -285,7 +286,9 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       connection.onDisconnect(() => fail('Daemon disconnected; commands were not retried', 1011));
       return connection;
     })();
-    void connected.catch(() => fail('Daemon connection failed; commands were not retried', 1011));
+    void connected.catch(error => fail(error instanceof DaemonNotRunningError
+      ? 'No pi-remote daemon is running; start one with pi-remote over SSH'
+      : 'Daemon connection failed; commands were not retried', 1011));
     ws.on('message', (data: RawData, binary: boolean) => {
       if (ws.readyState !== WebSocket.OPEN) return;
       const bytes = Array.isArray(data) ? data.reduce((sum, item) => sum + item.length, 0) : data.byteLength;

@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { webRequest, type WebRequestOptions } from './http.js';
 import { createConnection, createServer, type Socket } from 'node:net';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test, { type TestContext } from 'node:test';
 import { WebSocket } from 'ws';
@@ -211,6 +211,18 @@ test('JSON requests/results/events proxy through a verified private daemon conne
   await delay(30);
   assert.equal(f.opens(), 1);
   assert.equal(f.requests.filter(record => record.method === 'rpc').length, 2);
+});
+
+test('WebSockets never start a missing daemon and close with a clear reason', async t => {
+  const daemonStateDir = join(await mkdtemp('/tmp/pi-web-daemon-'), 'state');
+  t.after(() => rm(dirname(daemonStateDir), { recursive: true, force: true }));
+  const f = await fixture(t, { openDaemon: undefined, daemonStateDir });
+  const p = await f.pair();
+  const client = f.ws({ Cookie: p.cookie });
+  const [code, reason] = await once(client, 'close');
+  assert.equal(code, 1011);
+  assert.match(String(reason), /No pi-remote daemon is running/);
+  await assert.rejects(lstat(daemonStateDir), { code: 'ENOENT' });
 });
 
 test('revocation from a different CLI store invalidates sessions and closes active WebSockets', async t => {

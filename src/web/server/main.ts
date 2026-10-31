@@ -7,7 +7,7 @@ import { defaultWebStateDir, startWebServer } from './server.js';
 import { PushService } from './push.js';
 import { startActivityMonitor } from './activity-monitor.js';
 import { Connection, handshake } from '../../client/connection.js';
-import { ensureDaemon } from '../../daemon/launch.js';
+import { connectDaemon } from '../../daemon/launch.js';
 
 const HELP = `Usage:
   pi-remote serve --origin https://HOST --allow-user LOGIN [--allow-user LOGIN ...]
@@ -83,7 +83,8 @@ export async function serveMain(args: string[]): Promise<void> {
     push = await PushService.open({ stateDir, origin: server.origin, devices: server.devices, tabs: server.tabs, allowedLogins });
     monitor = await startActivityMonitor({
       connect: async () => {
-        const socket = await ensureDaemon(flags.get('--state-dir'));
+        // Never start the daemon here: it would inherit this systemd service's environment.
+        const socket = await connectDaemon(flags.get('--state-dir'));
         const connection = new Connection(socket, socket, () => socket.destroy());
         try { await handshake(connection); return connection; }
         catch (error) { connection.close(); throw error; }
