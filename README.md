@@ -194,6 +194,7 @@ pi-remote client -> SSH stdio -> bridge -> private Unix socket
 ```
 
 - One on-demand detached daemon per remote state directory. No network listener or systemd unit.
+- Only the SSH bridge and `--local` commands start the daemon. It passes its environment to every Pi slot, so it must start from your shell environment, which includes provider settings such as `OPENAI_BASE_URL`. The phone web server only connects to a running daemon.
 - Default installation: `~/.local/share/pi-remote/`. Default daemon state: `~/.pi/remote/`.
 - SSH uses your existing host config with batch authentication and keepalives.
 - A `0700` state directory and `0600` Unix socket restrict local access. This is not a sandbox: attached clients have the same authority as the remote Pi user, including uploading pasted files to the remote temporary directory.

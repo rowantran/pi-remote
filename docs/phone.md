@@ -239,6 +239,10 @@ running daemon remains usable but reports notifications as unsupported. Upgrade/
 at a safe time; starting the web service does **not** restart it. Do not interrupt an active session
 just to enable push. The monitor probes again automatically after a daemon upgrade.
 
+The web service never starts the daemon. A daemon started by the systemd service would pass that
+service's minimal environment to every Pi slot. If no daemon is running, the monitor keeps retrying
+with backoff, and phone sessions close until a `pi-remote` command over SSH starts the daemon.
+
 Push does not depend on the browser WebSocket staying alive. Every received push requests a visible
 notification, even with the page open; there are no silent pushes or background socket workarounds.
 Tapping it opens the relevant session after normal Tailscale and device authentication. Delivery is

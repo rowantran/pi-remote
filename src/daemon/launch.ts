@@ -50,12 +50,37 @@ async function launchDaemon(absolute: string): Promise<void> {
   } finally { await log.close(); }
 }
 
+export class DaemonNotRunningError extends Error {
+  constructor(stateDir: string, options?: ErrorOptions) {
+    super(`No pi-remote daemon is running for ${stateDir}. Open a session with pi-remote over SSH, or a --local command, to start it.`, options);
+    this.name = 'DaemonNotRunningError';
+  }
+}
+
+/** Connect to a running daemon without starting one. The daemon passes its environment to
+ * every Pi slot, so only the SSH bridge and --local CLI commands, which run in the user's
+ * shell environment, may start it. Long-running services such as the web server use this. */
+export async function connectDaemon(stateDir = defaultStateDir()): Promise<Socket> {
+  const absolute = resolve(stateDir);
+  // Do not create the state directory: a missing directory just means no daemon has run.
+  try { await lstat(absolute); }
+  catch (error: any) { if (error.code === 'ENOENT') throw new DaemonNotRunningError(absolute, { cause: error }); throw error; }
+  await ensurePrivateStateDir(absolute);
+  try { return await openSocket(absolute); }
+  catch (error: any) {
+    if (['ENOENT', 'ECONNREFUSED'].includes(error.code)) throw new DaemonNotRunningError(absolute, { cause: error });
+    throw error;
+  }
+}
+
 export interface DaemonStartupOptions {
   /** Test seam for launching without starting a real daemon. */
   launch?: (stateDir: string) => Promise<void>;
   timeoutMs?: number;
 }
-/** Detached daemon startup; clients NEVER delete daemon locks or sockets. */
+/** Detached daemon startup; clients NEVER delete daemon locks or sockets. The new daemon
+ * inherits this process's environment, so call this only from the SSH bridge and --local
+ * CLI commands. Services must use connectDaemon. */
 export async function ensureDaemon(stateDir = defaultStateDir(), options: DaemonStartupOptions = {}): Promise<Socket> {
   const absolute = await ensurePrivateStateDir(stateDir);
   try { return await openSocket(absolute); }

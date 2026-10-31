@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import test, { type TestContext } from 'node:test';
 import { Connection, handshake, connectSsh } from '../../src/client/connection.js';
 import { shellQuote } from '../../src/protocol/shell.js';
-import { ensureDaemon, ensurePrivateStateDir } from '../../src/daemon/launch.js';
+import { connectDaemon, DaemonNotRunningError, ensureDaemon, ensurePrivateStateDir } from '../../src/daemon/launch.js';
 import { socketPath } from '../../src/protocol/paths.js';
 import { PI_VERSION, PROTOCOL_VERSION, type RemoteEvent } from '../../src/protocol/types.js';
 
@@ -329,6 +329,37 @@ test('existing daemon socket connects without launching or inspecting/removing o
   });
   const socket = await ensureDaemon(dir, { launch: async () => { assert.fail('Must not launch'); } });
   socket.destroy();
+});
+
+test('connectDaemon connects to a running daemon', { timeout: 3000 }, async t => {
+  const dir = await temporaryDir(t);
+  const peers = new Set<Socket>();
+  const server = createServer(socket => { peers.add(socket); socket.on('close', () => peers.delete(socket)); });
+  server.listen(socketPath(dir));
+  await once(server, 'listening');
+  t.after(async () => {
+    for (const peer of peers) peer.destroy();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  });
+  const socket = await connectDaemon(dir);
+  socket.destroy();
+});
+
+test('connectDaemon never starts a daemon or creates state', { timeout: 3000 }, async t => {
+  const root = await temporaryDir(t);
+  const missing = join(root, 'missing');
+  await assert.rejects(connectDaemon(missing), DaemonNotRunningError);
+  await assert.rejects(lstat(missing), { code: 'ENOENT' });
+  // A stale, refused socket is also "not running"; nothing launches and nothing is removed.
+  const server = createServer();
+  server.listen(join(root, 'staging.sock'));
+  await once(server, 'listening');
+  await rename(join(root, 'staging.sock'), socketPath(root));
+  await new Promise<void>(resolve => server.close(() => resolve()));
+  const inode = (await lstat(socketPath(root))).ino;
+  await assert.rejects(connectDaemon(root), DaemonNotRunningError);
+  assert.equal((await lstat(socketPath(root))).ino, inode);
+  await assert.rejects(lstat(join(root, 'daemon.log')), { code: 'ENOENT' });
 });
 
 test('launch rejects shared log permissions and log symlinks without modifying them', async t => {
