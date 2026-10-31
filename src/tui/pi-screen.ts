@@ -464,10 +464,16 @@ export class PiScreen {
     else if (this.options.editorFactory) editor = this.options.editorFactory(this.tui, theme, this.keybindings) as LocalEditor;
     if (editor) {
       // Pi runs these actions. Locally they must not change the text; Pi reports any change.
+      // The exception is app.clear (Ctrl+C by default): Pi's first press only empties the
+      // editor, so the local copy does the same at once. A second press within 500 ms makes
+      // Pi exit; that still happens only on the remote. The bindings come from the remote Pi,
+      // so a rebound app.clear is matched here too.
       editor.onSubmit = () => {};
       if (editor.actionHandlers) {
         editor.actionHandlers.clear();
-        for (const id of Object.keys(bindings)) if (id.startsWith('app.')) editor.actionHandlers.set(id, () => {});
+        for (const id of Object.keys(bindings)) {
+          if (id.startsWith('app.')) editor.actionHandlers.set(id, id === 'app.clear' ? () => editor.setText('') : () => {});
+        }
         editor.onEscape = () => {};
         editor.onCtrlD = () => {};
         editor.onPasteImage = () => {};

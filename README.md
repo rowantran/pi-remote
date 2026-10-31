@@ -9,7 +9,7 @@ The remote daemon runs the normal interactive `pi` program in a terminal (PTY) i
 The laptop client arranges those sections in Pi's fullscreen layout and keeps two parts local:
 
 - **Scrolling:** the transcript scrolls in a local view, with no network round trip.
-- **Typing:** a local copy of Pi's editor shows each key at once. Every key also goes to Pi, which reports its exact editor state; the local copy follows Pi when they differ (for example after Pi clears the editor on submit).
+- **Typing:** a local copy of Pi's editor shows each key at once. Every key also goes to Pi, which reports its exact editor state; the local copy follows Pi when they differ (for example after Pi clears the editor on submit). Pi's clear-editor key (`app.clear`, Ctrl+C by default) also clears the local copy at once; pressing it twice still makes Pi exit.
 
 Everything else is Pi itself: pickers (`/model`, `/tree`, `/resume`, settings), dialogs, extension UI, the footer and tool output. Those keys go straight to Pi and show Pi's result one round trip later. While Pi's autocomplete list is open, its navigation keys also go to Pi.
 
