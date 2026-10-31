@@ -126,8 +126,10 @@ test('slots run Pi in a PTY and share its screen, size and activity with clients
 
   // A second client gets the current screen at once, and takes the size when it types.
   const second = await connect();
-  await second.attach(created.id, 80, 24);
+  const attached = await second.attach(created.id, 80, 24);
   assert.ok(second.text().includes('DAEMON_SHELL_OK'), 'attach returns the current screen');
+  // Pi set the window title at startup, before this client attached.
+  assert.ok((attached.messages as PiExtensionMessage[]).some(message => message.type === 'terminal' && message.kind === 'title' && message.data.includes('π - ')), 'attach returns the window title');
   assert.equal(second.frameWidth(), 100, 'attaching alone does not take the size');
   await second.request('input', { slotId: created.id, data: 'x' });
   await second.until(() => second.frameWidth() === 80, 'the new width');

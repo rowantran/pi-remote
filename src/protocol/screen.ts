@@ -1,6 +1,7 @@
 import { applyDiff, diffLines, SECTION_COUNT, type PiExtensionMessage, type LineDiff } from './pi-extension.js';
 
 type Frame = Extract<PiExtensionMessage, { type: 'frame' }>;
+type TerminalOutput = Extract<PiExtensionMessage, { type: 'terminal' }>;
 const HISTORY_LIMIT = 1000;
 
 /**
@@ -16,6 +17,9 @@ export class ScreenState {
   private editor?: Extract<PiExtensionMessage, { type: 'editor' }>;
   private session?: Extract<PiExtensionMessage, { type: 'session' }>;
   private history: string[] = [];
+  /** Pi sets the window title once at startup and again on session changes and renames, so a
+   * client that attaches later needs the last one. Other terminal output is a one-time event. */
+  private title?: TerminalOutput;
 
   apply(message: PiExtensionMessage): void {
     switch (message.type) {
@@ -40,7 +44,8 @@ export class ScreenState {
         if (this.history.length > HISTORY_LIMIT) this.history.splice(0, this.history.length - HISTORY_LIMIT);
         break;
       case 'session': this.session = message; break;
-      case 'activity': case 'terminal': case 'clientAction': break;
+      case 'terminal': if (message.kind === 'title') this.title = message; break;
+      case 'activity': case 'clientAction': break;
     }
   }
 
@@ -59,6 +64,7 @@ export class ScreenState {
       messages.push({ ...this.frame, reset: true, sections });
     }
     if (this.editor) messages.push(this.editor);
+    if (this.title) messages.push(this.title);
     return messages;
   }
 }
