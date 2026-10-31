@@ -88,6 +88,8 @@ socket.on('data', chunk => {
   }
 });
 socket.on('connect', () => {
+  // Like Pi, set the window title once at startup.
+  process.stdout.write(`\x1b]0;π - ${process.cwd().split('/').pop()}\x07`);
   send({ type: 'editorInstalled', editor: 'default', bindings: {} });
   frame(true);
   setTimeout(session, Number(process.env.PI_FIXTURE_SLOW_START ?? 0));
