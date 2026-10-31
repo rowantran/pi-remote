@@ -100,6 +100,42 @@ test('app shortcuts go to Pi without changing local text', async () => {
   assert.equal(keys()[1]!.key, '\x0c');
 });
 
+test("Pi's clear key empties the local editor at once, and Pi's matching report changes nothing", async () => {
+  const { client, receive, keys, text, barrier } = setup();
+  receive({ type: 'editorInstalled', editor: 'default', bindings: { ...bindings, 'app.clear': 'ctrl+c' } });
+  for (const key of 'draft') client.input(key);
+  client.input('\x03'); // Ctrl+C
+  assert.equal(text(), '', 'cleared before Pi replies');
+  assert.deepEqual(client.editor!.getCursor(), { line: 0, col: 0 });
+  await flush();
+  assert.deepEqual(keys().at(-1), { key: '\x03', barrier: 6 }, 'Pi still gets the key, so a second press can exit');
+  receive({ type: 'editor', barrier: barrier(6), state: state('') });
+  assert.equal(text(), '');
+  assert.equal(client.unconfirmedKeys, 0);
+});
+
+test("the local clear follows the remote's binding for app.clear", async () => {
+  const { client, receive, text } = setup();
+  receive({ type: 'editorInstalled', editor: 'default', bindings: { ...bindings, 'app.clear': 'ctrl+x' } });
+  for (const key of 'draft') client.input(key);
+  client.input('\x03'); // Ctrl+C is not the clear key here.
+  assert.equal(text(), 'draft');
+  client.input('\x18'); // Ctrl+X
+  assert.equal(text(), '');
+});
+
+test('if Pi does not clear on the clear key, its report restores the text', async () => {
+  const { client, receive, text, barrier } = setup();
+  receive({ type: 'editorInstalled', editor: 'default', bindings: { ...bindings, 'app.clear': 'ctrl+c' } });
+  for (const key of 'ab') client.input(key);
+  client.input('\x03');
+  client.input('c');
+  assert.equal(text(), 'c');
+  // For example, a remote extension handled Ctrl+C itself.
+  await flush(); receive({ type: 'editor', barrier: barrier(3), state: state('ab') });
+  assert.equal(text(), 'abc');
+});
+
 test('while Pi shows its dropdown, dropdown keys wait for Pi and its rows are shown', async () => {
   const { client, receive, keys, text, barrier } = setup();
   client.input('/');
