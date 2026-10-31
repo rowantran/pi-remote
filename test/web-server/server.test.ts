@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { webRequest, type WebRequestOptions } from './http.js';
 import { createConnection, createServer, type Socket } from 'node:net';
 import { dirname, join } from 'node:path';
@@ -21,8 +21,14 @@ const HOST = new URL(ORIGIN).host;
 const proxyHeaders = { Host: 'localhost', 'X-Forwarded-Host': HOST, 'X-Forwarded-Proto': 'https' };
 const standard = { ...proxyHeaders, 'Tailscale-User-Login': LOGIN };
 
+/**
+ * A new directory under /tmp, which keeps Unix socket paths short. Resolved, because the web
+ * server rejects state paths with symlinks and macOS's /tmp is a symlink to /private/tmp.
+ */
+const tempDir = async (prefix: string) => realpath(await mkdtemp(join('/tmp', prefix)));
+
 async function fixture(t: TestContext, overrides: Partial<WebServerOptions> = {}) {
-  const root = await mkdtemp('/tmp/pi-web-');
+  const root = await tempDir('pi-web-');
   const stateDir = join(root, 'state');
   const staticDir = join(root, 'static');
   await mkdir(staticDir, { mode: 0o700 });
@@ -43,7 +49,18 @@ async function fixture(t: TestContext, overrides: Partial<WebServerOptions> = {}
     }, () => socket.destroy());
   });
   await new Promise<void>(accept => daemon.listen(join(root, 'fake-daemon.sock'), accept));
-  const server = await startWebServer({
+  const clients = new Set<WebSocket>();
+  let running: Awaited<ReturnType<typeof startWebServer>> | undefined;
+  // Register cleanup before starting the server: if startup throws, the fake daemon's
+  // listener must still close, or it keeps the test process alive.
+  t.after(async () => {
+    for (const client of clients) client.terminate();
+    await running?.close();
+    for (const transport of transports) transport.destroy();
+    await new Promise<void>(accept => daemon.close(() => accept()));
+    await rm(root, { recursive: true, force: true });
+  });
+  const server = running = await startWebServer({
     origin: ORIGIN, allowedLogins: [LOGIN], stateDir, staticDir,
     checkTailscale: async () => {},
     openDaemon: async () => {
@@ -53,14 +70,6 @@ async function fixture(t: TestContext, overrides: Partial<WebServerOptions> = {}
       return socket;
     },
     ...overrides,
-  });
-  const clients = new Set<WebSocket>();
-  t.after(async () => {
-    for (const client of clients) client.terminate();
-    await server.close();
-    for (const transport of transports) transport.destroy();
-    await new Promise<void>(accept => daemon.close(() => accept()));
-    await rm(root, { recursive: true, force: true });
   });
   const request = (path: string, options: WebRequestOptions & { omitIdentity?: boolean } = {}) =>
     webRequest(server.socketPath, path, { ...options, headers: { ...(options.omitIdentity ? proxyHeaders : standard), ...options.headers } });
@@ -214,7 +223,7 @@ test('JSON requests/results/events proxy through a verified private daemon conne
 });
 
 test('WebSockets never start a missing daemon and close with a clear reason', async t => {
-  const daemonStateDir = join(await mkdtemp('/tmp/pi-web-daemon-'), 'state');
+  const daemonStateDir = join(await tempDir('pi-web-daemon-'), 'state');
   t.after(() => rm(dirname(daemonStateDir), { recursive: true, force: true }));
   const f = await fixture(t, { openDaemon: undefined, daemonStateDir });
   const p = await f.pair();
@@ -345,7 +354,7 @@ test('listener never unlinks an existing live socket, unsafe state, or replaceme
 });
 
 test('wrong ownership, state-file symlinks, shared state files, and socket symlinks fail closed', async t => {
-  const root = await mkdtemp('/tmp/pi-web-unsafe-');
+  const root = await tempDir('pi-web-unsafe-');
   t.after(() => rm(root, { recursive: true, force: true }));
   const options = { origin: ORIGIN, allowedLogins: [LOGIN], stateDir: root, checkTailscale: async () => {} };
   await symlink('/tmp/missing-web-socket', join(root, 'web.sock'));
@@ -363,7 +372,7 @@ test('wrong ownership, state-file symlinks, shared state files, and socket symli
 });
 
 test('startup rejects Funnel, inspection failures, wildcard identities, and non-HTTPS production origins', async t => {
-  const root = await mkdtemp('/tmp/pi-web-policy-');
+  const root = await tempDir('pi-web-policy-');
   t.after(() => rm(root, { recursive: true, force: true }));
   const base = { origin: ORIGIN, allowedLogins: [LOGIN], stateDir: root, checkTailscale: async () => {} };
   await assert.rejects(startWebServer({ ...base, allowedLogins: [] }), /allowlist/);
@@ -389,7 +398,7 @@ test('source/release static bundle paths both point at dist/web, not src/web', (
 });
 
 test('CLI pair/list/revoke commands share private state and print a code only for explicit pairing', async t => {
-  const root = await mkdtemp('/tmp/pi-web-cli-');
+  const root = await tempDir('pi-web-cli-');
   t.after(() => rm(root, { recursive: true, force: true }));
   const output: string[] = [];
   t.mock.method(process.stdout, 'write', (text: string) => { output.push(String(text)); return true; });
