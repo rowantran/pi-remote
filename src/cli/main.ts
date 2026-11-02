@@ -339,7 +339,9 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     const slot = (await connection.request('list')).find(info => info.id === slotId);
     if (!slot) throw new Error('Slot not found');
     const { runTerminalSession } = await import('../tui/terminal-session.js');
-    await runTerminalSession(connection, slot, { ...options.ui, host: host ?? 'local' });
+    await runTerminalSession(connection, slot, { ...options.ui, host: host ?? 'local',
+      attachContext: { ...options.ui, host, local, stateDir: local ? resolve(stateDir ?? defaultStateDir()) : stateDir,
+        remoteBin: options.values.get('--remote-bin'), reconnect: !options.flags.has('--no-reconnect') } });
   } finally { connection.close(); }
 }
 

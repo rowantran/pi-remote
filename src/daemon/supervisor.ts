@@ -11,7 +11,7 @@ import { readJsonl, writeJsonl } from '../protocol/jsonl.js';
 import { ACTIVITY_CAPABILITY, activitySlot, activitySource, type ActivitySnapshot } from '../protocol/notification-stream.js';
 import { PiTerminal } from './pi-terminal.js';
 import { ScreenState } from '../protocol/screen.js';
-import type { PiExtensionMessage, TerminalAnswers } from '../protocol/pi-extension.js';
+import type { ControlMessage, PiExtensionMessage, TerminalAnswers } from '../protocol/pi-extension.js';
 import { remoteSessionEnv } from '../protocol/remote-session.js';
 import { socketPath } from '../protocol/paths.js';
 import type { FileMethod, MethodResult, ClientTerminal, SessionInfo } from '../protocol/methods.js';
@@ -38,6 +38,11 @@ const KITTY_FLAGS = 7;
 /** Terminal size until a client attaches. */
 const DEFAULT_SIZE = { columns: 120, rows: 40 };
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
+/** Opening a pane runs Ghostty's AppleScript on the client, which can take seconds. */
+const OPEN_SLOT_TIMEOUT_MS = 40_000;
+
+type ApiRequest = Extract<PiExtensionMessage, { type: 'createChildSlot' | 'openSlot' }>;
+type ApiResult = Extract<ControlMessage, { type: 'apiResult' }>;
 
 /** One slot's running Pi: its terminal host, its screen copy, and the client that sets its size. */
 interface PiRuntime { host: PiTerminal; screen: ScreenState; owner?: Peer }
@@ -94,6 +99,8 @@ export class Supervisor {
   private creatingRequests = 0;
   private peers = new Set<Peer>();
   private reservedPaths = new Set<string>();
+  /** openSlot requests waiting for the client's open_slot_result, by request ID. */
+  private openRequests = new Map<string, { peer: Peer; finish: (error?: string) => void }>();
   private server?: Server;
   private saves = Promise.resolve();
   private stopping = false;
@@ -174,6 +181,9 @@ export class Supervisor {
     socket.on('error', () => {});
     socket.on('close', () => {
       this.peers.delete(peer);
+      for (const request of [...this.openRequests.values()]) {
+        if (request.peer === peer) request.finish('The client disconnected before it opened the pane');
+      }
       if (peer.slotId) {
         const runtime = this.slots.get(peer.slotId)?.runtime;
         if (runtime?.owner === peer) runtime.owner = undefined;
@@ -354,12 +364,79 @@ export class Supervisor {
       throw error;
     }
     // Final checks and launch are synchronous.
+    return this.launchSide(parent, sessionFile, withSessionDir(parent.args, sessionDir), options.prompt);
+  }
+
+  /** Extension API requests from the Pi extension in `slot`; each gets an apiResult. */
+  private async extensionRequest(slot: Slot, host: PiTerminal, request: ApiRequest): Promise<void> {
+    let reply: ApiResult = { type: 'apiResult', id: request.id };
+    try {
+      if (request.type === 'createChildSlot') {
+        this.creatingRequests++;
+        try {
+          const child = await this.createChildSlot(slot, host, request);
+          reply = { ...reply, slotId: child.id, slotNumber: child.number, ...(child.status === 'exited' ? { error: child.error ?? 'Pi exited' } : {}) };
+        } finally { this.creatingRequests--; }
+      } else await this.openSlot(slot, request.slotId);
+    } catch (error) { reply.error = errorText(error); }
+    host.control(reply);
+  }
+
+  /** A side slot of `parent` from a session file that an extension in the parent's Pi wrote. */
+  private async createChildSlot(parent: Slot, host: PiTerminal, request: Extract<ApiRequest, { type: 'createChildSlot' }>): Promise<SlotInfo> {
+    const checkParent = () => {
+      if (this.stopping) throw new Error('Daemon is shutting down');
+      if (parent.status === 'exited' || parent.stopping || parent.runtime?.host !== host) throw new Error('The parent Pi exited or restarted; no slot was started');
+      const blocked = this.transitionBlocker(parent);
+      if (blocked) throw new Error(blocked);
+    };
+    checkParent();
+    const { prompt, sessionDir } = request;
+    if (prompt !== undefined && (typeof prompt !== 'string' || !prompt.trim())) throw new Error('prompt must be a nonempty string');
+    if (sessionDir !== undefined) string(sessionDir, 'sessionDir');
+    const requested = resolve(parent.cwd, expandHome(string(request.sessionFile, 'sessionFile')));
+    const sessionFile = await this.checkPath(requested).catch(error => {
+      throw error.code === 'ENOENT' ? new Error(`Session file not found: ${requested}`) : error;
+    });
+    try {
+      if (!(await stat(sessionFile)).isFile()) throw new Error('sessionFile must be a file');
+      await this.checkVersion();
+      checkParent();
+      const args = sessionDir === undefined ? parent.args : withSessionDir(parent.args, resolve(parent.cwd, expandHome(sessionDir)));
+      return await this.launchSide(parent, sessionFile, args, prompt);
+    } finally { this.reservedPaths.delete(sessionFile); }
+  }
+
+  /** Ask the client that typed or resized last in `from` to open a pane attached to `slotId`.
+   * Resolves when the client reports the pane open; rejects with the reason otherwise. */
+  private openSlot(from: Slot, slotId: unknown): Promise<void> {
+    const target = this.running(slotId);
+    const owner = from.runtime?.owner;
+    const requestId = randomUUID();
+    return new Promise((resolve, reject) => {
+      const finish = (error?: string) => {
+        clearTimeout(timer);
+        this.openRequests.delete(requestId);
+        if (error) reject(new Error(error)); else resolve();
+      };
+      const timer = setTimeout(() => finish('The client did not report whether the pane opened'), OPEN_SLOT_TIMEOUT_MS);
+      if (!owner || !this.sendToOwner(from, { type: 'clientAction', action: 'openSlot', requestId, slotId: target.id, slotNumber: target.number })) {
+        finish('No pi-remote client is attached to open a pane');
+        return;
+      }
+      this.openRequests.set(requestId, { peer: owner, finish });
+    });
+  }
+
+  /** Start a side slot of `parent` from `sessionFile`. Synchronous up to the launch, so the
+   * caller's final checks still hold. */
+  private async launchSide(parent: Slot, sessionFile: string, args: string[], prompt: string | undefined): Promise<SlotInfo> {
     const slot: Slot = { id: randomUUID(), number: this.nextSlotNumber++, parentSlotId: parent.id,
-      cwd: parent.cwd, createdAt: new Date().toISOString(), args: withSessionDir(parent.args, sessionDir), sessionFile,
+      cwd: parent.cwd, createdAt: new Date().toISOString(), args, sessionFile,
       status: 'starting', live: idle(), ui: new Map(), seq: 0, state: {},
       changing: false, restarting: false, mutations: 0, incarnation: 0, creating: true };
     this.slots.set(slot.id, slot);
-    try { this.launch(slot, options.prompt); }
+    try { this.launch(slot, prompt); }
     catch (error) { this.finishExit(slot, new Error(errorText(error))); }
     await this.startupGrace(slot);
     // Once allocated, always return the ID. A launch/prompt/save failure is not a safe
@@ -412,10 +489,11 @@ export class Supervisor {
   private extensionMessage(slot: Slot, message: PiExtensionMessage): void {
     // A clipboard write and a pi-remote command belong to the client that acted last.
     if ((message.type === 'terminal' && message.kind === 'clipboard') || message.type === 'clientAction') {
-      const owner = slot.runtime!.owner;
-      if (owner && !owner.socket.destroyed && owner.slotId === slot.id) {
-        this.send(owner, { type: 'event', slotId: slot.id, seq: ++slot.seq, event: { type: 'screen', message } });
-      }
+      this.sendToOwner(slot, message);
+      return;
+    }
+    if (message.type === 'createChildSlot' || message.type === 'openSlot') {
+      void this.extensionRequest(slot, slot.runtime!.host, message);
       return;
     }
     slot.runtime!.screen.apply(message);
@@ -442,6 +520,14 @@ export class Supervisor {
     if (event.type === 'agent_settled' || (event.type === 'compaction_end' && !live.busy)) {
       slot.activityAborted = false; slot.activityRetryError = false;
     }
+  }
+
+  /** Send `message` only to the client that typed or resized last. False when it has gone. */
+  private sendToOwner(slot: Slot, message: PiExtensionMessage): boolean {
+    const owner = slot.runtime?.owner;
+    if (!owner || owner.socket.destroyed || owner.slotId !== slot.id) return false;
+    this.send(owner, { type: 'event', slotId: slot.id, seq: ++slot.seq, event: { type: 'screen', message } });
+    return true;
   }
 
   /** The client that typed or resized last sets Pi's terminal size and appearance. */
@@ -788,6 +874,14 @@ export class Supervisor {
             if (slot.runtime.owner !== peer) this.takeSize(slot, peer);
             slot.runtime.host.write(params.data);
             data = {} satisfies MethodResult<'input'>;
+            break;
+          }
+          case 'open_slot_result': {
+            const request = this.openRequests.get(string(params.requestId, 'requestId'));
+            if (!request || request.peer !== peer) throw new Error('No such open request for this client');
+            if (params.error !== undefined && typeof params.error !== 'string') throw new Error('error must be a string');
+            request.finish(params.error || undefined);
+            data = {} satisfies MethodResult<'open_slot_result'>;
             break;
           }
           case 'upload': {

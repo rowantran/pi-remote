@@ -71,6 +71,31 @@ Ctrl+/ needs a terminal with the kitty keyboard protocol (Ghostty, kitty, WezTer
 
 Pi's bell, window title, desktop notifications, progress, and clipboard writes (`/copy`, OSC 52) reach your local terminal. `--no-bell` or `"bell": false` mutes the bell.
 
+### Child slots and panes for extensions
+
+Other Pi extensions in a slot can start **child slots** and open slots in new panes, for example a `/side` command that forks the conversation into a slot next to the current one. pi-remote's Pi extension offers this API to the other extensions in the same Pi. Find it with a synchronous `pi.events` call; outside a pi-remote slot, nothing answers:
+
+```ts
+let remote: PiRemoteApi | undefined;
+pi.events.emit('pi-remote:api', { respond: (api: PiRemoteApi) => { remote = api; } });
+if (remote) {
+  const child = await remote.createChildSlot({ sessionFile, sessionDir, prompt });
+  await remote.openSlot({ slotId: child.slotId });
+}
+```
+
+The types and full contract are in [`src/protocol/extension-api.ts`](src/protocol/extension-api.ts); copy them into your extension. In short:
+
+- `createChildSlot({ sessionFile, sessionDir?, prompt? })` starts a new Pi process for `sessionFile` (which the caller writes, for example a fork), in the same directory and with the same Pi options as this slot. `sessionDir` replaces the session directory, so `/resume`, `/new` and `/fork` in the child use it. `prompt` is sent once as the child's first message; reattaching or reloading never sends it again. It resolves with the child's `slotId` and `slotNumber`, and rejects when no slot was started.
+- `openSlot({ slotId })` asks the pi-remote client where you typed or resized last to open a pane attached to that slot. It resolves when the pane is open and rejects with the reason otherwise, so the extension can show it in Pi.
+- `slotId`, `slotNumber`: this slot.
+
+A child slot gets the next slot number, and `pi-remote ls` and the pickers list it under its parent. **When it stops:** 90 seconds after its last client leaves, once it is idle (closing its pane is enough). Stopping the parent also stops its children. `/reload` and `pi-remote restart-daemon` keep them.
+
+**Panes are Ghostty splits.** They need macOS, Ghostty 1.3 or newer, `macos-applescript = true` in Ghostty's configuration, and macOS Automation permission for Ghostty. The client runs the split on your laptop, next to its own pane, and sends no keystrokes. The new pane runs this installation's `pi-remote attach` with the same host, daemon and local UI options. It gets only these variables from the client's environment, when set: `PATH`, `SSH_AUTH_SOCK`, `PI_CODING_AGENT_DIR`, `PI_REMOTE_RENDERER_REPO`, and `XDG_CONFIG_HOME`. Credentials and other shell exports are not copied. When the split cannot open (another terminal, or missing permission), the client copies the attach command to the clipboard, and `openSlot` reports why. The phone does not open panes; open the slot from **Sessions**.
+
+By default the split goes to the right in a wide pane and down in a tall one. Set `sideSplit` in the [configuration](#configuration) to `right`, `down`, `left`, or `up` to choose.
+
 ### Picking a session
 
 Run `pi-remote` with no command to open the home picker. It lists active slots with exactly the rows of `pi-remote ls`: number, status, session name (side slots indented under their parent), workspace, attached clients, age, and the first 8 characters of the UUID, with any slot error on the line below. Its header is the same summary line that `ls` prints on a terminal (`devbox · 3 running · 1 stopped`). Type to filter: the search is fuzzy over the session name, number, and directory, and typing a slot number such as `3` or `#3` puts that slot first. Use ↑/↓ (or Ctrl+P/Ctrl+N) to move, Enter to open, and Esc, Ctrl+C, or Ctrl+D to cancel. The last row, **+ New session**, starts a slot in the default directory (`--cwd`, `PI_REMOTE_CWD`, or the config file) and attaches to it. Options such as `--host` work as with other commands: `pi-remote --host otherbox`.
@@ -120,6 +145,7 @@ The local client reads `$XDG_CONFIG_HOME/pi-remote/config.json` (default `~/.con
   "extensions": ["./my-editor.ts"],
   "theme": "dark",
   "bell": true,
+  "sideSplit": "auto",
   "web": { "allowUsers": ["you@example.com"] }
 }
 ```
@@ -129,9 +155,10 @@ The local client reads `$XDG_CONFIG_HOME/pi-remote/config.json` (default `~/.con
 - `extensions`: local copies of Pi extensions that **replace Pi's editor** (for example a prompt caret). With a local copy, typing in that editor stays local; without one, Pi draws the editor and every key waits for the remote. The client runs only the editor part; all other extension behavior runs in remote Pi. Relative paths resolve beside the config file. `--ui-extension PATH` adds more.
 - `theme`: theme for the local parts (editor, scrollbar, search). Defaults to Pi's `theme` setting on this machine. `--theme` overrides it.
 - `bell`: pass Pi's bell to the terminal (default true).
+- `sideSplit`: where [new panes](#child-slots-and-panes-for-extensions) open: `auto` (default), `right`, `down`, `left`, or `up`.
 - `web`: opt in to installing the phone web service on deploy. See [phone setup](docs/phone.md#install-and-run).
 
-`--ui-config PATH` selects another file for `extensions`, `theme`, and `bell` only.
+`--ui-config PATH` selects another file for `extensions`, `theme`, `bell`, and `sideSplit` only.
 
 ### Shell completion (fish, zsh, bash)
 
@@ -179,7 +206,7 @@ An exclusive startup lock serializes stale-daemon reclamation. If the launcher i
 
 Remote Pi loads every extension as usual, and they run there: tools, commands, renderers, widgets, footers, overlays, and dialogs. You see their output because Pi draws it. Only an extension that **replaces Pi's editor** benefits from a local copy (`extensions` above).
 
-Pi and its extensions can detect pi-remote: the daemon sets `PI_REMOTE_SESSION=1`, `PI_REMOTE_SESSION_HOST` (the remote hostname), `PI_REMOTE_SESSION_SLOT` and `PI_REMOTE_SESSION_SLOT_NUMBER` in each Pi process. A footer extension can use these to show the host.
+Pi and its extensions can detect pi-remote: the daemon sets `PI_REMOTE_SESSION=1`, `PI_REMOTE_SESSION_HOST` (the remote hostname), `PI_REMOTE_SESSION_SLOT` and `PI_REMOTE_SESSION_SLOT_NUMBER` in each Pi process. A footer extension can use these to show the host. To start child slots and open panes, use the [extension API](#child-slots-and-panes-for-extensions).
 
 ## Process and security boundaries
 
@@ -268,10 +295,10 @@ cli ──→ web/server ──→ daemon, client, protocol, config, web/shared
         web/client ─→ client, tui, protocol, web/shared
 ```
 
-- `src/pi-extension/pi-remote.ts`: pi-remote's Pi extension, loaded into each slot's Pi. Sends Pi's screen sections, editor state, session facts and lifecycle events; registers `/detach` and `/status`.
-- `src/protocol/pi-extension.ts`, `screen.ts`: the extension's messages, input barriers and line diffs; a screen copy that rebuilds a client from nothing. `types.ts`, `methods.ts`: daemon wire records and methods.
-- `src/daemon/supervisor.ts`: slots, persistence, attachments, input, size ownership, activity, reload and daemon restart. `pi-terminal.ts`, `terminal-output.ts`: runs Pi in a PTY, answers its terminal queries, and forwards bell, title, notification and clipboard output. `launch.ts`, `bridge.ts`, `files.ts`: daemon startup, socket bridging, remote filesystem requests.
+- `src/pi-extension/pi-remote.ts`: pi-remote's Pi extension, loaded into each slot's Pi. Sends Pi's screen sections, editor state, session facts and lifecycle events; registers `/detach` and `/status`; offers the extension API for child slots and panes.
+- `src/protocol/pi-extension.ts`, `screen.ts`: the extension's messages, input barriers and line diffs; a screen copy that rebuilds a client from nothing. `extension-api.ts`: the API for other extensions. `types.ts`, `methods.ts`: daemon wire records and methods.
+- `src/daemon/supervisor.ts`: slots, persistence, attachments, input, size ownership, activity, reload and daemon restart. `pi-terminal.ts`, `terminal-output.ts`: runs Pi in a PTY, answers its terminal queries, and forwards bell, title, notification and clipboard output. `session-dirs.ts`, `side-fork.ts`: session directories, and the fork for the `create` method with `parentSlotId`. `launch.ts`, `bridge.ts`, `files.ts`: daemon startup, socket bridging, remote filesystem requests.
 - `src/client/`: SSH transport, reconnect without replay, legacy filesystem fallback, daemon replacement.
-- `src/tui/pi-screen.ts`: Pi's screen rebuilt locally (layout, scrolling, local editor, status panel). `terminal-session.ts`: connects PiScreen to the daemon and this terminal for one slot (the phone's counterpart is `src/web/client/session-view.ts`). `kitty-keys.ts`: converts legacy key sequences to the kitty keyboard protocol Pi uses. `local-editor.ts`: local copies of editor extensions. `fuzzy-picker.ts`, `slot-table.ts`, `session-table.ts`, `host-status.ts`: pickers, lists and status rows.
+- `src/tui/pi-screen.ts`: Pi's screen rebuilt locally (layout, scrolling, local editor, status panel). `terminal-session.ts`: connects PiScreen to the daemon and this terminal for one slot (the phone's counterpart is `src/web/client/session-view.ts`). `side-launcher.ts`: Ghostty splits for new panes. `kitty-keys.ts`: converts legacy key sequences to the kitty keyboard protocol Pi uses. `local-editor.ts`: local copies of editor extensions. `fuzzy-picker.ts`, `slot-table.ts`, `session-table.ts`, `host-status.ts`: pickers, lists and status rows.
 - `src/web/client/session-view.ts`: PiScreen in the phone's browser terminal.
 - `src/cli/`: commands, connection wiring, shell completion.

@@ -188,6 +188,8 @@ export interface PiScreenOptions {
   encodeKey?: (data: string) => string;
   /** Ctrl+D with an empty editor, or /detach in Pi: leave without stopping Pi. */
   onDetach?: () => void;
+  /** An extension in Pi asked to open a pane attached to slot `slotId` (PiRemoteApi.openSlot). */
+  onOpenSlot?: (request: { requestId: string; slotId: string; slotNumber?: number }) => void;
   /** Output Pi wrote for a real terminal: bell, title, notification, progress, clipboard. */
   onTerminalOutput?: (data: string) => void;
   /** Pi's external-editor key: edit `text` locally and return the result. */
@@ -347,7 +349,8 @@ export class PiScreen {
       case 'editor': this.remoteText = message.state.text; this.confirm(message.barrier, message.state); break;
       case 'clientAction':
         if (message.action === 'detach') this.options.onDetach?.();
-        else if (message.action === 'status' && !this.statusPanel) this.toggleStatus();
+        else if (message.action === 'status') { if (!this.statusPanel) this.toggleStatus(); }
+        else if (message.action === 'openSlot') this.options.onOpenSlot?.(message);
         break;
       case 'terminal': this.options.onTerminalOutput?.(message.data); break;
       case 'editorChrome': {
