@@ -75,3 +75,21 @@ test('reports when no new daemon answers', async () => {
   const { connect } = daemons(old([{ accepted: true, blocked: [], reopen: [] }]), () => { throw new Error('refused'); });
   await assert.rejects(restartDaemon(connect, { pollMs: 1, reconnectTimeoutMs: 20 }), /no new daemon answered.*refused/);
 });
+
+test('a failed Pi check stops before any restart request and leaves the daemon running', async () => {
+  const { connect, calls } = daemons(old([{ accepted: true, blocked: [], reopen: [slot('a', 2)] }]));
+  await assert.rejects(
+    restartDaemon(connect, { pollMs: 1, checkPi: async () => { throw new Error('Remote Pi version 9.9.9 does not match required 1.4.0'); } }),
+    /^Error: Not restarting the daemon: Remote Pi version 9\.9\.9 does not match required 1\.4\.0\. The next daemon would refuse to start and every slot would stay stopped\. The current daemon and its slots keep running\.$/);
+  assert.deepEqual(calls, ['hello']);
+});
+
+test('the Pi check runs before every restart request, so an upgrade while waiting stops the restart', async () => {
+  const busy = { accepted: false, blocked: [{ slot: slot('a', 2), reason: 'busy' }], reopen: [] };
+  const { connect, calls } = daemons(old([busy, busy, { accepted: true, blocked: [], reopen: [slot('a', 2)] }]));
+  let checks = 0;
+  const checkPi = async () => { if (++checks === 3) throw new Error('Remote Pi version 9.9.9 does not match required 1.4.0'); };
+  await assert.rejects(restartDaemon(connect, { pollMs: 1, checkPi }), /Not restarting the daemon/);
+  assert.equal(checks, 3);
+  assert.deepEqual(calls, ['hello', 'restart_daemon', 'restart_daemon'], 'the third request, which the daemon would accept, is never sent');
+});

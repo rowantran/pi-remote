@@ -6,6 +6,7 @@ import { defaultStateDir } from '../protocol/paths.js';
 import { configPath, defaultCwd, defaultHost } from './config.js';
 import { bridge } from '../daemon/bridge.js';
 import { connectCompatibleSsh } from '../client/compat-client.js';
+import { checkRemotePi } from '../client/connection.js';
 import { connectCompatibleLocal } from './connections.js';
 import { ReconnectingConnection } from '../client/reconnect.js';
 import { releaseName, restartDaemon } from '../client/restart-daemon.js';
@@ -257,7 +258,17 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   if (!local && !host) throw new Error(`No host. Use --host HOST, set PI_REMOTE_HOST, add {"host": "HOST"} to ${configPath()}, or use --local.`);
   const factory = () => options.flags.has('--local') ? connectCompatibleLocal(stateDir) : connectCompatibleSsh({ host: host!, remoteBin: options.values.get('--remote-bin'), stateDir });
   if (command === 'restart-daemon') {
-    const result = await restartDaemon(factory, { force: options.flags.has('--force'), log: line => console.error(line) });
+    let warned = false;
+    const checkPi = async () => {
+      if (local) {
+        const { checkPiVersion } = await import('../daemon/pi-version.js');
+        await checkPiVersion({ executable: process.env.PI_REMOTE_PI_BIN ?? 'pi' });
+      } else if (await checkRemotePi({ host: host!, remoteBin: options.values.get('--remote-bin') }) === 'unsupported' && !warned) {
+        warned = true;
+        console.error('The installed release cannot check the Pi version (it predates check-pi); restarting without the check.');
+      }
+    };
+    const result = await restartDaemon(factory, { force: options.flags.has('--force'), log: line => console.error(line), checkPi });
     console.log(`Daemon restarted: ${result.before.pid} (${releaseName(result.before.release)}) -> ${result.after.pid} (${releaseName(result.after.release)})`);
     const active = numberSlots(result.slots).filter(slot => slot.status !== 'exited');
     console.log(formatSlotList(active, result.slots.length - active.length));

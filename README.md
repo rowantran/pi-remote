@@ -21,7 +21,7 @@ The browser client shows the same interface through the daemon, at the phone's w
 
 ## Quick start
 
-Requires Node.js 22.19+ on both machines, working SSH authentication, and **Pi 1.4.0** installed and configured on the remote host. Local dependencies are pinned to the same Pi version; a separate local Pi CLI is not required. Replace `devbox` with your SSH host alias and `/remote/project` with an existing remote directory.
+Requires Node.js 22.19+ on both machines, working SSH authentication, and **Pi 1.4.0** installed and configured on the remote host. Local dependencies are pinned to the same Pi version; a separate local Pi CLI is not required. To move to another Pi version, see [Upgrading Pi](docs/pi-upgrades.md). Replace `devbox` with your SSH host alias and `/remote/project` with an existing remote directory.
 
 From this checkout on your local machine:
 
@@ -258,6 +258,7 @@ pi-remote restart-daemon --force   # interrupts busy slots
 
 This reopens every slot from its session file in a new daemon:
 
+- First, it checks that the host's Pi is the version the installed release requires (`pi-remote check-pi`), because a new daemon refuses to start with another version and would leave every slot stopped. If not, it stops with the reason, and the current daemon and its slots keep running. It checks again before each retry, in case Pi is upgraded while it waits.
 - A slot that is starting or reloading blocks the restart, and a busy slot (Pi working, compacting, or waiting on an extension dialog) blocks it unless `--force` is given. It checks all slots and commits in one step, so a prompt cannot start in between. A refusal locks and stops nothing; the client asks again every 2 seconds until the daemon accepts or you press Ctrl-C.
 - When it accepts, it marks each running slot `reopen` in `slots.json` and exits. The next daemon starts from the installed release and starts those slots again from their session files, with the same slot IDs, numbers and launch arguments.
 - Attached clients reconnect automatically and show the same slots. Persisted history remains; in-memory state such as model or thinking-level changes that Pi did not save is discarded.
@@ -276,6 +277,8 @@ npm run test:mobile     # phone smoke in Chromium (builds first)
 # Try local changes without deploying: a local daemon runs Pi from this machine.
 pi-remote new --local --cwd ~/project
 ```
+
+Pi upgrades: [docs/pi-upgrades.md](docs/pi-upgrades.md) lists every assumption pi-remote makes about Pi and the test or manual check for each.
 
 `test/tui/stock-screen.test.ts` runs stock Pi and `pi-remote new --local` side by side in headless terminals and compares them cell by cell (text, colors, attributes). `test/daemon/real-pi.test.ts` runs the real pinned Pi CLI in a daemon; `test/daemon/daemon.test.ts` uses a fast deterministic stand-in (`test/fixtures/fixture-pi.mjs`).
 

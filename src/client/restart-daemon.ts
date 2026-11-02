@@ -12,6 +12,11 @@ export interface RestartOptions {
   log?: (line: string) => void;
   pollMs?: number;
   reconnectTimeoutMs?: number;
+  /**
+   * Rejects when the next daemon would refuse to start because of the host's Pi version.
+   * Called before every restart request, since Pi can be upgraded while this waits.
+   */
+  checkPi?: () => Promise<void>;
 }
 
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -30,6 +35,11 @@ export async function restartDaemon(connect: () => Promise<RemoteConnection>, op
     before = await connection.request('hello', { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION });
     let waiting = '';
     for (;;) {
+      // A daemon that refuses to start reopens nothing, so every slot would stay stopped.
+      try { await options.checkPi?.(); }
+      catch (error) {
+        throw new Error(`Not restarting the daemon: ${(error as Error).message}. The next daemon would refuse to start and every slot would stay stopped. The current daemon and its slots keep running.`, { cause: error });
+      }
       try { outcome = await connection.request('restart_daemon', options.force ? { force: true } : {}); }
       catch (error: any) {
         if (!/^Unknown daemon method/.test(error.message)) throw error;
