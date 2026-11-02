@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { PassThrough, type Readable, type Writable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import test, { type TestContext } from 'node:test';
-import { Connection, handshake, connectSsh } from '../../src/client/connection.js';
+import { Connection, handshake, checkRemotePi, connectSsh } from '../../src/client/connection.js';
 import { shellQuote } from '../../src/protocol/shell.js';
 import { connectDaemon, DaemonNotRunningError, ensureDaemon, ensurePrivateStateDir } from '../../src/daemon/launch.js';
 import { socketPath } from '../../src/protocol/paths.js';
@@ -375,4 +375,21 @@ test('launch rejects shared log permissions and log symlinks without modifying t
   await symlink(target, log);
   await assert.rejects(ensureDaemon(dir));
   assert.equal(await readFile(target, 'utf8'), 'unchanged');
+});
+
+test('checkRemotePi runs the installed launcher\'s check-pi and reports its outcome', async t => {
+  // The fake ssh answers by the last argument, the remote command.
+  await fakeSsh(t, `const command = process.argv.at(-1);
+const host = process.argv.at(-2);
+if (command !== \`"$HOME"/'.local/share/pi-remote/bin/pi-remote' check-pi\` && command !== "'/opt/pi remote' check-pi") process.exit(64);
+if (host === 'ok') process.exit(0);
+if (host === 'old') { process.stderr.write("Unknown command 'check-pi'. See --help.\\n"); process.exit(1); }
+process.stderr.write('Remote Pi version 9.9.9 does not match required ${PI_VERSION}\\n');
+process.exit(1);
+`);
+  assert.equal(await checkRemotePi({ host: 'ok' }), 'checked');
+  assert.equal(await checkRemotePi({ host: 'ok', remoteBin: '/opt/pi remote' }), 'checked');
+  assert.equal(await checkRemotePi({ host: 'old' }), 'unsupported');
+  await assert.rejects(checkRemotePi({ host: 'mismatch' }), new RegExp(`^Error: Remote Pi version 9\\.9\\.9 does not match required ${PI_VERSION.replace(/\./g, '\\.')}$`));
+  await assert.rejects(checkRemotePi({ host: '-oProxyCommand=bad' }), /SSH host alias/);
 });

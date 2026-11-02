@@ -23,7 +23,7 @@ const SLOT_COMMANDS = new Set(['attach', 'resume', 'kill']);
 /** Everyday shortcuts that win over prefix matching: r would otherwise be ambiguous. */
 const ALIASES: Readonly<Record<string, typeof COMMANDS[number]>> = { r: 'resume' };
 /** Server/internal commands: exact names only, never matched by a prefix. */
-export const INTERNAL_COMMANDS = ['complete', 'fs', 'daemon', 'bridge'] as const;
+export const INTERNAL_COMMANDS = ['complete', 'fs', 'daemon', 'bridge', 'check-pi'] as const;
 
 /** Exact names win (including internal ones). Otherwise an unambiguous prefix
  * of a public command selects it, e.g. n -> new, k -> kill. Unknown or

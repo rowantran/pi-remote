@@ -4,12 +4,11 @@ import { realpathSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile, chmod, lstat } from 'node:fs/promises';
 import { availableParallelism, freemem, homedir, hostname, loadavg, tmpdir, totalmem, uptime } from 'node:os';
 import { join, resolve } from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { readJsonl, writeJsonl } from '../protocol/jsonl.js';
 import { ACTIVITY_CAPABILITY, activitySlot, activitySource, type ActivitySnapshot } from '../protocol/notification-stream.js';
 import { PiTerminal } from './pi-terminal.js';
+import { checkPiVersion } from './pi-version.js';
 import { ScreenState } from '../protocol/screen.js';
 import type { ControlMessage, PiExtensionMessage, TerminalAnswers } from '../protocol/pi-extension.js';
 import { remoteSessionEnv } from '../protocol/remote-session.js';
@@ -22,7 +21,6 @@ import { PI_VERSION, PROTOCOL_VERSION, errorText, type CreateOptions, type Recor
 // SessionManager returns Dates; JSON serialization produces the protocol's ISO strings.
 type SessionInfoSource = Omit<SessionInfo, 'created' | 'modified'> & { created: Date; modified: Date };
 
-const exec = promisify(execFile);
 /** Kinds of extension dialog Pi can wait on (from the Pi extension's ui_prompt events). */
 const DIALOGS = new Set(['select', 'confirm', 'input', 'editor', 'custom']);
 const RESERVED_ARGS = new Set(['--mode', '--tui-mode', '--print', '-p', '--session', '--session-id', '--fork', '--continue', '-c', '--resume', '-r', '--no-session', '--export', '--help', '-h', '--version', '-v', '--api-key']);
@@ -172,8 +170,7 @@ export class Supervisor {
 
   private async checkVersion(): Promise<void> {
     if (this.options.skipVersionCheck) return;
-    const { stdout } = await exec(this.options.executable ?? 'pi', [...(this.options.prefixArgs ?? []), '--version'], { env: { ...process.env, ...this.options.env }, timeout: 15_000 });
-    if (stdout.trim() !== PI_VERSION) throw new Error(`Remote Pi version ${stdout.trim()} does not match required ${PI_VERSION}`);
+    await checkPiVersion({ executable: this.options.executable, prefixArgs: this.options.prefixArgs, env: this.options.env });
   }
   private connect(socket: Socket) {
     const peer: Peer = { socket, verified: false, pending: 0 };

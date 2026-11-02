@@ -116,6 +116,29 @@ export async function handshake(connection: Connection, timeoutMs = 45_000): Pro
 
 function remotePath(path: string): string { return path.startsWith('~/') ? `"$HOME"/${shellQuote(path.slice(2))}` : shellQuote(path); }
 export interface SshOptions { host: string; remoteBin?: string; stateDir?: string }
+
+/**
+ * Runs `pi-remote check-pi` with the host's installed launcher: the Pi version check that
+ * the next daemon, started from that launcher, makes before it starts any slot. Resolves
+ * 'unsupported' when the installed release predates check-pi; rejects with its error otherwise.
+ */
+export function checkRemotePi(options: SshOptions): Promise<'checked' | 'unsupported'> {
+  if (!options.host || options.host.startsWith('-') || /[\s\x00-\x1f]/.test(options.host)) return Promise.reject(new Error('Use an SSH host alias, such as rowan-v2-dev'));
+  const command = `${remotePath(options.remoteBin ?? '~/.local/share/pi-remote/bin/pi-remote')} check-pi`;
+  return new Promise((resolve, reject) => {
+    const child = spawn('ssh', ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', options.host, command], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let errors = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', chunk => { errors = (errors + chunk).slice(-4096); });
+    child.on('error', reject);
+    child.on('close', code => {
+      if (code === 0) resolve('checked');
+      else if (/Unknown command 'check-pi'/.test(errors)) resolve('unsupported');
+      else reject(new Error(errors.trim() || `pi-remote check-pi exited ${code}`));
+    });
+  });
+}
+
 export async function connectSsh(options: SshOptions): Promise<Connection> {
   if (!options.host || options.host.startsWith('-') || /[\s\x00-\x1f]/.test(options.host)) throw new Error('Use an SSH host alias, such as rowan-v2-dev');
   const command = `${remotePath(options.remoteBin ?? '~/.local/share/pi-remote/bin/pi-remote')} bridge${options.stateDir ? ` --state-dir ${shellQuote(options.stateDir)}` : ''}`;
