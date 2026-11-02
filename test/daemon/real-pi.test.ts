@@ -3,6 +3,7 @@
  */
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createConnection, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -19,6 +20,7 @@ import { PI_VERSION, PROTOCOL_VERSION, type RecordValue, type SlotInfo } from '.
 const repo = fileURLToPath(new URL('../../', import.meta.url));
 const piCli = join(repo, 'node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js');
 const fixture = join(repo, 'test/golden/fixture-provider.ts');
+const childSlotExtension = join(repo, 'test/fixtures/child-slot-extension.ts');
 const strip = (text: string) => text.replace(/\x1b\[[0-9;:]*m|\x1b_[^\x07]*\x07|\x1b\]8;;[^\x1b]*\x1b\\/g, '');
 
 /** A daemon client that keeps its own copy of the screen, like a real client. */
@@ -76,7 +78,7 @@ class Client {
 }
 
 /** A daemon with a slot running the pinned Pi CLI and the offline fixture provider. */
-async function setup(t: import('node:test').TestContext) {
+async function setup(t: import('node:test').TestContext, extraArgs: string[] = []) {
   const root = await mkdtemp(join(tmpdir(), 'pi-remote-daemon-'));
   const stateDir = join(root, 'state'), agent = join(root, 'agent'), gates = join(root, 'gates'), workspace = join(root, 'workspace');
   await Promise.all([mkdir(agent, { recursive: true }), mkdir(gates), mkdir(workspace)]);
@@ -93,7 +95,7 @@ async function setup(t: import('node:test').TestContext) {
   const connect = async () => { const client = await Client.connect(stateDir); clients.push(client); return client; };
   const first = await connect();
   const args = ['--offline', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes', '--no-context-files',
-    '--no-approve', '--extension', fixture, '--model', 'golden-local/transcript', '--tools', 'bash', '--session-dir', join(root, 'sessions')];
+    '--no-approve', '--extension', fixture, '--model', 'golden-local/transcript', '--tools', 'bash', '--session-dir', join(root, 'sessions'), ...extraArgs];
   const created: SlotInfo = await first.request('create', { cwd: workspace, args });
   const listed = async (client = first) => (await client.request<SlotInfo[]>('list')).find(slot => slot.id === created.id)!;
   const running = async (client = first) => {
@@ -223,4 +225,74 @@ test('the terminal client attaches to a slot, edits locally, reconnects, and det
   await done;
   assert.match(output.join(''), new RegExp(`Detached from slot 1 / ${created.id}`));
   assert.equal((await connection.request('list')).find(slot => slot.id === created.id)?.status, 'running', 'Pi keeps running');
+});
+
+test('another extension forks into a child slot with the extension API, and the client opens it', { timeout: 120_000 }, async t => {
+  const { stateDir, created, root, connect } = await setup(t, ['--extension', childSlotExtension]);
+  const { connectLocal } = await import('../../src/cli/connections.js');
+  const { runTerminalSession } = await import('../../src/tui/terminal-session.js');
+  const connection = await connectLocal(stateDir);
+  t.after(() => connection.close());
+  const writes: string[] = [];
+  let input: (data: string) => void = () => {};
+  const terminal = {
+    columns: 120, rows: 30, kittyProtocolActive: true,
+    start(onInput: (data: string) => void) { input = onInput; }, stop() {}, async drainInput() {},
+    write(data: string) { writes.push(data); },
+    moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {}, clearFromCursor() {}, clearScreen() {},
+    setTitle() {}, setProgress() {}, setProgramStatus() {},
+  };
+  const write = process.stdout.write;
+  process.stdout.write = (() => true) as typeof process.stdout.write;
+  t.after(() => { process.stdout.write = write; });
+  const opened: { invocation: { command: string; args: string[] }; targetId: string; direction: string }[] = [];
+  const TARGET = '00000000-0000-4000-8000-000000000000';
+  let splitError: Error | undefined;
+  const sideLauncher = {
+    captureTarget: async () => { if (splitError) throw splitError; return TARGET; },
+    open: async (options: typeof opened[number]) => { opened.push(options); },
+  };
+  const screen = () => strip(writes.join(''));
+  const until = async (check: () => boolean, label: string) => {
+    for (const deadline = Date.now() + 20_000; !check();) {
+      if (Date.now() > deadline) throw new Error(`Timed out waiting for ${label}\n${screen().slice(-3000)}`);
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  };
+  const type = (text: string) => { for (const key of text) input(key); };
+  const gate = (name: string) => existsSync(join(root, 'gates', name));
+  const done = runTerminalSession(connection, created, {
+    terminal: terminal as never, theme: 'dark', presentationConfig: join(root, 'no-config.json'),
+    attachContext: { local: true, stateDir }, sideLauncher: sideLauncher as never,
+  });
+  await until(() => screen().includes('transcript'), 'the footer');
+  type('GOLDEN_SECOND_USER\r');
+  await until(() => gate('settled-ready'), 'the first run settles');
+  // The extension forks the last finished run while another run is in progress.
+  type('BUSY_WORK\r');
+  await until(() => gate('stream-ready'), 'the busy run');
+  type('/fork-child GOLDEN_SECOND_USER again\r');
+  await until(() => screen().includes('CHILD_OPENED'), 'the extension hears that the pane opened');
+
+  const child = (await connection.request('list')).find(slot => slot.parentSlotId === created.id)!;
+  assert.ok(child, 'a child slot of the parent');
+  assert.ok(screen().includes(`CHILD_OPENED in #${child.number} from #${created.number}`));
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0]!.targetId, TARGET);
+  assert.deepEqual(opened[0]!.invocation.args.slice(1), ['attach', '--local', '--state-dir', stateDir, '--theme', 'dark', child.id]);
+  assert.ok(child.sessionFile!.startsWith(join(root, 'children')), child.sessionFile);
+
+  const viewer = await connect();
+  await viewer.attach(child.id, 120, 40);
+  await viewer.until(() => viewer.text().split('GOLDEN_SECOND_DONE').length > 2, 'the child answers its prompt');
+  assert.ok(!viewer.text().includes('BUSY_WORK'), 'the busy run stays in the parent');
+
+  // When the client cannot open a pane, the extension gets the reason.
+  splitError = new Error('Ghostty splits require macOS.');
+  type('/fork-child\r');
+  await until(() => screen().includes('CHILD_FAILED Ghostty splits require macOS.'), 'the split failure reaches the extension');
+  assert.equal((await connection.request('list')).filter(slot => slot.parentSlotId === created.id && slot.status !== 'exited').length, 2);
+
+  input('\x1c');
+  await done;
 });

@@ -69,7 +69,9 @@ async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {
   const exitFile = join(dir, 'fixture-exit'), gate = join(dir, 'fixture-gate');
   await writeFile(versionFile, `${PI_VERSION}\n`);
   const daemonOptions = { stateDir: dir, executable: process.execPath, prefixArgs: [fixture], skipVersionCheck: options.skipVersionCheck ?? true,
-    env: { PI_FIXTURE_VERSION_FILE: versionFile, PI_FIXTURE_LAUNCH_LOG: launchLog, PI_FIXTURE_EXIT_FILE: exitFile, PI_FIXTURE_PROMPT_GATE: gate } };
+    // PI_CODING_AGENT_DIR keeps side-session files out of the real ~/.pi/agent.
+    env: { PI_FIXTURE_VERSION_FILE: versionFile, PI_FIXTURE_LAUNCH_LOG: launchLog, PI_FIXTURE_EXIT_FILE: exitFile, PI_FIXTURE_PROMPT_GATE: gate,
+      PI_CODING_AGENT_DIR: join(dir, 'agent') } };
   let current = new Supervisor(daemonOptions);
   const peers: Peer[] = [];
   /** Stop the current daemon as runDaemon would, then start its successor in the same state directory. */
@@ -331,4 +333,58 @@ test('side slots fork the parent session, inherit its args, and deliver the firs
   }
   await peer.request('kill', { slotId: parent.id });
   for (let n = 0; (await slots()).find(slot => slot.id === side.id)?.status === 'running'; n++) { assert.ok(n < 100); await new Promise(r => setTimeout(r, 50)); }
+});
+
+test('the extension API starts a child slot and asks only the client that typed last to open it', { timeout: 15_000 }, async t => {
+  const { create, attach, prompt, peer, connect, dir, slots } = await setup(t);
+  const parent = await create({ args: ['--session-dir', join(dir, 'sessions')] });
+  await attach(parent.id);
+  await prompt(parent.id, 'parent work');
+  const other = await connect();
+  await attach(parent.id, other);
+  const screenText = async (slotId: string, client = peer) => JSON.stringify((await attach(slotId, client)).messages);
+  const until = async (check: () => Promise<boolean>, label: string) => {
+    for (let n = 0; !(await check()); n++) { assert.ok(n < 100, label); await new Promise(r => setTimeout(r, 50)); }
+  };
+  const openRequest = (client: Peer, from: number) => client.waitFor(record => record.type === 'event' && record.event.type === 'screen'
+    && record.event.message.type === 'clientAction' && record.event.message.action === 'openSlot', from);
+
+  // createChildSlot: the fixture asks for a child, then asks to open it.
+  let from = peer.records.length;
+  await peer.request('input', { slotId: parent.id, data: '/child child question\r' });
+  const open = (await openRequest(peer, from)).event.message;
+  const child = (await slots()).find(slot => slot.id === open.slotId)!;
+  assert.equal(child.parentSlotId, parent.id);
+  assert.equal(open.slotNumber, child.number);
+  assert.ok(child.sessionFile!.startsWith(join(dir, '.fixture-children')), child.sessionFile);
+  assert.ok(!other.records.some(record => record.type === 'event' && record.event.type === 'screen' && record.event.message.type === 'clientAction'), 'only the client that typed opens the pane');
+  await until(async () => (await screenText(parent.id)).includes(`\\"id\\":\\"api-1\\",\\"slotId\\":\\"${child.id}\\"`), 'createChildSlot answers Pi');
+  const viewer = await connect();
+  await until(async () => (await screenText(child.id, viewer)).includes('echo: child question'), 'the child gets its first prompt');
+  assert.ok((await screenText(child.id, viewer)).includes('echo: parent work'), 'the child opens the given session file');
+  // The child uses the requested session directory.
+  const launches = (await readFile(join(dir, 'fixture-launch-log'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  const args = launches.find(launch => launch.env.PI_REMOTE_SESSION_SLOT === child.id).args as string[];
+  assert.equal(args[args.lastIndexOf('--session-dir') + 1], join(dir, '.fixture-children'));
+
+  // openSlot: the client's outcome reaches Pi; only that client may report it.
+  await assert.rejects(other.request('open_slot_result', { requestId: open.requestId }), /No such open request/);
+  await peer.request('open_slot_result', { requestId: open.requestId, error: 'Ghostty is not running' });
+  await until(async () => (await screenText(parent.id)).includes('\\"id\\":\\"api-2\\",\\"error\\":\\"Ghostty is not running\\"'), 'openSlot answers Pi');
+
+  // A request that cannot start a slot says why and starts nothing.
+  const before = (await slots()).length;
+  from = peer.records.length;
+  await peer.request('input', { slotId: parent.id, data: '/child-missing\r' });
+  await until(async () => /api-3\\",\\"error\\":\\"Session file not found/.test(await screenText(parent.id)), 'the refusal reaches Pi');
+  assert.equal((await slots()).length, before);
+
+  // A client that leaves without answering fails the request.
+  from = peer.records.length;
+  await peer.request('input', { slotId: parent.id, data: '/child\r' });
+  await openRequest(peer, from);
+  peer.close();
+  await until(async () => (await screenText(parent.id, viewer)).includes('disconnected before it opened the pane'), 'a lost client fails openSlot');
+  await viewer.request('kill', { slotId: parent.id });
+  await until(async () => (await viewer.request<SlotInfo[]>('list')).filter(slot => slot.parentSlotId === parent.id).every(slot => slot.status !== 'running'), 'stopping the parent stops its children');
 });

@@ -19,6 +19,7 @@ import {
   decodeBarrier, decodeSetText, diffLines, EDITOR_SECTION, PI_EXTENSION_SOCKET_ENV, SECTION_COUNT, sameEditorState,
   type PiExtensionMessage, type ControlMessage, type EditorState, type LineDiff,
 } from '../protocol/pi-extension.js';
+import { PI_REMOTE_API_EVENT, type PiRemoteApi } from '../protocol/extension-api.js';
 
 class Channel {
   private socket: Socket;
@@ -51,11 +52,13 @@ class Channel {
     this.socket.unref();
   }
 
-  send(message: PiExtensionMessage): void {
-    if (this.failed) return;
+  /** False when the connection has failed and the message was dropped. */
+  send(message: PiExtensionMessage): boolean {
+    if (this.failed) return false;
     const line = `${JSON.stringify(message)}\n`;
     if (this.connected) this.socket.write(line);
     else this.queue.push(line);
+    return true;
   }
 }
 
@@ -318,12 +321,61 @@ function reportActivity(pi: ExtensionAPI, send: (event: ActivityEvent) => void):
   pi.on('ui_prompt_end', () => { send({ type: 'remote_dialog_resolved', id: `dialog-${dialog}` }); });
 }
 
+type ApiResult = Extract<ControlMessage, { type: 'apiResult' }>;
+type ApiRequest = Extract<PiExtensionMessage, { type: 'createChildSlot' | 'openSlot' }>;
+type Request = ApiRequest extends infer R ? R extends ApiRequest ? Omit<R, 'id'> : never : never;
+/** Longer than the host's own limits (a Pi version check, or a client opening a pane). */
+const API_TIMEOUT_MS = 60_000;
+
+/**
+ * Offer PiRemoteApi (src/protocol/extension-api.ts) to the other extensions in this Pi.
+ * Returns the handler for the host's answers.
+ */
+function offerApi(pi: ExtensionAPI, channel: Channel): (message: ApiResult) => void {
+  const pending = new Map<string, (result: ApiResult) => void>();
+  let nextId = 0;
+  const call = (request: Request) => new Promise<ApiResult>((resolve, reject) => {
+    const id = `api-${++nextId}`;
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      // The host may still act on the request; callers must not retry it blindly.
+      reject(new Error('pi-remote did not answer in time. Check pi-remote ls before trying again.'));
+    }, API_TIMEOUT_MS);
+    pending.set(id, result => { clearTimeout(timer); pending.delete(id); resolve(result); });
+    if (!channel.send({ ...request, id } as ApiRequest)) { clearTimeout(timer); pending.delete(id); reject(new Error('pi-remote is not connected')); }
+  });
+  const number = Number(process.env.PI_REMOTE_SESSION_SLOT_NUMBER);
+  const api: PiRemoteApi = Object.freeze({
+    version: 1 as const,
+    slotId: process.env.PI_REMOTE_SESSION_SLOT ?? '',
+    ...(Number.isSafeInteger(number) && number > 0 ? { slotNumber: number } : {}),
+    async createChildSlot(options: Parameters<PiRemoteApi['createChildSlot']>[0]) {
+      const result = await call({ type: 'createChildSlot', sessionFile: options.sessionFile,
+        ...(options.sessionDir !== undefined ? { sessionDir: options.sessionDir } : {}), ...(options.prompt !== undefined ? { prompt: options.prompt } : {}) });
+      if (!result.slotId) throw new Error(result.error ?? 'pi-remote did not start a slot');
+      return { slotId: result.slotId, ...(result.slotNumber !== undefined ? { slotNumber: result.slotNumber } : {}), ...(result.error ? { error: result.error } : {}) };
+    },
+    async openSlot(options: Parameters<PiRemoteApi['openSlot']>[0]) {
+      const result = await call({ type: 'openSlot', slotId: options.slotId });
+      if (result.error) throw new Error(result.error);
+    },
+  });
+  pi.events.on(PI_REMOTE_API_EVENT, data => {
+    const respond = (data as { respond?: unknown } | undefined)?.respond;
+    if (typeof respond === 'function') respond(api);
+  });
+  return message => pending.get(message.id)?.(message);
+}
+
 export default function piRemoteExtension(pi: ExtensionAPI): void {
   const socketPath = process.env[PI_EXTENSION_SOCKET_ENV];
   if (!socketPath) return;
+  let apiResult: (message: ApiResult) => void = () => {};
   const bridge = new Bridge(new Channel(socketPath, message => {
     if (message.type === 'prompt') { try { pi.sendUserMessage(message.text); } catch { /* Reported through activity and the screen. */ } }
+    else if (message.type === 'apiResult') apiResult(message);
   }));
+  apiResult = offerApi(pi, bridge.channel);
   reportActivity(pi, event => bridge.channel.send({ type: 'activity', event }));
   // pi-remote commands. They act in the client that ran them.
   pi.registerCommand('detach', {

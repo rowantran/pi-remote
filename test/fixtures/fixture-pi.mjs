@@ -9,6 +9,11 @@
 //   PI_FIXTURE_EXIT_FILE     when it exists at startup, exit 23
 //   PI_FIXTURE_PROMPT_GATE   while this file exists, prompts stay running (busy)
 //   PI_FIXTURE_SLOW_START    milliseconds before reporting the session
+//
+// Typing `/child [PROMPT]` plays an extension that uses pi-remote's extension API: it copies
+// the session file into CWD/.fixture-children, asks the host for a child slot there, then asks
+// it to open that slot. `/child-missing` names a file that does not exist. Each answer from
+// the host is shown as an `api:` transcript line.
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
@@ -47,7 +52,8 @@ if (!entries.length) entries.push({ type: 'session', id: sessionId, cwd: process
 
 const socket = createConnection(process.env.PI_REMOTE_EXTENSION_SOCKET);
 const send = message => socket.write(`${JSON.stringify(message)}\n`);
-const transcript = () => entries.filter(entry => entry.type === 'message').map(entry => `${entry.role}: ${entry.text}`);
+const notices = [];
+const transcript = () => [...entries.filter(entry => entry.type === 'message').map(entry => `${entry.role}: ${entry.text}`), ...notices];
 let draft = '';
 const frame = (reset = false) => send({
   type: 'frame', width: process.stdout.columns ?? 80, layout: 'known', reset, editorFocused: true, dropdownRows: 0, hardwareCursor: false,
@@ -77,6 +83,21 @@ function prompt(text) {
   });
 }
 
+let requests = 0;
+const opens = new Set();
+function child(text) {
+  const id = `api-${++requests}`;
+  const prompt = text.replace(/^\/child(-missing)?\s*/, '');
+  const sessionDir = join(process.cwd(), '.fixture-children');
+  const file = join(sessionDir, `child-${randomUUID()}.jsonl`);
+  if (!text.startsWith('/child-missing')) {
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(file, [{ ...entries[0], id: randomUUID(), parentSession: sessionFile }, ...entries.slice(1)].map(entry => JSON.stringify(entry)).join('\n') + '\n');
+  }
+  opens.add(id);
+  send({ type: 'createChildSlot', id, sessionFile: file, sessionDir, ...(prompt ? { prompt } : {}) });
+}
+
 let control = '';
 socket.setEncoding('utf8');
 socket.on('data', chunk => {
@@ -85,6 +106,10 @@ socket.on('data', chunk => {
   while ((end = control.indexOf('\n')) !== -1) {
     const message = JSON.parse(control.slice(0, end)); control = control.slice(end + 1);
     if (message.type === 'prompt') prompt(message.text);
+    else if (message.type === 'apiResult') {
+      notices.push(`api: ${JSON.stringify(message)}`); frame();
+      if (opens.delete(message.id) && message.slotId) send({ type: 'openSlot', id: `api-${++requests}`, slotId: message.slotId });
+    }
   }
 });
 socket.on('connect', () => {
@@ -101,7 +126,7 @@ process.stdin.on('data', data => {
   // Barriers and other APC messages are not text.
   const text = data.replace(/\x1b_[^\x1b]*\x1b\\/g, '');
   for (const character of text) {
-    if (character === '\r') { const value = draft; draft = ''; if (value) prompt(value); }
+    if (character === '\r') { const value = draft; draft = ''; if (value.startsWith('/child')) child(value); else if (value) prompt(value); }
     else if (character === '\x7f') draft = draft.slice(0, -1);
     else if (character >= ' ') draft += character;
   }

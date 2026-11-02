@@ -79,6 +79,22 @@ export type PiExtensionMessage =
   /** A pi-remote command the user ran in Pi (/detach, /status); the client that typed it acts. */
   | { type: 'clientAction'; action: 'detach' | 'status' }
   /**
+   * Added by the host for an `openSlot` request: open a pane attached to slot `slotId`, then
+   * report the outcome with the `open_slot_result` daemon method and this `requestId`.
+   */
+  | { type: 'clientAction'; action: 'openSlot'; requestId: string; slotId: string; slotNumber?: number }
+  /**
+   * Requests from the extension API (see src/pi-extension/pi-remote.ts). Only the host gets
+   * them; it answers each with an `apiResult` of the same `id`.
+   *
+   * createChildSlot: start a slot whose parent is this slot, in the same directory and with
+   * the same Pi options, from the session file `sessionFile`. `sessionDir` replaces the
+   * parent's session directory. `prompt` is sent once, as the child's first message.
+   */
+  | { type: 'createChildSlot'; id: string; sessionFile: string; sessionDir?: string; prompt?: string }
+  /** openSlot: ask the client that typed or resized last in this slot to open a pane attached to `slotId`. */
+  | { type: 'openSlot'; id: string; slotId: string }
+  /**
    * Terminal output Pi wrote to its PTY that only a real terminal can act on: a bell, the
    * window title, a desktop notification, progress, or a clipboard write (OSC 52). Added by
    * the host, not the Pi extension. `data` is the escape sequence to write to the local terminal.
@@ -88,7 +104,13 @@ export type PiExtensionMessage =
 /** Messages from the host to the Pi extension. */
 export type ControlMessage =
   /** Send `text` to the agent as a user message (pi.sendUserMessage). */
-  | { type: 'prompt'; text: string };
+  | { type: 'prompt'; text: string }
+  /**
+   * The answer to an extension API request. For createChildSlot, `slotId` is set when the host
+   * started a slot, even one that then exited (`error` says why); without `slotId`, no slot
+   * exists. For openSlot, `error` says why no pane opened.
+   */
+  | { type: 'apiResult'; id: string; slotId?: string; slotNumber?: number; error?: string };
 
 /** APC (application program command) escape sequences pass through Pi's input parser as one unit. */
 const BARRIER_PREFIX = '\x1b_pi-remote:barrier:';

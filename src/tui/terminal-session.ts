@@ -1,5 +1,5 @@
 import { basename } from 'node:path';
-import { getSelectListTheme, type Theme } from '@earendil-works/pi-coding-agent';
+import { copyToClipboard, getSelectListTheme, type Theme } from '@earendil-works/pi-coding-agent';
 import { getCellDimensions, ProcessTerminal, type Terminal } from '@earendil-works/pi-tui';
 import { PiScreen } from './pi-screen.js';
 import { toKittyInput } from './kitty-keys.js';
@@ -14,6 +14,7 @@ import { slotStatusLines } from './host-status.js';
 import { readPresentationConfig } from '../config/presentation.js';
 import { detachMessage, stoppedMessage } from './session-labels.js';
 import { paint } from './table.js';
+import { attachInvocation, formatInvocation, ghosttyLauncher, resolveSplitDirection, type AttachContext, type GhosttyLauncher, type SplitDirection } from './side-launcher.js';
 
 export interface TerminalSessionOptions {
   /** Display name of the machine Pi runs on, for the status panel. */
@@ -24,8 +25,12 @@ export interface TerminalSessionOptions {
   theme?: string;
   /** False: do not pass Pi's bell to the terminal. Defaults to the config's `bell`, then true. */
   bell?: boolean;
+  /** How this client was started, so /side can open another client attached to the side slot. */
+  attachContext?: AttachContext;
   /** Replace in tests. */
   terminal?: Terminal;
+  /** Replace in tests. */
+  sideLauncher?: GhosttyLauncher;
 }
 
 const SAMPLES = 20;
@@ -41,7 +46,7 @@ export async function runTerminalSession(connection: RemoteConnection, slot: Slo
   const host = options.host ?? 'local';
   let finish!: (outcome: 'detached' | 'stopped' | Error) => void;
   const finished = new Promise<'detached' | 'stopped' | Error>(resolve => { finish = resolve; });
-  const local: { theme?: Theme; factory?: Awaited<ReturnType<typeof loadLocalEditorFactory>>; answers: TerminalAnswers; bell: boolean } = { answers: {}, bell: options.bell ?? true };
+  const local: { theme?: Theme; factory?: Awaited<ReturnType<typeof loadLocalEditorFactory>>; answers: TerminalAnswers; bell: boolean; sideSplit: SplitDirection } = { answers: {}, bell: options.bell ?? true, sideSplit: 'auto' };
   let connected = true, connectedAt = Date.now(), reconnects = 0, notice: ReturnType<typeof setTimeout> | undefined;
   const samples: number[] = [];
   let daemon: DaemonState = 'loading';
@@ -56,6 +61,9 @@ export async function runTerminalSession(connection: RemoteConnection, slot: Slo
   }, {
     onQuit: () => finish('detached'),
     onDetach: () => finish('detached'),
+    onOpenSlot: request => {
+      void openSlot(request.slotId, request.slotNumber).then(error => connection.request('open_slot_result', { requestId: request.requestId, ...(error ? { error } : {}) })).catch(() => {});
+    },
     get editorFactory() { return local.factory; },
     theme: () => local.theme,
     editorTheme: () => ({ borderColor: text => local.theme?.fg('borderMuted', text) ?? text, selectList: getSelectListTheme() }),
@@ -96,6 +104,25 @@ export async function runTerminalSession(connection: RemoteConnection, slot: Slo
       },
     },
   });
+  /** Open a Ghostty split beside this pane, attached to `targetId`. Returns why it failed, if it did. */
+  const openSlot = async (targetId: string, number?: number): Promise<string | undefined> => {
+    let command: string | undefined;
+    try {
+      if (!options.attachContext) throw new Error('this client has no attach settings');
+      const invocation = attachInvocation(targetId, { ...options.attachContext, theme: options.theme ?? options.attachContext.theme });
+      command = formatInvocation(invocation);
+      const cell = getCellDimensions();
+      const direction = resolveSplitDirection(local.sideSplit, { columns: terminal.columns, rows: terminal.rows, cellWidth: cell?.widthPx, cellHeight: cell?.heightPx });
+      const launcher = options.sideLauncher ?? ghosttyLauncher;
+      await launcher.open({ invocation, targetId: await launcher.captureTarget(), direction, cwd: process.cwd() });
+      return undefined;
+    } catch (error) {
+      // The local attach command has local paths; only this machine can run it.
+      command ??= `pi-remote attach ${number ?? targetId}`;
+      const copied = await copyToClipboard(command).then(() => true, () => false);
+      return `${errorText(error).replace(/\.$/, '')}. ${copied ? 'The attach command is on the clipboard.' : `Attach with: ${command}`}`;
+    }
+  };
   const notify = (message: string) => {
     client.setBanner(message);
     clearTimeout(notice);
@@ -134,6 +161,7 @@ export async function runTerminalSession(connection: RemoteConnection, slot: Slo
     local.theme = await loadLocalTheme(setting ? resolveThemeSelection(setting, terminalAppearance(colors)) : undefined);
     const config = await readPresentationConfig(options.presentationConfig, options.presentationPaths);
     local.bell = options.bell ?? config.bell ?? true;
+    local.sideSplit = config.sideSplit ?? 'auto';
     local.factory = await loadLocalEditorFactory(config.extensions, local.theme, message => notify(`Local editor extension failed: ${message}`));
 
     const attachment = await connection.request('attach', { slotId, columns: terminal.columns, rows: terminal.rows, answers: local.answers });

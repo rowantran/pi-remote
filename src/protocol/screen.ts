@@ -45,7 +45,7 @@ export class ScreenState {
         break;
       case 'session': this.session = message; break;
       case 'terminal': if (message.kind === 'title') this.title = message; break;
-      case 'activity': case 'clientAction': break;
+      case 'activity': case 'clientAction': case 'createChildSlot': case 'openSlot': break;
     }
   }
 
