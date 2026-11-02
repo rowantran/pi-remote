@@ -236,6 +236,12 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     console.log(JSON.stringify(await serveFileRequest(args[1] ?? '', JSON.parse(input))));
     return;
   }
+  if (command === 'check-pi') {
+    // Deploy runs this on the host before it switches releases: the same check the daemon makes before it starts slots.
+    const { checkPiVersion } = await import('../daemon/pi-version.js');
+    console.log(`Pi ${await checkPiVersion({ executable: process.env.PI_REMOTE_PI_BIN ?? 'pi' })} is the required version.`);
+    return;
+  }
   if (command === 'completion') { process.stdout.write(await completionScript(args[1] ?? '')); return; }
   if (command === 'complete') { await runCompletionCommand(args.slice(1)); return; }
   const options = parseOptions(home ? args : args.slice(1));

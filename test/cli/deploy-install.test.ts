@@ -36,6 +36,8 @@ interface FixtureOptions {
   nodeName?: string;
   sshConfigDirectory?: string;
   pathEntries?: (home: string) => string[];
+  /** Shell body of the new release's launcher. By default it records where the launcher pointed when check-pi ran. */
+  launcher?: string;
 }
 
 /**
@@ -56,7 +58,12 @@ async function fixture(t: TestContext, options: FixtureOptions = {}) {
   const managerEnvironment = join(root, 'manager-environment');
   for (const dir of [fakes, join(payload, 'bin'), join(base, 'bin')]) await mkdir(dir, { recursive: true });
   const executable = async (path: string, body: string) => { await writeFile(path, `#!/bin/sh\n${body}\n`); await chmod(path, 0o755); };
-  await executable(join(payload, 'bin/pi-remote'), 'exit 0');
+  const checked = join(root, 'checked-pi');
+  await executable(join(payload, 'bin/pi-remote'), options.launcher ?? `[ "$1" = check-pi ] && readlink "$FAKE_LINK" > "${checked}"\nexit 0`);
+  // The installer loads node-pty after rebuilding it; the fake npm builds nothing.
+  await mkdir(join(payload, 'node_modules/node-pty'), { recursive: true });
+  await writeFile(join(payload, 'node_modules/node-pty/package.json'), JSON.stringify({ name: 'node-pty', main: 'index.js' }));
+  await writeFile(join(payload, 'node_modules/node-pty/index.js'), '');
   await writeFile(join(payload, 'package.json'), JSON.stringify({ type: 'module' }));
   // The parent compiles dist before these tests. Do not replace the service helper with a stub.
   for (const file of ['cli/web-service.js', 'config/client.js', 'web/server/tailscale.js']) {
@@ -95,7 +102,8 @@ appendFileSync(env.FAKE_CALLS, JSON.stringify({
 }) + '\\n');
 function reject(message) { console.error(message); process.exit(64); }
 if (command === 'npm') {
-  if (JSON.stringify(args) !== JSON.stringify(['ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'])) reject('Unexpected npm command');
+  const expected = [['ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], ['rebuild', 'node-pty', '--no-audit', '--no-fund']];
+  if (!expected.some(command => JSON.stringify(args) === JSON.stringify(command))) reject('Unexpected npm command');
 } else if (command === 'systemctl') {
   const action = args[1];
   const expected = ['--user', action, ...(['enable', 'restart'].includes(action) ? ['${SERVICE}'] : [])];
@@ -142,7 +150,7 @@ if (command === 'npm') {
     return result;
   };
   const readCalls = async (): Promise<Call[]> => (await readFile(calls, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
-  return { run, readCalls, home, releases, link, unit, state, enabled, status, serve, linger, managerEnvironment, sshConfigHome, fakes, node };
+  return { run, readCalls, home, releases, link, unit, state, enabled, status, serve, linger, managerEnvironment, sshConfigHome, fakes, node, checked };
 }
 
 /** Model unit quoting: the executable path and Environment values have no dollar expansion. */
@@ -215,7 +223,8 @@ test('absent web settings leave existing units and service state untouched witho
     const f = await fixture(t, { state });
     const result = await f.run(NAME);
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual((await f.readCalls()).map(call => call.command), ['npm']);
+    assert.deepEqual((await f.readCalls()).map(call => call.args[0]), ['ci', 'rebuild']);
+    assert.equal(await readFile(f.checked, 'utf8'), `${join(f.releases, 'previous/bin/pi-remote')}\n`, 'Pi is checked before the switch');
     if (state === 'absent') assert.ok(!existsSync(f.unit));
     else assert.equal(await readFile(f.unit, 'utf8'), OLD_UNIT);
     assert.equal(await readFile(f.state, 'utf8'), state);
@@ -261,6 +270,22 @@ test('an explicit HTTPS origin overrides remote discovery and uses its configure
   assert.deepEqual(tailscaleCalls(await f.readCalls()), [['serve', 'status', '--json']]);
   assert.deepEqual(unitArguments(await readFile(f.unit, 'utf8')), expectedCommand(f.home, f.releases, NAME, web));
   assert.match(result.stdout, /tailscale serve --bg --https=8443/);
+});
+
+test('a host Pi of another version stops the installer before it switches releases, starts the web service, or cleans up', async t => {
+  const f = await fixture(t, {
+    state: 'active',
+    launcher: `[ "$1" = check-pi ] && { echo 'Remote Pi version 9.9.9 does not match required 1.4.0' >&2; exit 1; }\nexit 0`,
+  });
+  const result = await f.run(NAME, { allowUsers: USERS });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Remote Pi version 9\.9\.9 does not match required 1\.4\.0/);
+  assert.ok(result.stderr.includes(`Release ${NAME} is not installed: Pi on this host is not the version it requires. The current release and daemon are unchanged.`));
+  assert.equal(await readlink(f.link), join(f.releases, 'previous/bin/pi-remote'));
+  assert.ok(!existsSync(join(f.releases, NAME)), 'the failure trap removes the unswitched release');
+  assert.ok(existsSync(join(f.releases, 'old')), 'old releases are not cleaned up');
+  assert.deepEqual(serviceCalls(await f.readCalls()), []);
+  assert.equal(await readFile(f.unit, 'utf8'), OLD_UNIT);
 });
 
 test('missing discovery, refused Funnel, and systemctl failures preserve releases after switching', async t => {
@@ -348,6 +373,7 @@ test('quoted manager XDG values fail before changing any unit or cleaning releas
     const calls = await f.readCalls();
     assert.deepEqual(calls.map(call => [call.command, call.args]), [
       ['npm', ['ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund']],
+      ['npm', ['rebuild', 'node-pty', '--no-audit', '--no-fund']],
       ['systemctl', ['--user', 'show-environment']],
     ]);
     assert.equal(await readFile(f.unit, 'utf8'), OLD_UNIT);

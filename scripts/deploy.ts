@@ -9,7 +9,8 @@ export const HELP = `Usage: npm run deploy -- [HOST] [--force | --no-restart]
 
 Install this checkout as a new release on an SSH Linux host, then restart the daemon
 onto it once no slot is busy. HOST defaults to PI_REMOTE_HOST, then the client
-configuration file.
+configuration file. When the host's Pi is not the version this checkout requires,
+deploy stops before it switches releases or restarts the daemon.
   --force       Restart the daemon now, interrupting busy slots.
   --no-restart  Install without restarting the daemon.
   -h, --help    Show this help without building or connecting.
@@ -106,6 +107,12 @@ chmod +x bin/pi-remote
 # Validate both the compiled launcher and completion assets before switching.
 bin/pi-remote --version
 bin/pi-remote completion fish >/dev/null
+# The daemon refuses to start when the host's Pi is not the version this release requires,
+# and a restart would leave every slot stopped. Check before switching or restarting anything.
+bin/pi-remote check-pi || {
+  printf 'Release %s is not installed: Pi on this host is not the version it requires. The current release and daemon are unchanged.\\n' "$name" >&2
+  exit 1
+}
 previous=$(readlink -f -- "$base/bin/pi-remote" || true)
 ln -s "$release/bin/pi-remote" "$base/bin/.pi-remote-$name"
 mv -Tf "$base/bin/.pi-remote-$name" "$base/bin/pi-remote"

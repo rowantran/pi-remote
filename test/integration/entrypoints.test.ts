@@ -57,6 +57,12 @@ async function exercise(bin: string, side: AttachInvocation, f: Awaited<ReturnTy
   };
   assert.match((await run(['--version'])).stdout, /^pi-remote 0\.2\.0 \(Pi /);
   assert.match((await run(['completion', 'fish'])).stdout, /complete/);
+  // Deploy runs check-pi on the host before switching releases.
+  assert.equal((await run(['check-pi'])).stdout, `Pi ${PI_VERSION} is the required version.\n`);
+  const otherPi = join(f.root, 'other-version-pi');
+  await writeFile(otherPi, `#!${process.execPath}\nconsole.log('9.9.9');\n`, { mode: 0o700 });
+  await assert.rejects(exec(process.execPath, [bin, 'check-pi'], { cwd: f.cwd, env: { ...f.env, PI_REMOTE_PI_BIN: otherPi }, timeout: 30_000 }),
+    (error: any) => error.code === 1 && error.stderr === `Remote Pi version 9.9.9 does not match required ${PI_VERSION}\n`);
 
   // No slot is created: the daemon only checks the isolated stub's version.
   assert.deepEqual(JSON.parse((await run(['ls', '--local', '--json', '--state-dir', f.stateDir])).stdout), []);
