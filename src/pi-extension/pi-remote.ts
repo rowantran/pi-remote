@@ -9,6 +9,10 @@
  * - Stand-in editor: a normal CustomEditor. The client sends every editor key through
  *   the PTY, so this editor processes the same keys as the client's local copy. After
  *   each input barrier it reports its exact state, so the client can confirm or correct.
+ *
+ * Pi starts its extensions again on /reload and on session changes (/new, /resume, /fork),
+ * in the same process. The host accepts one connection per Pi process, so every start of
+ * this extension shares one connection, and the newest start takes over the reporting.
  */
 import { CustomEditor, VERSION, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext, type KeybindingsManager } from '@earendil-works/pi-coding-agent';
 import type { Component, EditorComponent, EditorTheme, TUI } from '@earendil-works/pi-tui';
@@ -78,9 +82,11 @@ function dropdownRows(editor: ObservedEditor): number {
   const height = (editor as { renderedAutocompleteHeight?: unknown }).renderedAutocompleteHeight;
   return typeof height === 'number' ? height : 0;
 }
-const WRAPPED = Symbol('pi-remote.wrapped');
-
 class Bridge {
+  /** Set when a newer load of this module took over; then this bridge sends nothing. */
+  private disposed = false;
+  /** Root children whose render() this bridge wraps. */
+  private wrapped = new WeakSet<Component>();
   private tui?: TUI;
   private editor?: ObservedEditor;
   private editorContainer?: Container;
@@ -103,7 +109,23 @@ class Bridge {
 
   constructor(readonly channel: Channel) {}
 
+  /** Stop reporting. The render() wrappers stay on Pi's components but only pass through. */
+  dispose(): void {
+    this.disposed = true;
+    this.tui = undefined;
+    this.editor = undefined;
+    this.editorContainer = undefined;
+    this.latest.clear();
+  }
+
+  /** True when this bridge observes the editor that Pi has in its editor slot. */
+  hasInstalledEditor(): boolean {
+    const editor = this.editor;
+    return editor !== undefined && (this.tui?.children ?? []).some(child => (child as Container).children?.includes(editor));
+  }
+
   attach(tui: TUI, editor: EditorComponent, keybindings: KeybindingsManager, kind: 'default' | 'extension', theme?: string): void {
+    if (this.disposed) return;
     this.tui = tui;
     this.editor = editor;
     this.editorContainer = undefined;
@@ -126,6 +148,7 @@ class Bridge {
 
   /** Called by Pi for each terminal input sequence, before the focused component. */
   input(data: string): { consume: true } | undefined {
+    if (this.disposed) return undefined;
     // Development aid: PI_REMOTE_EXTENSION_DEBUG=FILE logs each input with the editor text before it.
     if (process.env.PI_REMOTE_EXTENSION_DEBUG) appendFileSync(process.env.PI_REMOTE_EXTENSION_DEBUG, `${JSON.stringify({ input: data, text: this.editor?.getText() })}\n`);
     const text = decodeSetText(data);
@@ -143,18 +166,18 @@ class Bridge {
     return { consume: true };
   }
 
-  history(text: string): void { this.channel.send({ type: 'history', text }); }
+  history(text: string): void { if (!this.disposed) this.channel.send({ type: 'history', text }); }
 
   private wrapChildren(): boolean {
     const tui = this.tui;
     if (!tui || tui.children.length === 0) return false;
     for (const child of tui.children) {
-      const target = child as Component & { [WRAPPED]?: true };
-      if (target[WRAPPED]) continue;
+      if (this.wrapped.has(child)) continue;
       const render = child.render.bind(child);
-      target[WRAPPED] = true;
+      this.wrapped.add(child);
       child.render = (width: number) => {
         const lines = render(width);
+        if (this.disposed) return lines;
         this.latest.set(child, lines);
         this.width = width;
         this.scheduleFlush();
@@ -246,31 +269,60 @@ class Bridge {
 }
 
 type EditorFactory = NonNullable<Parameters<ExtensionUIContext['setEditorComponent']>[0]>;
-const PATCHED = Symbol('pi-remote.patched');
+
+/** What every load of this module in one Pi process shares. */
+interface Shared {
+  channel: Channel;
+  /** The bridge of the newest load. */
+  bridge?: Bridge;
+  /** Handles the host's control messages; set by the newest load. */
+  onControl?: (message: ControlMessage) => void;
+}
+// Symbol.for: a reloaded copy of this module must find the same values.
+const SHARED = Symbol.for('pi-remote.extension');
+const EDITOR_PATCH = Symbol.for('pi-remote.editor-patch');
+
+function shared(socketPath: string): Shared {
+  const global = globalThis as { [SHARED]?: Shared };
+  const existing = global[SHARED];
+  if (existing) return existing;
+  const created: Shared = { channel: new Channel(socketPath, message => created.onControl?.(message)) };
+  global[SHARED] = created;
+  return created;
+}
+
+/** Pi's own setEditorComponent, and the factory another extension set last. */
+interface EditorPatch { setEditorComponent: ExtensionUIContext['setEditorComponent']; foreign?: EditorFactory }
 
 /**
  * Puts an editor that the Pi extension can observe in Pi's editor slot. Other extensions may
  * set their own editor; the Pi extension wraps their factory instead of replacing it, so their
- * editor stays in use. Pi passes one shared UI object to every extension in a session.
+ * editor stays in use. Pi passes one UI object to every extension in a session, and keeps it
+ * across /reload. The patch is made once per UI object and reports to the newest bridge.
  */
-function installEditor(ui: ExtensionUIContext & { [PATCHED]?: true }, bridge: Bridge): void {
-  if (ui[PATCHED]) return;
-  ui[PATCHED] = true;
-  const setEditorComponent = ui.setEditorComponent.bind(ui);
-  let foreign: EditorFactory | undefined;
+function installEditor(ui: ExtensionUIContext & { [EDITOR_PATCH]?: EditorPatch }, state: Shared): void {
   const wrap = (factory: EditorFactory | undefined): EditorFactory => (tui, theme, keybindings) => {
     const editor = factory
       ? factory(tui, theme, keybindings)
       // Match Pi's default editor, which shows the working status in its top border.
       : new CustomEditor(tui, theme, keybindings, { embedWorkingStatus: true });
     const addToHistory = editor.addToHistory?.bind(editor);
-    if (addToHistory) editor.addToHistory = (text: string) => { addToHistory(text); bridge.history(text); };
-    bridge.attach(tui, editor, keybindings, factory ? 'extension' : 'default', ui.theme.name);
+    if (addToHistory) editor.addToHistory = (text: string) => { addToHistory(text); state.bridge?.history(text); };
+    state.bridge?.attach(tui, editor, keybindings, factory ? 'extension' : 'default', ui.theme.name);
     return editor;
   };
-  ui.setEditorComponent = factory => { foreign = factory; setEditorComponent(wrap(factory)); };
-  ui.getEditorComponent = () => foreign;
-  setEditorComponent(wrap(undefined));
+  let patch = ui[EDITOR_PATCH];
+  if (!patch) {
+    const created: EditorPatch = { setEditorComponent: ui.setEditorComponent.bind(ui) };
+    ui[EDITOR_PATCH] = patch = created;
+    ui.setEditorComponent = factory => { created.foreign = factory; created.setEditorComponent(wrap(factory)); };
+    ui.getEditorComponent = () => created.foreign;
+  }
+  // On /reload and session changes, Pi puts its default editor back without calling
+  // setEditorComponent. Another extension may already have set its editor in this round.
+  if (state.bridge?.hasInstalledEditor()) return;
+  patch.foreign = undefined;
+  patch.setEditorComponent(wrap(undefined));
 }
 
 function sessionMessage(ctx: ExtensionContext): PiExtensionMessage {
@@ -371,10 +423,15 @@ export default function piRemoteExtension(pi: ExtensionAPI): void {
   const socketPath = process.env[PI_EXTENSION_SOCKET_ENV];
   if (!socketPath) return;
   let apiResult: (message: ApiResult) => void = () => {};
-  const bridge = new Bridge(new Channel(socketPath, message => {
+  const state = shared(socketPath);
+  // This load replaces any earlier one in this Pi process (/reload, /new, /resume, /fork).
+  state.bridge?.dispose();
+  const bridge = new Bridge(state.channel);
+  state.bridge = bridge;
+  state.onControl = message => {
     if (message.type === 'prompt') { try { pi.sendUserMessage(message.text); } catch { /* Reported through activity and the screen. */ } }
     else if (message.type === 'apiResult') apiResult(message);
-  }));
+  };
   apiResult = offerApi(pi, bridge.channel);
   reportActivity(pi, event => bridge.channel.send({ type: 'activity', event }));
   // pi-remote commands. They act in the client that ran them.
@@ -391,7 +448,7 @@ export default function piRemoteExtension(pi: ExtensionAPI): void {
     if (ctx.mode !== 'tui') return;
     unsubscribeInput?.();
     unsubscribeInput = ctx.ui.onTerminalInput(data => bridge.input(data));
-    installEditor(ctx.ui, bridge);
+    installEditor(ctx.ui, state);
     bridge.channel.send(sessionMessage(ctx));
   });
   pi.on('session_info_changed', (_event, ctx) => { bridge.channel.send(sessionMessage(ctx)); });
