@@ -14,13 +14,14 @@ import { Supervisor } from '../../src/daemon/supervisor.js';
 import { ScreenState } from '../../src/protocol/screen.js';
 import { readJsonl, writeJsonl } from '../../src/protocol/jsonl.js';
 import { socketPath } from '../../src/protocol/paths.js';
-import { EDITOR_SECTION, type PiExtensionMessage } from '../../src/protocol/pi-extension.js';
+import { EDITOR_SECTION, encodeBarrier, encodeSetText, type PiExtensionMessage } from '../../src/protocol/pi-extension.js';
 import { PI_VERSION, PROTOCOL_VERSION, type RecordValue, type SlotInfo } from '../../src/protocol/types.js';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
 const piCli = join(repo, 'node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js');
 const fixture = join(repo, 'test/golden/fixture-provider.ts');
 const childSlotExtension = join(repo, 'test/fixtures/child-slot-extension.ts');
+const customEditorExtension = join(repo, 'test/fixtures/custom-editor-extension.ts');
 const strip = (text: string) => text.replace(/\x1b\[[0-9;:]*m|\x1b_[^\x07]*\x07|\x1b\]8;;[^\x1b]*\x1b\\/g, '');
 
 /** A daemon client that keeps its own copy of the screen, like a real client. */
@@ -159,6 +160,40 @@ test('slots run Pi in a PTY and share its screen, size and activity with clients
   await first.request('kill', { slotId: created.id });
   assert.equal((await listed()).status, 'exited');
 });
+
+for (const editor of ['default', 'extension'] as const) {
+  test(`after /reload and /new, the ${editor} editor stays local and the Pi extension keeps reporting`, { timeout: 120_000 }, async t => {
+    const { created, first } = await setup(t, editor === 'extension' ? ['--extension', customEditorExtension] : []);
+    await first.attach(created.id);
+    const frame = () => first.screen.snapshot().find(message => message.type === 'frame') as Extract<PiExtensionMessage, { type: 'frame' }> | undefined;
+    const installed = () => first.screen.snapshot().find(message => message.type === 'editorInstalled') as Extract<PiExtensionMessage, { type: 'editorInstalled' }> | undefined;
+    let barrier = 0;
+    /** Type into Pi's editor and wait for the Pi extension to report the state after it. */
+    const typed = async (data: string, text: string, label: string) => {
+      const id = `test:${++barrier}`;
+      await first.request('input', { slotId: created.id, data: data + encodeBarrier(id) });
+      await first.until(() => first.events.some(event => event.type === 'screen' && event.message.type === 'editor'
+        && event.message.barrier === id && event.message.state.text === text), `the editor state after ${label}`);
+    };
+    await first.until(() => frame()?.editorFocused, 'the focused editor');
+    assert.equal(installed()?.editor, editor);
+    await typed('x', 'x', 'typing');
+    await typed('\x7f', '', 'deleting');
+
+    for (const [command, done] of [['/reload', 'Reloaded'], ['/new', 'New session started']] as const) {
+      await first.request('input', { slotId: created.id, data: encodeSetText(command) + '\r' });
+      await first.until(() => first.text().includes(done), `${command} to finish`);
+      await first.until(() => frame()?.editorFocused, `the focused editor after ${command}`);
+      assert.equal(installed()?.editor, editor, `the ${editor} editor after ${command}`);
+      await typed('y', 'y', `typing after ${command}`);
+      await typed('\x7f', '', `deleting after ${command}`);
+      // The reloaded Pi extension still runs its commands.
+      const actions = first.events.filter(event => event.type === 'screen' && event.message.type === 'clientAction').length;
+      await first.request('input', { slotId: created.id, data: encodeSetText('/status') + '\r' });
+      await first.until(() => first.events.filter(event => event.type === 'screen' && event.message.type === 'clientAction').length > actions, `/status after ${command}`);
+    }
+  });
+}
 
 test('restart_daemon reopens slots from their session files', { timeout: 120_000 }, async t => {
   const { created, first, connect, listed, running, restart } = await setup(t);
