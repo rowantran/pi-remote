@@ -2,6 +2,7 @@ import { basename } from 'node:path';
 import { copyToClipboard, getSelectListTheme, type Theme } from '@earendil-works/pi-coding-agent';
 import { getCellDimensions, ProcessTerminal, type Terminal } from '@earendil-works/pi-tui';
 import { PiScreen } from './pi-screen.js';
+import { ForwardedProgramStatus } from './program-status.js';
 import { toKittyInput } from './kitty-keys.js';
 import { loadLocalEditorFactory } from './local-editor.js';
 import type { SlotAttachment } from '../protocol/methods.js';
@@ -52,6 +53,7 @@ export async function runTerminalSession(connection: RemoteConnection, slot: Slo
   let daemon: DaemonState = 'loading';
   let slotInfo = slot;
   const pinger = new Pinger(connection);
+  const status = new ForwardedProgramStatus();
 
   const client: PiScreen = new PiScreen(terminal, {
     send: data => { void connection.request('input', { slotId, data }).catch(() => {}); },
@@ -68,7 +70,11 @@ export async function runTerminalSession(connection: RemoteConnection, slot: Slo
     theme: () => local.theme,
     editorTheme: () => ({ borderColor: text => local.theme?.fg('borderMuted', text) ?? text, selectList: getSelectListTheme() }),
     encodeKey: data => toKittyInput(data),
-    onTerminalOutput: data => { if (data !== '\x07' || local.bell) terminal.write(data); },
+    onTerminalOutput: (data, kind) => {
+      if (kind === 'bell' && !local.bell) return;
+      if (kind === 'status') status.wrote(data);
+      terminal.write(data);
+    },
     notify: message => notify(message),
     editExternally: async text => {
       client.tui.stop();
@@ -146,7 +152,11 @@ export async function runTerminalSession(connection: RemoteConnection, slot: Slo
     connection.onReconnect?.(attachment => {
       connected = true; connectedAt = Date.now(); reconnects++;
       client.reset();
+      // The attachment repeats Pi's current status. Without one (Pi restarted or cleared it
+      // meanwhile), remove the record from before the disconnect.
+      const stale = status.clear();
       apply(attachment);
+      if (stale && !status.active) terminal.write(stale);
       client.setBanner(undefined);
     }) ?? (() => {}),
   ];
@@ -183,6 +193,9 @@ export async function runTerminalSession(connection: RemoteConnection, slot: Slo
     client.stop();
     throw error;
   } finally {
+    // Leave no status from this slot on the local terminal after detaching or stopping.
+    const clear = status.clear();
+    if (clear) terminal.write(clear);
     clearTimeout(notice);
     for (const unsubscribe of subscriptions) unsubscribe();
   }

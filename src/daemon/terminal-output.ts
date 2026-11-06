@@ -5,8 +5,9 @@ const MAX_PENDING = 64 * 1024;
 
 /**
  * Finds the parts of Pi's PTY output that a real terminal acts on, apart from drawing: a
- * bell, the window title (OSC 0/2), notifications (OSC 9, OSC 777), progress (OSC 9;4) and
- * clipboard writes (OSC 52). The host discards everything else; the client draws the screen.
+ * bell, the window title (OSC 0/2), notifications (OSC 9, OSC 777), progress (OSC 9;4),
+ * clipboard writes (OSC 52) and program status reports (OSC 7501). The host discards
+ * everything else; the client draws the screen.
  */
 export class TerminalOutputFilter {
   private pending = '';
@@ -50,5 +51,6 @@ function oscKind(body: string): TerminalMessage['kind'] | undefined {
   if (code === '52') return 'clipboard';
   if (code === '9') return body.startsWith('9;4;') ? 'progress' : 'notify';
   if (code === '777') return 'notify';
+  if (code === '7501') return body.startsWith('7501;?') ? undefined : 'status';
   return undefined;
 }

@@ -190,8 +190,8 @@ export interface PiScreenOptions {
   onDetach?: () => void;
   /** An extension in Pi asked to open a pane attached to slot `slotId` (PiRemoteApi.openSlot). */
   onOpenSlot?: (request: { requestId: string; slotId: string; slotNumber?: number }) => void;
-  /** Output Pi wrote for a real terminal: bell, title, notification, progress, clipboard. */
-  onTerminalOutput?: (data: string) => void;
+  /** Output Pi wrote for a real terminal: bell, title, notification, progress, clipboard, program status. */
+  onTerminalOutput?: (data: string, kind: Extract<PiExtensionMessage, { type: 'terminal' }>['kind']) => void;
   /** Pi's external-editor key: edit `text` locally and return the result. */
   editExternally?: (text: string) => Promise<string>;
   /** Pi's clipboard-paste key: read the local clipboard and return text to insert. */
@@ -352,7 +352,7 @@ export class PiScreen {
         else if (message.action === 'status') { if (!this.statusPanel) this.toggleStatus(); }
         else if (message.action === 'openSlot') this.options.onOpenSlot?.(message);
         break;
-      case 'terminal': this.options.onTerminalOutput?.(message.data); break;
+      case 'terminal': this.options.onTerminalOutput?.(message.data, message.kind); break;
       case 'editorChrome': {
         const editor = this.editor;
         if (!editor) break;

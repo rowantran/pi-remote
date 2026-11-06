@@ -69,7 +69,7 @@ Inside a slot, every key and slash command is Pi's own, with these additions:
 
 Ctrl+/ needs a terminal with the kitty keyboard protocol (Ghostty, kitty, WezTerm, recent iTerm2); elsewhere it is the same key as Ctrl+-, Pi's undo. `/status` always works. Pi in a slot always uses the kitty keyboard protocol; keys from other terminals are converted.
 
-Pi's bell, window title, desktop notifications, progress, and clipboard writes (`/copy`, OSC 52) reach your local terminal. `--no-bell` or `"bell": false` mutes the bell.
+Pi's bell, window title, desktop notifications, progress, clipboard writes (`/copy`, OSC 52), and program status (working, blocked, done, error; OSC 7501, for terminals such as Rex) reach your local terminal. A client that attaches later gets the current title and status. When the client exits, it clears the status it set. `--no-bell` or `"bell": false` mutes the bell.
 
 ### Child slots and panes for extensions
 
@@ -300,7 +300,7 @@ cli ──→ web/server ──→ daemon, client, protocol, config, web/shared
 
 - `src/pi-extension/pi-remote.ts`: pi-remote's Pi extension, loaded into each slot's Pi. Sends Pi's screen sections, editor state, session facts and lifecycle events; registers `/detach` and `/status`; offers the extension API for child slots and panes.
 - `src/protocol/pi-extension.ts`, `screen.ts`: the extension's messages, input barriers and line diffs; a screen copy that rebuilds a client from nothing. `extension-api.ts`: the API for other extensions. `types.ts`, `methods.ts`: daemon wire records and methods.
-- `src/daemon/supervisor.ts`: slots, persistence, attachments, input, size ownership, activity, reload and daemon restart. `pi-terminal.ts`, `terminal-output.ts`: runs Pi in a PTY, answers its terminal queries, and forwards bell, title, notification and clipboard output. `session-dirs.ts`, `side-fork.ts`: session directories, and the fork for the `create` method with `parentSlotId`. `launch.ts`, `bridge.ts`, `files.ts`: daemon startup, socket bridging, remote filesystem requests.
+- `src/daemon/supervisor.ts`: slots, persistence, attachments, input, size ownership, activity, reload and daemon restart. `pi-terminal.ts`, `terminal-output.ts`: runs Pi in a PTY, answers its terminal queries, and forwards bell, title, notification, progress, clipboard and program status output. `session-dirs.ts`, `side-fork.ts`: session directories, and the fork for the `create` method with `parentSlotId`. `launch.ts`, `bridge.ts`, `files.ts`: daemon startup, socket bridging, remote filesystem requests.
 - `src/client/`: SSH transport, reconnect without replay, legacy filesystem fallback, daemon replacement.
 - `src/tui/pi-screen.ts`: Pi's screen rebuilt locally (layout, scrolling, local editor, status panel). `terminal-session.ts`: connects PiScreen to the daemon and this terminal for one slot (the phone's counterpart is `src/web/client/session-view.ts`). `side-launcher.ts`: Ghostty splits for new panes. `kitty-keys.ts`: converts legacy key sequences to the kitty keyboard protocol Pi uses. `local-editor.ts`: local copies of editor extensions. `fuzzy-picker.ts`, `slot-table.ts`, `session-table.ts`, `host-status.ts`: pickers, lists and status rows.
 - `src/web/client/session-view.ts`: PiScreen in the phone's browser terminal.
