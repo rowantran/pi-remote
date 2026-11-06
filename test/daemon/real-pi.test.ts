@@ -133,6 +133,8 @@ test('slots run Pi in a PTY and share its screen, size and activity with clients
   assert.ok(second.text().includes('DAEMON_SHELL_OK'), 'attach returns the current screen');
   // Pi set the window title at startup, before this client attached.
   assert.ok((attached.messages as PiExtensionMessage[]).some(message => message.type === 'terminal' && message.kind === 'title' && message.data.includes('π - ')), 'attach returns the window title');
+  // The host answered Pi's program status query (OSC 7501), so Pi reported its status.
+  assert.ok((attached.messages as PiExtensionMessage[]).some(message => message.type === 'terminal' && message.kind === 'status' && message.data.startsWith('\x1b]7501;state=idle')), 'attach returns the program status');
   assert.equal(second.frameWidth(), 100, 'attaching alone does not take the size');
   await second.request('input', { slotId: created.id, data: 'x' });
   await second.until(() => second.frameWidth() === 80, 'the new width');

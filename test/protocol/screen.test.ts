@@ -40,3 +40,13 @@ test('a snapshot keeps the last window title, but not one-time terminal output',
   state.apply({ type: 'terminal', kind: 'title', data: '\x1b]0;π - renamed - repo\x07' });
   assert.deepEqual(state.snapshot(), [{ type: 'terminal', kind: 'title', data: '\x1b]0;π - renamed - repo\x07' }]);
 });
+
+test('a snapshot keeps the last program status until Pi clears it', () => {
+  const state = new ScreenState();
+  const status = (data: string): PiExtensionMessage => ({ type: 'terminal', kind: 'status', data });
+  state.apply(status('\x1b]7501;state=working:app=pi\x1b\\'));
+  state.apply(status('\x1b]7501;state=blocked:app=pi:kind=question\x1b\\'));
+  assert.deepEqual(state.snapshot(), [status('\x1b]7501;state=blocked:app=pi:kind=question\x1b\\')]);
+  state.apply(status('\x1b]7501;state=clear\x1b\\'));
+  assert.deepEqual(state.snapshot(), []);
+});

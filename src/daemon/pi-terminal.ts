@@ -29,8 +29,12 @@ const oscColor = (color: RgbColor) => `rgb:${hex16(color.r)}/${hex16(color.g)}/$
 /**
  * Terminal queries that Pi's renderer writes at startup. Pi runs in a PTY whose output
  * nobody displays, so the host answers them with the client terminal's values.
+ *
+ * The program status query (OSC 7501) is always answered: the host forwards Pi's status
+ * reports to every client, and terminals without the protocol ignore them.
  */
-const QUERY = /\x1b\[\?u|\x1b\[0?c|\x1b\](10|11|4;(\d+));\?(?:\x07|\x1b\\)|\x1b\[16t/g;
+const QUERY = /\x1b\[\?u|\x1b\[0?c|\x1b\](10|11|4;(\d+)|7501);\?(?:\x07|\x1b\\)|\x1b\[16t/g;
+const PROGRAM_STATUS_REPLY = '\x1b]7501;?\x1b\\';
 const QUERY_TAIL_BYTES = 64;
 
 /** Dark or light, from the background's relative luminance; undefined without a background. */
@@ -49,6 +53,7 @@ export function answerQueries(output: string, answers: TerminalAnswers, after = 
     if (query === '\x1b[?u') { if (answers.kittyFlags !== undefined) reply += `\x1b[?${answers.kittyFlags}u`; }
     else if (query === '\x1b[c' || query === '\x1b[0c') reply += '\x1b[?62;22c';
     else if (query === '\x1b[16t') { if (answers.cell) reply += `\x1b[6;${answers.cell.height};${answers.cell.width}t`; }
+    else if (match[1] === '7501') reply += PROGRAM_STATUS_REPLY;
     else if (match[1] === '10' && answers.foreground) reply += `\x1b]10;${oscColor(answers.foreground)}\x1b\\`;
     else if (match[1] === '11' && answers.background) reply += `\x1b]11;${oscColor(answers.background)}\x1b\\`;
     else if (match[2] !== undefined) {

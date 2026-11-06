@@ -2,9 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { CustomEditor } from '@earendil-works/pi-coding-agent';
 import { TUI_KEYBINDINGS, type Terminal } from '@earendil-works/pi-tui';
+// Pi's own check of the program status reply; not exported from the package index.
+import { isProgramStatusReply } from '@earendil-works/pi-tui/dist/program-status.js';
 import { PiScreen, STATUS_KEY } from '../../src/tui/pi-screen.js';
+import { ForwardedProgramStatus } from '../../src/tui/program-status.js';
 import { answerQueries } from '../../src/daemon/pi-terminal.js';
-import { decodeBarrier, type PiExtensionMessage, type EditorState } from '../../src/protocol/pi-extension.js';
+import { decodeBarrier, PROGRAM_STATUS_CLEAR, type PiExtensionMessage, type EditorState } from '../../src/protocol/pi-extension.js';
 
 class FakeTerminal implements Terminal {
   columns = 80; rows = 24; kittyProtocolActive = true;
@@ -216,4 +219,20 @@ test('terminal queries from Pi are answered with the client terminal values', ()
   assert.equal(answerQueries('\x1b[?u', {}), '', 'no kitty answer when the client terminal does not use it');
   assert.equal(answerQueries('xx\x1b[c', answers, 5), '', 'queries already answered in the previous read');
   assert.equal(answerQueries('xx\x1b[c', answers, 3), '\x1b[?62;22c', 'a query that ends in the new data');
+  // Pi takes program status support only from a reply that comes before the DA reply.
+  assert.equal(answerQueries('\x1b[?u\x1b]7501;?\x1b\\\x1b[c', {}), '\x1b]7501;?\x1b\\\x1b[?62;22c', 'program status is always supported');
+  assert.ok(isProgramStatusReply('\x1b]7501;?\x1b\\'));
+});
+
+test('the client clears a forwarded program status once, and not after Pi cleared it', () => {
+  const status = new ForwardedProgramStatus();
+  assert.equal(status.clear(), '', 'nothing forwarded');
+  status.wrote('\x1b]7501;state=working:app=pi\x1b\\');
+  assert.equal(status.active, true);
+  assert.equal(status.clear(), PROGRAM_STATUS_CLEAR);
+  assert.equal(status.clear(), '', 'cleared already');
+  status.wrote('\x1b]7501;state=done:app=pi\x1b\\');
+  status.wrote('\x1b]7501;app=pi:state=clear\x07');
+  assert.equal(status.active, false, 'Pi cleared it');
+  assert.equal(status.clear(), '');
 });

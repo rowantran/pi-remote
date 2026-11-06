@@ -96,10 +96,11 @@ export type PiExtensionMessage =
   | { type: 'openSlot'; id: string; slotId: string }
   /**
    * Terminal output Pi wrote to its PTY that only a real terminal can act on: a bell, the
-   * window title, a desktop notification, progress, or a clipboard write (OSC 52). Added by
-   * the host, not the Pi extension. `data` is the escape sequence to write to the local terminal.
+   * window title, a desktop notification, progress, a clipboard write (OSC 52), or a program
+   * status report (OSC 7501: working, blocked, done, error, idle, clear). Added by the host, not
+   * the Pi extension. `data` is the escape sequence to write to the local terminal.
    */
-  | { type: 'terminal'; kind: 'bell' | 'title' | 'notify' | 'progress' | 'clipboard'; data: string };
+  | { type: 'terminal'; kind: 'bell' | 'title' | 'notify' | 'progress' | 'clipboard' | 'status'; data: string };
 
 /** Messages from the host to the Pi extension. */
 export type ControlMessage =
@@ -111,6 +112,14 @@ export type ControlMessage =
    * exists. For openSlot, `error` says why no pane opened.
    */
   | { type: 'apiResult'; id: string; slotId?: string; slotNumber?: number; error?: string };
+
+/** Removes the program status record (OSC 7501) that earlier status reports set on a terminal. */
+export const PROGRAM_STATUS_CLEAR = '\x1b]7501;state=clear\x1b\\';
+
+/** True for an OSC 7501 report with `state=clear`. */
+export function isProgramStatusClear(data: string): boolean {
+  return /^\x1b\]7501;(?:[^\x07\x1b]*:)?state=clear(?:[:\x07\x1b]|$)/.test(data);
+}
 
 /** APC (application program command) escape sequences pass through Pi's input parser as one unit. */
 const BARRIER_PREFIX = '\x1b_pi-remote:barrier:';

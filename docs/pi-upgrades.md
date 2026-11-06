@@ -50,7 +50,7 @@ The daemon refuses to start slots when the host's Pi is not `PI_VERSION`. `npm r
 |---|---|
 | `pi --version` prints only the version. | Test: `test/integration/entrypoints.test.ts` (`check-pi`). |
 | Pi accepts `--tui-mode regular`, `-e PATH`, `--session`, `--session-dir`, and the other options in `RESERVED_ARGS`. | Test: every test in `real-pi.test.ts` starts Pi this way. |
-| Pi answers terminal queries and writes the bell, title, notifications, progress and OSC 52 clipboard as `src/daemon/terminal-output.ts` expects. | Test: `real-pi.test.ts` checks the window title. Manual: `/copy` reaches the laptop clipboard. |
+| Pi answers terminal queries and writes the bell, title, notifications, progress, OSC 52 clipboard and OSC 7501 program status as `src/daemon/terminal-output.ts` expects. Pi sends the program status query (`ESC ]7501;?`) before the DA query and reports only after a reply that `src/daemon/pi-terminal.ts` gives. | Test: `real-pi.test.ts` checks the window title and the program status. Manual: `/copy` reaches the laptop clipboard. |
 
 ### Session files (written by the host's Pi, read by the pinned packages)
 

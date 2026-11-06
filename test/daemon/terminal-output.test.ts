@@ -16,3 +16,10 @@ test('an OSC sequence split across reads is found once it ends', () => {
   assert.deepEqual(filter.feed('x\x1b]52;c;aG'), []);
   assert.deepEqual(filter.feed('k=\x07').map(message => message.data), ['\x1b]52;c;aGk=\x07']);
 });
+
+test('keeps program status reports (OSC 7501) but not the support query', () => {
+  const filter = new TerminalOutputFilter();
+  const working = '\x1b]7501;state=working:app=pi:msg=cmVwbw==\x1b\\';
+  const found = filter.feed(`\x1b]7501;?\x1b\\\x1b[c${working}\x1b]7501;state=clear\x07`);
+  assert.deepEqual(found.map(message => [message.kind, message.data]), [['status', working], ['status', '\x1b]7501;state=clear\x07']]);
+});

@@ -115,6 +115,8 @@ socket.on('data', chunk => {
 socket.on('connect', () => {
   // Like Pi, set the window title once at startup.
   process.stdout.write(`\x1b]0;π - ${process.cwd().split('/').pop()}\x07`);
+  // Like Pi, ask whether the terminal takes program status reports (OSC 7501).
+  process.stdout.write('\x1b]7501;?\x1b\\');
   send({ type: 'editorInstalled', editor: 'default', bindings: {} });
   frame(true);
   setTimeout(session, Number(process.env.PI_FIXTURE_SLOW_START ?? 0));
@@ -123,8 +125,10 @@ socket.on('connect', () => {
 process.stdin.setRawMode?.(true);
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', data => {
-  // Barriers and other APC messages are not text.
-  const text = data.replace(/\x1b_[^\x1b]*\x1b\\/g, '');
+  // Like Pi, report program status once the terminal answers the query.
+  if (data.includes('\x1b]7501;?')) process.stdout.write('\x1b]7501;state=idle:app=pi\x1b\\');
+  // Barriers, other APC messages and terminal replies are not text.
+  const text = data.replace(/\x1b_[^\x1b]*\x1b\\/g, '').replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
   for (const character of text) {
     if (character === '\r') { const value = draft; draft = ''; if (value.startsWith('/child')) child(value); else if (value) prompt(value); }
     else if (character === '\x7f') draft = draft.slice(0, -1);

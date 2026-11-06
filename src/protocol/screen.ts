@@ -1,4 +1,4 @@
-import { applyDiff, diffLines, SECTION_COUNT, type PiExtensionMessage, type LineDiff } from './pi-extension.js';
+import { applyDiff, diffLines, isProgramStatusClear, SECTION_COUNT, type PiExtensionMessage, type LineDiff } from './pi-extension.js';
 
 type Frame = Extract<PiExtensionMessage, { type: 'frame' }>;
 type TerminalOutput = Extract<PiExtensionMessage, { type: 'terminal' }>;
@@ -20,6 +20,9 @@ export class ScreenState {
   /** Pi sets the window title once at startup and again on session changes and renames, so a
    * client that attaches later needs the last one. Other terminal output is a one-time event. */
   private title?: TerminalOutput;
+  /** The last program status report (OSC 7501), so a client that attaches while Pi works or
+   * waits shows that state. `state=clear` leaves nothing to replay. */
+  private status?: TerminalOutput;
 
   apply(message: PiExtensionMessage): void {
     switch (message.type) {
@@ -44,7 +47,10 @@ export class ScreenState {
         if (this.history.length > HISTORY_LIMIT) this.history.splice(0, this.history.length - HISTORY_LIMIT);
         break;
       case 'session': this.session = message; break;
-      case 'terminal': if (message.kind === 'title') this.title = message; break;
+      case 'terminal':
+        if (message.kind === 'title') this.title = message;
+        else if (message.kind === 'status') this.status = isProgramStatusClear(message.data) ? undefined : message;
+        break;
       case 'activity': case 'clientAction': case 'createChildSlot': case 'openSlot': break;
     }
   }
@@ -65,6 +71,7 @@ export class ScreenState {
     }
     if (this.editor) messages.push(this.editor);
     if (this.title) messages.push(this.title);
+    if (this.status) messages.push(this.status);
     return messages;
   }
 }
