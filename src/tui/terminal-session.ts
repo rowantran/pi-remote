@@ -15,7 +15,7 @@ import { slotStatusLines } from './host-status.js';
 import { readPresentationConfig } from '../config/presentation.js';
 import { detachMessage, stoppedMessage } from './session-labels.js';
 import { paint } from './table.js';
-import { attachInvocation, formatInvocation, ghosttyLauncher, resolveSplitDirection, type AttachContext, type GhosttyLauncher, type SplitDirection } from './side-launcher.js';
+import { attachInvocation, detectSideLauncher, formatInvocation, resolveSplitDirection, type AttachContext, type SideLauncher, type SplitDirection } from './side-launcher.js';
 
 export interface TerminalSessionOptions {
   /** Display name of the machine Pi runs on, for the status panel. */
@@ -31,7 +31,7 @@ export interface TerminalSessionOptions {
   /** Replace in tests. */
   terminal?: Terminal;
   /** Replace in tests. */
-  sideLauncher?: GhosttyLauncher;
+  sideLauncher?: SideLauncher;
 }
 
 const SAMPLES = 20;
@@ -110,7 +110,7 @@ export async function runTerminalSession(connection: RemoteConnection, slot: Slo
       },
     },
   });
-  /** Open a Ghostty split beside this pane, attached to `targetId`. Returns why it failed, if it did. */
+  /** Open a Ghostty or Rex split beside this pane, attached to `targetId`. Returns why it failed, if it did. */
   const openSlot = async (targetId: string, number?: number): Promise<string | undefined> => {
     let command: string | undefined;
     try {
@@ -119,7 +119,7 @@ export async function runTerminalSession(connection: RemoteConnection, slot: Slo
       command = formatInvocation(invocation);
       const cell = getCellDimensions();
       const direction = resolveSplitDirection(local.sideSplit, { columns: terminal.columns, rows: terminal.rows, cellWidth: cell?.widthPx, cellHeight: cell?.heightPx });
-      const launcher = options.sideLauncher ?? ghosttyLauncher;
+      const launcher = options.sideLauncher ?? detectSideLauncher();
       await launcher.open({ invocation, targetId: await launcher.captureTarget(), direction, cwd: process.cwd() });
       return undefined;
     } catch (error) {

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -23,7 +23,7 @@ export function resolveSplitDirection(direction: SplitDirection, dimensions: Spl
 }
 
 /** Resolved local-client settings, not remote Pi arguments or environment variables.
- * Relative UI paths keep their meaning when openGhosttySplit uses the client's cwd. */
+ * Relative UI paths keep their meaning because splits start in the client's cwd. */
 export interface AttachContext {
   host?: string;
   local?: boolean;
@@ -72,7 +72,7 @@ export function formatInvocation(invocation: AttachInvocation): string {
   return [invocation.command, ...invocation.args].map(shellQuote).join(' ');
 }
 
-export interface GhosttySplitOptions {
+export interface SideSplitOptions {
   invocation: AttachInvocation;
   /** Capture before creating the remote slot, so changing focus cannot redirect the split. */
   targetId: string;
@@ -81,30 +81,54 @@ export interface GhosttySplitOptions {
   /** Only the SSH/UI/PATH allowlist is forwarded. Defaults to the current client environment. */
   environment?: Readonly<NodeJS.ProcessEnv>;
 }
-export type GhosttyExecFile = (command: string, args: string[], options: {
+export type LauncherExecFile = (command: string, args: string[], options: {
   encoding: 'utf8'; timeout: number; maxBuffer: number;
 }) => Promise<{ stdout: string; stderr?: string }>;
-export interface GhosttyDependencies {
+export interface LauncherDependencies {
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
-  execFile?: GhosttyExecFile;
+  execFile?: LauncherExecFile;
 }
-export interface GhosttyLauncher {
+/** Opens a pane beside the client's own pane in the terminal the client runs in. */
+export interface SideLauncher {
   captureTarget(): Promise<string>;
-  open(options: GhosttySplitOptions): Promise<void>;
+  open(options: SideSplitOptions): Promise<void>;
 }
+export type GhosttySplitOptions = SideSplitOptions;
+export type GhosttyExecFile = LauncherExecFile;
+export type GhosttyDependencies = LauncherDependencies;
+export type GhosttyLauncher = SideLauncher;
 
 const execute = promisify(execFile);
 // The command bypasses shell startup. Carry only settings needed for SSH and
 // trusted local UI adapters; never copy credentials or the whole client environment.
 const INHERITED_ENVIRONMENT = ['SSH_AUTH_SOCK', 'PI_CODING_AGENT_DIR', 'PI_REMOTE_RENDERER_REPO', 'XDG_CONFIG_HOME', 'PATH'] as const;
+
+/** `KEY=value` for each allowlisted variable that is set, in allowlist order. */
+function inheritedAssignments(environment: Readonly<NodeJS.ProcessEnv>): string[] {
+  const assignments: string[] = [];
+  for (const key of INHERITED_ENVIRONMENT) {
+    const value = environment[key];
+    if (value === undefined) continue;
+    if (value.includes('\0')) throw new Error(`The ${key} environment variable contains a NUL character.`);
+    assignments.push(`${key}=${value}`);
+  }
+  return assignments;
+}
+
+function launchDirectory(cwd: string | undefined): string {
+  const directory = resolve(cwd ?? process.cwd());
+  if (directory.includes('\0')) throw new Error('The local working directory contains a NUL character.');
+  return directory;
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const REQUIREMENTS = 'Ghostty splits require macOS and Ghostty 1.3 or newer, with macos-applescript = true and macOS Automation permission for Ghostty.';
 
 function preflight(dependencies: GhosttyDependencies): void {
   if ((dependencies.platform ?? process.platform) !== 'darwin') throw new Error(REQUIREMENTS);
   const env = dependencies.env ?? process.env;
-  if (env.TERM_PROGRAM?.toLowerCase() !== 'ghostty') throw new Error(`Run this command in Ghostty. ${REQUIREMENTS}`);
+  if (env.TERM_PROGRAM?.toLowerCase() !== 'ghostty') throw new Error(`Run this command in Ghostty or Rex. ${REQUIREMENTS}`);
 }
 
 async function runScript(script: string, args: string[], dependencies: GhosttyDependencies): Promise<string> {
@@ -175,28 +199,79 @@ const OPEN_SPLIT = `on run argv
   end tell
 end run`;
 
-export async function openGhosttySplit(options: GhosttySplitOptions, dependencies: GhosttyDependencies = {}): Promise<void> {
+export async function openGhosttySplit(options: SideSplitOptions, dependencies: LauncherDependencies = {}): Promise<void> {
   if (!UUID.test(options.targetId)) throw new Error('A captured Ghostty terminal ID is required.');
   if (!['right', 'down', 'left', 'up'].includes(options.direction)) throw new Error('Resolve the split direction before opening Ghostty.');
-  const cwd = resolve(options.cwd ?? process.cwd());
-  if (cwd.includes('\0')) throw new Error('The local working directory contains a NUL character.');
+  const cwd = launchDirectory(options.cwd);
   // The embedded API treats command overrides as shell commands (not config
   // shell:/direct: prefixes). On macOS Ghostty already wraps this as
   // /bin/bash --noprofile --norc -c "exec -l <command>"; another exec would fail.
   // https://github.com/ghostty-org/ghostty/blob/v1.3.1/src/termio/Exec.zig#L1511-L1530
   const command = formatInvocation(options.invocation);
-  const environment = options.environment ?? dependencies.env ?? process.env;
-  const assignments: string[] = [];
-  for (const key of INHERITED_ENVIRONMENT) {
-    const value = environment[key];
-    if (value === undefined) continue;
-    if (value.includes('\0')) throw new Error(`The ${key} environment variable contains a NUL character.`);
-    assignments.push(`${key}=${value}`);
-  }
+  const assignments = inheritedAssignments(options.environment ?? dependencies.env ?? process.env);
   await runScript(OPEN_SPLIT, [options.targetId, options.direction, command, cwd, ...assignments], dependencies);
 }
 
-export const ghosttyLauncher: GhosttyLauncher = {
+export const ghosttyLauncher: SideLauncher = {
   captureTarget: () => captureGhosttyTarget(),
   open: options => openGhosttySplit(options),
 };
+
+// Rex (com.superlogical.rex) sets REX_BLOCK to each pane's ("block's") own ID, and
+// TERM_PROGRAM=rex. See `rex split --help`: `rex split -b BLOCK` opens a new block beside it.
+const REX_BLOCK = /^block:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const REX_REQUIREMENTS = 'Rex splits need the rex command and a REX_BLOCK set by Rex for this pane.';
+const REX_DIRECTIONS: Record<ExplicitSplitDirection, string> = { right: 'right', down: 'below', left: 'left', up: 'above' };
+
+/** The client's own block. Unlike Ghostty's focused terminal, focus changes cannot move it. */
+export async function captureRexTarget(dependencies: LauncherDependencies = {}): Promise<string> {
+  if ((dependencies.platform ?? process.platform) === 'win32') throw new Error(`Rex splits are not supported on Windows. ${REX_REQUIREMENTS}`);
+  const block = (dependencies.env ?? process.env).REX_BLOCK;
+  if (!block || !REX_BLOCK.test(block)) throw new Error(`Run this command in a Rex pane. ${REX_REQUIREMENTS}`);
+  return block;
+}
+
+/** The rex next to Rex's server, as Rex sets REX_BIN_DIR in each pane; otherwise rex on PATH. */
+function rexCommand(env: NodeJS.ProcessEnv): string {
+  return env.REX_BIN_DIR && isAbsolute(env.REX_BIN_DIR) ? join(env.REX_BIN_DIR, 'rex') : 'rex';
+}
+
+export async function openRexSplit(options: SideSplitOptions, dependencies: LauncherDependencies = {}): Promise<void> {
+  await captureRexTarget(dependencies);
+  if (!REX_BLOCK.test(options.targetId)) throw new Error('A captured Rex block ID is required.');
+  if (!Object.hasOwn(REX_DIRECTIONS, options.direction)) throw new Error('Resolve the split direction before opening Rex.');
+  const cwd = launchDirectory(options.cwd);
+  const env = dependencies.env ?? process.env;
+  const assignments = inheritedAssignments(options.environment ?? env);
+  const { command, args } = options.invocation;
+  formatInvocation(options.invocation);
+  // Rex starts the block with its server's environment, not ours, and has no option to set
+  // variables, so /usr/bin/env sets the allowlist. env(1) reads every argument containing
+  // `=` before the program as an assignment, so the program must not contain one.
+  if (!isAbsolute(command) || command.includes('=')) throw new Error('Rex splits need an absolute launch executable without "=".');
+  // --shell=none starts the program directly, and Rex passes each argument unchanged.
+  const rexArgs = ['split', '-b', options.targetId, '--split', REX_DIRECTIONS[options.direction], '--cwd', cwd, '--shell=none', '--',
+    '/usr/bin/env', ...assignments, command, ...args];
+  try {
+    // No env option: rex needs REX_SERVER and friends from this pane to reach the right server.
+    await (dependencies.execFile ?? execute)(rexCommand(env), rexArgs, { encoding: 'utf8', timeout: 15_000, maxBuffer: 64 * 1024 });
+  } catch (error) {
+    // execFile's message can include its argv (and thus user paths). Prefer rex's diagnostic.
+    const failure = error as { stderr?: string };
+    const reason = failure.stderr?.trim().replace(/^Error:\s*/, '');
+    throw new Error(`Could not split the Rex pane. ${REX_REQUIREMENTS}${reason ? ` ${reason}` : ''}`, { cause: error });
+  }
+}
+
+export const rexLauncher: SideLauncher = {
+  captureTarget: () => captureRexTarget(),
+  open: options => openRexSplit(options),
+};
+
+/** Rex when the client runs in a Rex pane (also inside tmux there); Ghostty otherwise. */
+export function detectSideLauncher(env: NodeJS.ProcessEnv = process.env): SideLauncher {
+  const program = env.TERM_PROGRAM?.toLowerCase();
+  if (program === 'rex') return rexLauncher;
+  if (program !== 'ghostty' && env.REX_BLOCK) return rexLauncher;
+  return ghosttyLauncher;
+}

@@ -27,7 +27,7 @@ export interface PiRemoteApi {
   createChildSlot(options: { sessionFile: string; sessionDir?: string; prompt?: string }): Promise<{ slotId: string; slotNumber?: number; error?: string }>;
   /**
    * Ask the pi-remote client where the user typed or resized last to open a pane attached to
-   * `slotId` (a Ghostty split on macOS). Resolves once the pane is open; rejects with the
+   * `slotId` (a Ghostty split on macOS, or a Rex split). Resolves once the pane is open; rejects with the
    * reason otherwise, for example another terminal or the phone.
    */
   openSlot(options: { slotId: string }): Promise<void>;
