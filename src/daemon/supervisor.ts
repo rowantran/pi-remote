@@ -36,7 +36,7 @@ const KITTY_FLAGS = 7;
 /** Terminal size until a client attaches. */
 const DEFAULT_SIZE = { columns: 120, rows: 40 };
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
-/** Opening a pane runs Ghostty's AppleScript on the client, which can take seconds. */
+/** Opening a pane runs Ghostty's AppleScript or Rex's CLI on the client, which can take seconds. */
 const OPEN_SLOT_TIMEOUT_MS = 40_000;
 
 type ApiRequest = Extract<PiExtensionMessage, { type: 'createChildSlot' | 'openSlot' }>;

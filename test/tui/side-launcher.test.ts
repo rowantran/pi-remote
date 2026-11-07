@@ -4,8 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import {
-  attachInvocation, captureGhosttyTarget, formatInvocation, ghosttyLauncher,
-  isSplitDirection, openGhosttySplit, resolveSplitDirection,
+  attachInvocation, captureGhosttyTarget, captureRexTarget, detectSideLauncher, formatInvocation, ghosttyLauncher,
+  isSplitDirection, openGhosttySplit, openRexSplit, resolveSplitDirection, rexLauncher,
   type AttachInvocation, type ExplicitSplitDirection, type GhosttyDependencies, type GhosttyExecFile,
 } from '../../src/tui/side-launcher.js';
 
@@ -263,4 +263,148 @@ test('invalid allowlisted environment values fail before osascript without expos
 test('default launcher exposes the parent integration methods without opening panes', () => {
   assert.equal(typeof ghosttyLauncher.captureTarget, 'function');
   assert.equal(typeof ghosttyLauncher.open, 'function');
+});
+
+const BLOCK = 'block:01a1b3a3-a54a-7249-9025-fd5f41c3f599';
+const REX_BIN_DIR = '/Users/me/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS';
+
+function mockRex(env: NodeJS.ProcessEnv = { TERM_PROGRAM: 'rex', REX_BLOCK: BLOCK, REX_BIN_DIR }) {
+  const calls: { command: string; args: string[]; options: Parameters<GhosttyExecFile>[2] }[] = [];
+  const dependencies: GhosttyDependencies = {
+    platform: 'darwin', env,
+    execFile: async (command, args, options) => { calls.push({ command, args, options }); return { stdout: '{}' }; },
+  };
+  return { dependencies, calls };
+}
+
+test('the launcher follows the terminal the client runs in', () => {
+  assert.equal(detectSideLauncher({ TERM_PROGRAM: 'rex', REX_BLOCK: BLOCK }), rexLauncher);
+  assert.equal(detectSideLauncher({ TERM_PROGRAM: 'Rex' }), rexLauncher);
+  // tmux inside a Rex pane keeps REX_BLOCK.
+  assert.equal(detectSideLauncher({ TERM_PROGRAM: 'tmux', REX_BLOCK: BLOCK }), rexLauncher);
+  assert.equal(detectSideLauncher({ TERM_PROGRAM: 'ghostty' }), ghosttyLauncher);
+  assert.equal(detectSideLauncher({ TERM_PROGRAM: 'ghostty', REX_BLOCK: BLOCK }), ghosttyLauncher);
+  // Other terminals keep the Ghostty launcher and its explanation.
+  assert.equal(detectSideLauncher({ TERM_PROGRAM: 'iTerm.app' }), ghosttyLauncher);
+  assert.equal(detectSideLauncher({}), ghosttyLauncher);
+});
+
+test('Rex capture returns the client\'s own block without running anything', async () => {
+  const { dependencies, calls } = mockRex();
+  assert.equal(await captureRexTarget(dependencies), BLOCK);
+  assert.equal(calls.length, 0);
+});
+
+test('Rex capture and split refuse panes without a valid REX_BLOCK, and Windows', async () => {
+  for (const [env, platform] of [
+    [{ TERM_PROGRAM: 'rex' }, 'darwin'],
+    [{ TERM_PROGRAM: 'rex', REX_BLOCK: '' }, 'darwin'],
+    [{ TERM_PROGRAM: 'rex', REX_BLOCK: 'session:01a1b3a3-a54a-7153-904e-fb04e35163f5' }, 'darwin'],
+    [{ TERM_PROGRAM: 'rex', REX_BLOCK: `${BLOCK} --split=left` }, 'darwin'],
+    [{ TERM_PROGRAM: 'rex', REX_BLOCK: BLOCK }, 'win32'],
+  ] as const) {
+    const { dependencies, calls } = mockRex(env);
+    dependencies.platform = platform;
+    await assert.rejects(captureRexTarget(dependencies), /Rex/);
+    await assert.rejects(openRexSplit({ invocation, targetId: BLOCK, direction: 'right' }, dependencies), /Rex/);
+    assert.equal(calls.length, 0);
+  }
+});
+
+test('Rex split runs rex split beside the captured block with argv data and the client cwd', async () => {
+  const { dependencies, calls } = mockRex();
+  const hostile = { command: "/a path/n'ode", args: ['attach', '--host', '$(false); "\\\nnext', '--split=left', SLOT] };
+  const cwd = '/local/a "quoted" directory';
+  await openRexSplit({ invocation: hostile, targetId: BLOCK, direction: 'left', cwd, environment: {} }, dependencies);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, `${REX_BIN_DIR}/rex`);
+  assert.deepEqual(calls[0].args, [
+    'split', '-b', BLOCK, '--split', 'left', '--cwd', cwd, '--shell=none', '--', '/usr/bin/env', hostile.command, ...hostile.args,
+  ]);
+  assert.deepEqual(calls[0].options, { encoding: 'utf8', timeout: 15_000, maxBuffer: 64 * 1024 });
+  // rex needs REX_SERVER from this pane, so the client's environment is inherited, not replaced.
+  assert.equal(Object.hasOwn(calls[0].options, 'env'), false);
+});
+
+test('Rex split maps every direction and defaults to the current directory', async () => {
+  const { dependencies, calls } = mockRex();
+  const expected = { right: 'right', down: 'below', left: 'left', up: 'above' } as const;
+  for (const direction of ['right', 'down', 'left', 'up'] as const) {
+    await openRexSplit({ invocation, targetId: BLOCK, direction, environment: {} }, dependencies);
+    assert.deepEqual(calls.at(-1)!.args.slice(3, 7), ['--split', expected[direction], '--cwd', process.cwd()]);
+  }
+});
+
+test('Rex split uses rex on PATH without an absolute REX_BIN_DIR', async () => {
+  for (const REX_BIN_DIR of [undefined, '', 'relative/bin']) {
+    const { dependencies, calls } = mockRex({ TERM_PROGRAM: 'rex', REX_BLOCK: BLOCK, REX_BIN_DIR });
+    await openRexSplit({ invocation, targetId: BLOCK, direction: 'right' }, dependencies);
+    assert.equal(calls[0].command, 'rex');
+  }
+});
+
+test('Rex split forwards only the allowlisted environment through /usr/bin/env', async () => {
+  const { dependencies, calls } = mockRex({
+    TERM_PROGRAM: 'rex', REX_BLOCK: BLOCK,
+    SSH_AUTH_SOCK: '/socket/a "quoted" path', PI_CODING_AGENT_DIR: '/agent/a=b', XDG_CONFIG_HOME: '/custom config',
+    PI_REMOTE_RENDERER_REPO: '/renderer/$(false)', PATH: '/bin:/a path/bin',
+    OPENAI_API_KEY: 'do-not-forward', NODE_OPTIONS: '--inspect', HOME: '/not-forwarded',
+  });
+  await openRexSplit({ invocation, targetId: BLOCK, direction: 'right' }, dependencies);
+  const start = calls[0].args.indexOf('/usr/bin/env');
+  assert.deepEqual(calls[0].args.slice(start), [
+    '/usr/bin/env',
+    'SSH_AUTH_SOCK=/socket/a "quoted" path',
+    'PI_CODING_AGENT_DIR=/agent/a=b',
+    'PI_REMOTE_RENDERER_REPO=/renderer/$(false)',
+    'XDG_CONFIG_HOME=/custom config',
+    'PATH=/bin:/a path/bin',
+    invocation.command, ...invocation.args,
+  ]);
+  assert.equal(calls[0].args.some(arg => arg.includes('do-not-forward') || arg.includes('--inspect')), false);
+});
+
+test('invalid Rex targets, directions, values, and env-ambiguous executables never launch a split', async () => {
+  const { dependencies, calls } = mockRex();
+  await assert.rejects(openRexSplit({ invocation, targetId: TARGET, direction: 'right' }, dependencies), /captured Rex block/);
+  await assert.rejects(openRexSplit({ invocation, targetId: BLOCK, direction: 'auto' as ExplicitSplitDirection }, dependencies), /Resolve the split direction/);
+  await assert.rejects(openRexSplit({ invocation, targetId: BLOCK, direction: 'toString' as ExplicitSplitDirection }, dependencies), /Resolve the split direction/);
+  await assert.rejects(openRexSplit({ invocation, targetId: BLOCK, direction: 'down', cwd: '/bad\0dir' }, dependencies), /NUL/);
+  await assert.rejects(openRexSplit({ invocation, targetId: BLOCK, direction: 'down', environment: { PATH: 'private\0value' } }, dependencies), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /PATH.*NUL/);
+    assert.equal(error.message.includes('private'), false);
+    return true;
+  });
+  for (const command of ['node', 'A=B', '/opt/a=b/node', '']) {
+    await assert.rejects(openRexSplit({ invocation: { command, args: [] }, targetId: BLOCK, direction: 'right' }, dependencies), /executable/);
+  }
+  await assert.rejects(openRexSplit({ invocation: { command: '/node', args: ['bad\0arg'] }, targetId: BLOCK, direction: 'right' }, dependencies), /NUL/);
+  assert.equal(calls.length, 0);
+});
+
+test('Rex failures report rex\'s reason without execFile\'s argv', async () => {
+  const { dependencies } = mockRex();
+  const cause = Object.assign(new Error('Command failed: rex split ... /secret/path'), { stderr: 'Error: block target "block:x" not found\n' });
+  dependencies.execFile = async () => { throw cause; };
+  await assert.rejects(openRexSplit({ invocation, targetId: BLOCK, direction: 'right' }, dependencies), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.equal(error.cause, cause);
+    assert.match(error.message, /^Could not split the Rex pane\..*block target "block:x" not found$/);
+    assert.doesNotMatch(error.message, /secret|Error:/);
+    return true;
+  });
+});
+
+test('/usr/bin/env applies the forwarded assignments and keeps argument data', { skip: process.platform === 'win32' }, async () => {
+  const { dependencies, calls } = mockRex();
+  const values = ["a'b", '', 'space and "quotes"', '$(exit 99)', 'KEY=a=b', '--split=left'];
+  await openRexSplit({
+    invocation: { command: process.execPath, args: ['-e', 'console.log(JSON.stringify([process.env.SSH_AUTH_SOCK, ...process.argv.slice(1)]))', '--', ...values] },
+    targetId: BLOCK, direction: 'right', environment: { SSH_AUTH_SOCK: '/a b=c' },
+  }, dependencies);
+  const args = calls[0].args;
+  const program = args.slice(args.indexOf('--') + 1);
+  const result = await promisify(execFile)(program[0], program.slice(1), { encoding: 'utf8', timeout: 5000, env: {} });
+  assert.deepEqual(JSON.parse(result.stdout), ['/a b=c', ...values]);
 });
