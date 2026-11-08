@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { spawn, type IPty } from 'node-pty';
 import { readJsonl } from '../protocol/jsonl.js';
 import { TerminalOutputFilter } from './terminal-output.js';
+import { SuspendKeyFilter } from './suspend-key.js';
 import { PI_EXTENSION_SOCKET_ENV, type PiExtensionMessage, type ControlMessage, type RgbColor, type TerminalAnswers } from '../protocol/pi-extension.js';
 export type { RgbColor, TerminalAnswers } from '../protocol/pi-extension.js';
 
@@ -92,6 +93,7 @@ export class PiTerminal {
   private socketDir?: string;
   private queryTail = '';
   private output = new TerminalOutputFilter();
+  private suspendKeys = new SuspendKeyFilter();
   private exited?: Promise<void>;
   private size: { columns: number; rows: number };
 
@@ -137,8 +139,11 @@ export class PiTerminal {
     return true;
   }
 
-  /** Writes client input to Pi, in order. */
-  write(data: string): void { this.pty?.write(data); }
+  /** Writes client input to Pi, in order, without Ctrl+Z (see SuspendKeyFilter). */
+  write(data: string): void {
+    const keys = this.suspendKeys.filter(data);
+    if (keys) this.pty?.write(keys);
+  }
 
   resize(columns: number, rows: number): void {
     if (!(columns > 0 && rows > 0) || (columns === this.size.columns && rows === this.size.rows)) return;
