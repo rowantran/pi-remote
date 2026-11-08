@@ -66,6 +66,7 @@ Inside a slot, every key and slash command is Pi's own, with these additions:
 | Pi's `/quit` | Stop Pi. Prints `Stopped slot NUMBER / UUID. Resume it with: pi-remote resume NUMBER`. |
 | Pi's external-editor key (Ctrl+G) | Edit the prompt in your **local** `$VISUAL`/`$EDITOR`. |
 | Pi's paste key (Ctrl+V) | Paste from the **local** clipboard. Images and copied files are uploaded to the remote host, and Pi gets their paths, as with a local Pi. |
+| Ctrl+Z | Does nothing. The daemon drops it before it reaches Pi, from every client. Pi's suspend key cannot work in a slot: no shell resumes Pi, so Pi would stop reading keys until it got SIGCONT by hand. |
 
 Ctrl+/ needs a terminal with the kitty keyboard protocol (Ghostty, kitty, WezTerm, recent iTerm2); elsewhere it is the same key as Ctrl+-, Pi's undo. `/status` always works. Pi in a slot always uses the kitty keyboard protocol; keys from other terminals are converted.
 
