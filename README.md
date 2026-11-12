@@ -21,7 +21,7 @@ The browser client shows the same interface through the daemon, at the phone's w
 
 ## Quick start
 
-Requires Node.js 22.19+ on both machines, working SSH authentication, and **Pi 1.4.0** installed and configured on the remote host. Local dependencies are pinned to the same Pi version; a separate local Pi CLI is not required. To move to another Pi version, see [Upgrading Pi](docs/pi-upgrades.md). Replace `devbox` with your SSH host alias and `/remote/project` with an existing remote directory.
+Requires Node.js 22.19+ on both machines, working SSH authentication, and **Pi 1.5.2** installed and configured on the remote host. Local dependencies are pinned to the same Pi version; a separate local Pi CLI is not required. To move to another Pi version, see [Upgrading Pi](docs/pi-upgrades.md). Replace `devbox` with your SSH host alias and `/remote/project` with an existing remote directory.
 
 From this checkout on your local machine:
 

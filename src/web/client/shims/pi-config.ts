@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { virtualHome, BUILTIN_THEME_DIR } from './vfs.js';
 
-/** Display-only config for Pi 1.0.4. Never inspect an installation or discover resources. */
+/** Display-only config for Pi 1.5.2. Never inspect an installation or discover resources. */
 export const APP_NAME = 'pi';
 export const CONFIG_DIR_NAME = '.pi';
 export function getAgentDir(): string { return join(virtualHome(), '.pi/agent'); }

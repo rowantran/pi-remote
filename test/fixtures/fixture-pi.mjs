@@ -4,7 +4,7 @@
 // credentials, or network access.
 //
 // Environment:
-//   PI_FIXTURE_VERSION_FILE  version to print for --version (default 1.4.0)
+//   PI_FIXTURE_VERSION_FILE  version to print for --version (default 1.5.2)
 //   PI_FIXTURE_LAUNCH_LOG    append {pid, cwd, args, env} per launch
 //   PI_FIXTURE_EXIT_FILE     when it exists at startup, exit 23
 //   PI_FIXTURE_PROMPT_GATE   while this file exists, prompts stay running (busy)
@@ -27,7 +27,7 @@ const option = (name, fallback) => {
 };
 if (args.includes('--version')) {
   const file = process.env.PI_FIXTURE_VERSION_FILE;
-  process.stdout.write(`${file ? readFileSync(file, 'utf8').trim() : '1.4.0'}\n`);
+  process.stdout.write(`${file ? readFileSync(file, 'utf8').trim() : '1.5.2'}\n`);
   process.exit(0);
 }
 if (option('--tui-mode') !== 'regular') throw new Error('Fixture requires --tui-mode regular');
@@ -60,7 +60,7 @@ const frame = (reset = false) => send({
   sections: { 0: { start: 0, remove: Number.MAX_SAFE_INTEGER, insert: transcript() }, 4: { start: 0, remove: Number.MAX_SAFE_INTEGER, insert: ['──', `> ${draft}`, '──'] } },
 });
 const session = () => send({
-  type: 'session', hostname: hostname(), pid: process.pid, piVersion: '1.4.0', cwd: process.cwd(), sessionId, sessionFile,
+  type: 'session', hostname: hostname(), pid: process.pid, piVersion: '1.5.2', cwd: process.cwd(), sessionId, sessionFile,
   entryCount: entries.length - 1,
   remote: process.env.PI_REMOTE_SESSION === '1' ? { host: process.env.PI_REMOTE_SESSION_HOST, slotId: process.env.PI_REMOTE_SESSION_SLOT } : undefined,
 });

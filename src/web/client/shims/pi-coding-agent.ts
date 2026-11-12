@@ -36,7 +36,7 @@ export const createLsToolDefinition = (_cwd: string) => displayTool('ls', lsRend
 export const createReadToolDefinition = (_cwd: string) => displayTool('read', readRenderers);
 export const createWriteToolDefinition = (_cwd: string) => displayTool('write', writeRenderers);
 
-/** Same parser as Pi 1.0.4's agent-session module, which would load the whole agent runtime. */
+/** Same parser as Pi 1.5.2's agent-session module, which would load the whole agent runtime. */
 export function parseSkillBlock(text: string): { name: string; location: string; content: string; userMessage?: string } | null {
   const match = text.match(/^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/);
   if (!match) return null;
