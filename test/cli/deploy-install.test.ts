@@ -275,11 +275,11 @@ test('an explicit HTTPS origin overrides remote discovery and uses its configure
 test('a host Pi of another version stops the installer before it switches releases, starts the web service, or cleans up', async t => {
   const f = await fixture(t, {
     state: 'active',
-    launcher: `[ "$1" = check-pi ] && { echo 'Remote Pi version 9.9.9 does not match required 1.4.0' >&2; exit 1; }\nexit 0`,
+    launcher: `[ "$1" = check-pi ] && { echo 'Remote Pi version 9.9.9 does not match required 1.5.2' >&2; exit 1; }\nexit 0`,
   });
   const result = await f.run(NAME, { allowUsers: USERS });
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /Remote Pi version 9\.9\.9 does not match required 1\.4\.0/);
+  assert.match(result.stderr, /Remote Pi version 9\.9\.9 does not match required 1\.5\.2/);
   assert.ok(result.stderr.includes(`Release ${NAME} is not installed: Pi on this host is not the version it requires. The current release and daemon are unchanged.`));
   assert.equal(await readlink(f.link), join(f.releases, 'previous/bin/pi-remote'));
   assert.ok(!existsSync(join(f.releases, NAME)), 'the failure trap removes the unswitched release');

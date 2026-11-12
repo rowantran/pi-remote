@@ -44,7 +44,7 @@ interface PendingKey { id: number; data: string; state?: EditorState; setText?: 
 /** Keys that act on Pi's autocomplete dropdown while it is open. */
 const DROPDOWN_KEYS = ['tui.select.up', 'tui.select.down', 'tui.select.cancel', 'tui.select.confirm', 'tui.input.tab'] as const;
 
-/** Copy of Pi's fullscreen layout (createChatViewport, Pi 1.0.4 to 1.4.0). */
+/** Copy of Pi's fullscreen layout (createChatViewport, Pi 1.0.4 to 1.5.2). */
 function chatViewport(sections: Component[], theme?: () => Theme | undefined, banner?: Component): { root: Component; transcript: ScrollView } {
   const [document, pendingMessages, status, widgetsAbove, editor, widgetsBelow, footer] = sections;
   const style = (color: 'scrollbarTrack' | 'scrollbarThumb') => (text: string) => theme?.()?.fg(color, text) ?? text;
@@ -231,7 +231,7 @@ class Banner implements Component {
   invalidate(): void {}
 }
 
-/** The options Pi's own fullscreen renderer uses (createInteractiveTui, Pi 1.4.0). */
+/** The options Pi's own fullscreen renderer uses (createInteractiveTui, Pi 1.5.2). */
 function rendererOptions(theme: () => Theme | undefined): TuiAltScreenOptions {
   const searchMatch = (text: string) => {
     const t = theme();

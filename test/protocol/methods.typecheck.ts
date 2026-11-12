@@ -16,7 +16,7 @@ declare const reconnecting: ReconnectingConnection;
 // Methods with no required fields may omit params. Results are inferred, not chosen by callers.
 const slots = connection.request('list');
 const created = connection.request('create');
-const hello = connection.request('hello', { protocol: 2, piVersion: '1.4.0' });
+const hello = connection.request('hello', { protocol: 2, piVersion: '1.5.2' });
 const attached = connection.request('attach', { slotId: 'slot', columns: 80, rows: 24 });
 const input = connection.request('input', { slotId: 'slot', data: 'x' });
 const uploaded = connection.request('upload', { slotId: 'slot', name: 'a.png', data: '' });

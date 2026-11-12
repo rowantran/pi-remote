@@ -4,7 +4,7 @@ import type { DaemonMethod, MethodResult, RequestArgs } from './methods.js';
  * raw RPC replies and the authoritative Pi history remain unchanged. */
 /** 2: every slot runs Pi's own interface (attach); the RPC slot methods are gone. */
 export const PROTOCOL_VERSION = 2;
-export const PI_VERSION = "1.4.0";
+export const PI_VERSION = "1.5.2";
 export type RecordValue = Record<string, any>;
 export interface Request { type: "request"; id: string; method: string; params?: RecordValue }
 export interface Result { type: "result"; id: string; success: boolean; data?: any; error?: string }

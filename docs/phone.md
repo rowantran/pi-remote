@@ -267,7 +267,7 @@ submitted to Pi. iOS can evict local storage; the remote session remains authori
 
 ## Compatibility
 
-The browser runs PiScreen from the pinned Pi 1.4.0 packages in xterm.js; Pi itself, every
+The browser runs PiScreen from the pinned Pi 1.5.2 packages in xterm.js; Pi itself, every
 extension, and all model calls and tools stay on the devbox. Unsupported local filesystem/process
 operations throw rather than attempting remote execution. External editors, local path
 attachments, clipboard image paste, and Ghostty or Rex splits are not available on the phone.
