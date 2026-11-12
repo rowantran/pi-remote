@@ -104,18 +104,25 @@ export class Connection implements RemoteConnection {
   }
 }
 
-/** Deadline for transport/version negotiation ONLY; no prompt or mutation deadlines. */
-export async function handshake(connection: Connection, timeoutMs = 45_000): Promise<void> {
+/**
+ * Deadline for transport/version negotiation ONLY; no prompt or mutation deadlines.
+ * `piVersion` is the Pi version to name; only restart-daemon names another than its own.
+ */
+export async function handshake(connection: Connection, timeoutMs = 45_000, piVersion = PI_VERSION): Promise<void> {
   const timer = setTimeout(() => connection.disconnect(new Error('Timed out waiting for the daemon version handshake; remote work was not stopped')), timeoutMs);
   try {
-    const hello = await connection.request('hello', { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION });
-    if (hello?.protocol !== PROTOCOL_VERSION || hello?.piVersion !== PI_VERSION) throw new Error('Daemon returned an incompatible protocol or Pi version');
+    const hello = await connection.request('hello', { protocol: PROTOCOL_VERSION, piVersion });
+    if (hello?.protocol !== PROTOCOL_VERSION || hello?.piVersion !== piVersion) throw new Error('Daemon returned an incompatible protocol or Pi version');
   } catch (error) { connection.close(); throw error; }
   finally { clearTimeout(timer); }
 }
 
 function remotePath(path: string): string { return path.startsWith('~/') ? `"$HOME"/${shellQuote(path.slice(2))}` : shellQuote(path); }
-export interface SshOptions { host: string; remoteBin?: string; stateDir?: string }
+export interface SshOptions {
+  host: string; remoteBin?: string; stateDir?: string;
+  /** The Pi version to name in the handshake (default: this client's). See restart-daemon. */
+  piVersion?: string;
+}
 
 /**
  * Runs `pi-remote check-pi` with the host's installed launcher: the Pi version check that
@@ -182,7 +189,7 @@ export async function connectSsh(options: SshOptions): Promise<Connection> {
     connection.disconnect(new Error(`SSH exited (code=${code}, signal=${signal})${diagnostics ? `\n${diagnostics}` : ''}`));
   });
   try {
-    await handshake(connection);
+    await handshake(connection, undefined, options.piVersion);
     handshakeComplete = true;
     // EOF/exit may arrive alongside the successful hello, before this continuation.
     if (transportEnded) { const error = transportError(); connection.disconnect(error); throw error; }

@@ -93,3 +93,52 @@ test('the Pi check runs before every restart request, so an upgrade while waitin
   assert.equal(checks, 3);
   assert.deepEqual(calls, ['hello', 'restart_daemon', 'restart_daemon'], 'the third request, which the daemon would accept, is never sent');
 });
+
+/**
+ * Daemons that each accept only a `hello` naming their own Pi version, as real daemons do.
+ * `current()` is the daemon that listens now. `named` lists the Pi version of every connect.
+ */
+function versioned(current: () => { pid: number; pi: string; protocol?: number }, outcome: RecordValue = { accepted: true, blocked: [], reopen: [slot('a', 2)] }) {
+  const named: string[] = [];
+  const state = { restarts: 0 };
+  const connect = async (piVersion: string): Promise<RemoteConnection> => {
+    named.push(piVersion);
+    const daemon = current();
+    // SSH diagnostics follow the daemon's refusal on later lines.
+    if (piVersion !== daemon.pi || (daemon.protocol ?? 2) !== 2) throw new Error(`Version mismatch: daemon protocol ${daemon.protocol ?? 2}, Pi ${daemon.pi}\nWarning: Permanently added 'host' to the list of known hosts.`);
+    return {
+      request: async (method: string, params: RecordValue = {}) => {
+        if (method === 'hello') { assert.equal(params.piVersion, daemon.pi); return { protocol: 2, piVersion: daemon.pi, pid: daemon.pid, release: `/r/releases/pi-${daemon.pi}` }; }
+        if (method === 'restart_daemon') { state.restarts++; return outcome; }
+        if (method === 'list') return [slot('a', 2)];
+        throw new Error(`unexpected ${method}`);
+      },
+      onEvent: () => () => {}, onDisconnect: () => () => {}, close: () => {},
+    };
+  };
+  return { connect, named, state };
+}
+
+test('a client for a new Pi restarts a daemon built for the old Pi onto the release for the new one', async () => {
+  const lines: string[] = [];
+  const { connect, named, state } = versioned(() => state.restarts ? { pid: 2, pi: '2.0.0' } : { pid: 1, pi: '1.0.0' });
+  const result = await restartDaemon(connect, { piVersion: '2.0.0', pollMs: 1, log: line => lines.push(line) });
+  assert.deepEqual(named, ['2.0.0', '1.0.0', '2.0.0'], 'after the old daemon refuses, the client names the daemon\'s Pi version');
+  assert.deepEqual([result.before.pid, result.before.piVersion, result.after.pid, result.after.piVersion], [1, '1.0.0', 2, '2.0.0']);
+  assert.deepEqual(result.reopened.map(slot => slot.id), ['a']);
+  assert.deepEqual(lines, ['Daemon 1 is built for Pi 1.0.0, and this client for Pi 2.0.0.', 'Daemon 1 (pi-1.0.0) is stopping; reopening slot 2.']);
+});
+
+test('a client for the old Pi restarts its daemon onto an installed release for a new Pi, and reports that daemon', async () => {
+  const { connect, named, state } = versioned(() => state.restarts ? { pid: 2, pi: '2.0.0' } : { pid: 1, pi: '1.0.0' });
+  const result = await restartDaemon(connect, { piVersion: '1.0.0', pollMs: 1 });
+  assert.deepEqual(named, ['1.0.0', '1.0.0', '2.0.0']);
+  assert.deepEqual([result.after.pid, result.after.piVersion], [2, '2.0.0']);
+});
+
+test('a daemon with another protocol version is not restarted', async () => {
+  const { connect, named, state } = versioned(() => ({ pid: 1, pi: '1.0.0', protocol: 1 }));
+  await assert.rejects(restartDaemon(connect, { piVersion: '2.0.0', pollMs: 1 }), /^Error: Version mismatch: daemon protocol 1, Pi 1\.0\.0/);
+  assert.deepEqual(named, ['2.0.0']);
+  assert.equal(state.restarts, 0);
+});

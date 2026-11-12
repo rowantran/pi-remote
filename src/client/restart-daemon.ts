@@ -1,5 +1,5 @@
 import { basename } from 'node:path';
-import { PI_VERSION, PROTOCOL_VERSION, type RemoteConnection, type SlotInfo } from '../protocol/types.js';
+import { PI_VERSION, PROTOCOL_VERSION, errorText, parseVersionMismatch, type RemoteConnection, type SlotInfo } from '../protocol/types.js';
 
 import type { HelloResult, RestartDaemonResult } from '../protocol/methods.js';
 
@@ -17,22 +17,50 @@ export interface RestartOptions {
    * Called before every restart request, since Pi can be upgraded while this waits.
    */
   checkPi?: () => Promise<void>;
+  /** The Pi version this client is built for. Tests set another. */
+  piVersion?: string;
 }
+/** Connects and completes the handshake, naming the given Pi version. */
+export type Connect = (piVersion: string) => Promise<RemoteConnection>;
 
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const label = (slot: SlotInfo) => `slot ${slot.number ?? slot.id}`;
 export const releaseName = (release?: string) => release ? basename(release) : 'unknown release';
 
+/**
+ * Connect to a daemon built for any Pi version. A daemon refuses a `hello` that names
+ * another Pi version than its own, because an attached client draws Pi's interface with
+ * its own copy of Pi. A restart uses none of that, and a Pi upgrade needs it: the client
+ * that deploys the release for the new Pi must restart the daemon built for the old one.
+ * So after that refusal, connect again and name the daemon's version. The protocol version
+ * must still match, since it defines the requests that follow.
+ */
+async function connectAnyPi(connect: Connect, own: string): Promise<{ connection: RemoteConnection; hello: Hello }> {
+  let piVersion = own;
+  let connection: RemoteConnection;
+  try { connection = await connect(piVersion); }
+  catch (error) {
+    const daemon = parseVersionMismatch(errorText(error));
+    if (!daemon || daemon.protocol !== PROTOCOL_VERSION || daemon.piVersion === own) throw error;
+    piVersion = daemon.piVersion;
+    connection = await connect(piVersion);
+  }
+  try { return { connection, hello: await connection.request('hello', { protocol: PROTOCOL_VERSION, piVersion }) }; }
+  catch (error) { connection.close(); throw error; }
+}
+
 /** Ask the daemon to exit so the installed release replaces it, then connect until a new
  * daemon answers. The daemon decides atomically whether every slot is ready; this client
  * retries that question until it accepts and never stops a slot itself. A refusal locks
- * nothing, so interrupting the wait leaves the old daemon running unchanged. */
-export async function restartDaemon(connect: () => Promise<RemoteConnection>, options: RestartOptions = {}): Promise<RestartResult> {
+ * nothing, so interrupting the wait leaves the old daemon running unchanged. The old and
+ * the new daemon can each be built for another Pi version than this client. */
+export async function restartDaemon(connect: Connect, options: RestartOptions = {}): Promise<RestartResult> {
   const log = options.log ?? (() => {});
-  const connection = await connect();
-  let before: Hello, outcome: Outcome;
+  const own = options.piVersion ?? PI_VERSION;
+  const { connection, hello: before } = await connectAnyPi(connect, own);
+  let outcome: Outcome;
   try {
-    before = await connection.request('hello', { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION });
+    if (before.piVersion && before.piVersion !== own) log(`Daemon ${before.pid} is built for Pi ${before.piVersion}, and this client for Pi ${own}.`);
     let waiting = '';
     for (;;) {
       // A daemon that refuses to start reopens nothing, so every slot would stay stopped.
@@ -59,9 +87,8 @@ export async function restartDaemon(connect: () => Promise<RemoteConnection>, op
   let last: unknown;
   while (Date.now() < deadline) {
     try {
-      const next = await connect();
+      const { connection: next, hello: after } = await connectAnyPi(connect, own);
       try {
-        const after = await next.request('hello', { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION });
         if (after.pid !== before.pid) {
           const slots = await next.request('list');
           const reopened = slots.filter(slot => outcome.reopen.some(old => old.id === slot.id));

@@ -5,6 +5,16 @@ import type { DaemonMethod, MethodResult, RequestArgs } from './methods.js';
 /** 2: every slot runs Pi's own interface (attach); the RPC slot methods are gone. */
 export const PROTOCOL_VERSION = 2;
 export const PI_VERSION = "1.5.2";
+/** The daemon's answer to a `hello` that names another protocol or Pi version. */
+export const versionMismatch = () => `Version mismatch: daemon protocol ${PROTOCOL_VERSION}, Pi ${PI_VERSION}`;
+/**
+ * The daemon's versions from that answer; undefined for any other error. restart-daemon
+ * reads them from daemons of earlier releases, so this text must not change.
+ */
+export function parseVersionMismatch(message: string): { protocol: number; piVersion: string } | undefined {
+  const match = /^Version mismatch: daemon protocol (\d+), Pi (\S+)/.exec(message);
+  return match ? { protocol: Number(match[1]), piVersion: match[2]! } : undefined;
+}
 export type RecordValue = Record<string, any>;
 export interface Request { type: "request"; id: string; method: string; params?: RecordValue }
 export interface Result { type: "result"; id: string; success: boolean; data?: any; error?: string }
