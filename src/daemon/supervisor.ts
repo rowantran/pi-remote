@@ -16,7 +16,7 @@ import { socketPath } from '../protocol/paths.js';
 import type { FileMethod, MethodResult, ClientTerminal, SessionInfo } from '../protocol/methods.js';
 import { defaultSessionDir, sessionDirArg, sideSessionDir, withSessionDir } from './session-dirs.js';
 import { forkSideSession } from './side-fork.js';
-import { PI_VERSION, PROTOCOL_VERSION, errorText, type CreateOptions, type RecordValue, type Request, type SlotInfo, type ServerRecord } from '../protocol/types.js';
+import { PI_VERSION, PROTOCOL_VERSION, errorText, versionMismatch, type CreateOptions, type RecordValue, type Request, type SlotInfo, type ServerRecord } from '../protocol/types.js';
 
 // SessionManager returns Dates; JSON serialization produces the protocol's ISO strings.
 type SessionInfoSource = Omit<SessionInfo, 'created' | 'modified'> & { created: Date; modified: Date };
@@ -764,7 +764,7 @@ export class Supervisor {
       const params = object(request.params ?? {}, 'params');
       let data: unknown;
       if (request.method === 'hello') {
-        if (params.protocol !== PROTOCOL_VERSION || params.piVersion !== PI_VERSION) throw new Error(`Version mismatch: daemon protocol ${PROTOCOL_VERSION}, Pi ${PI_VERSION}`);
+        if (params.protocol !== PROTOCOL_VERSION || params.piVersion !== PI_VERSION) throw new Error(versionMismatch());
         peer.verified = true;
         data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, release: RELEASE, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'side_slots', ACTIVITY_CAPABILITY] } satisfies MethodResult<'hello'>;
       } else {

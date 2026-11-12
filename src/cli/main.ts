@@ -37,7 +37,8 @@ Everyday commands:
   pi-remote restart-daemon [--host HOST] [--force]
     Restart the remote daemon on the installed release. Every running slot is
     reopened from its session file with the same number, like /reload. Waits
-    until no slot is busy; --force interrupts busy slots instead.
+    until no slot is busy; --force interrupts busy slots instead. Also restarts
+    a daemon built for another Pi version, which no other command can reach.
   pi-remote completion fish|zsh|bash
   pi-remote serve --origin HTTPS_URL --allow-user TAILSCALE_LOGIN [--ui-config PATH]
     Serve the browser client through a private Unix socket and Tailscale Serve.
@@ -268,8 +269,10 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         console.error('The installed release cannot check the Pi version (it predates check-pi); restarting without the check.');
       }
     };
-    const result = await restartDaemon(factory, { force: options.flags.has('--force'), log: line => console.error(line), checkPi });
+    const connect = (piVersion: string) => local ? connectCompatibleLocal(stateDir, piVersion) : connectCompatibleSsh({ host: host!, remoteBin: options.values.get('--remote-bin'), stateDir, piVersion });
+    const result = await restartDaemon(connect, { force: options.flags.has('--force'), log: line => console.error(line), checkPi });
     console.log(`Daemon restarted: ${result.before.pid} (${releaseName(result.before.release)}) -> ${result.after.pid} (${releaseName(result.after.release)})`);
+    if (result.after.piVersion !== PI_VERSION) console.error(`The new daemon is built for Pi ${result.after.piVersion}, and this client for Pi ${PI_VERSION}. This client cannot attach to its slots. Use a checkout that is built for Pi ${result.after.piVersion}.`);
     const active = numberSlots(result.slots).filter(slot => slot.status !== 'exited');
     console.log(formatSlotList(active, result.slots.length - active.length));
     return;

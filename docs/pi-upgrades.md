@@ -9,16 +9,25 @@ There are two copies of Pi:
 
 The daemon refuses to start slots when the host's Pi is not `PI_VERSION`. `npm run deploy` and `pi-remote restart-daemon` check the host's Pi first and stop before they change anything (`pi-remote check-pi`), so a mismatch never leaves slots stopped.
 
+A client and a daemon that are built for different Pi versions refuse each other (`Version mismatch: daemon protocol 2, Pi 1.5.2`). The one exception is `pi-remote restart-daemon`, which `npm run deploy` runs: it restarts a daemon built for any Pi version, so the checkout for the new Pi can replace the daemon of the old release.
+
 ## Steps
 
 1. In a branch, set the three `@earendil-works/*` versions in `package.json` and `PI_VERSION` to the new version, and run `npm install`. Update the version in `README.md` ("Quick start"), `docs/phone.md`, and the code comments that name a Pi version (`grep -rn "Pi 1\." src`).
 2. Run `npm run check`. The compiler catches changes to the public API that pi-remote uses: `CustomEditor` options, event names and payloads for `pi.on`, `ExtensionUIContext`, `SessionManager`, and the TUI types.
 3. Run `npm run verify` on Linux (the deploy installer tests need GNU `mv`), and `npm run test:mobile`.
 4. Go through the [checklist](#checklist). Fix or update every item that changed.
-5. Roll out the three parts together. In between, clients fail to connect with a version error, but running slots keep running:
-   1. On the laptop: `git pull && npm ci` in the checkout that `pi-remote` is linked to. The client refuses a daemon built for another Pi version.
-   2. On the host: upgrade Pi (`pi update`). Running slots keep their Pi process. Until the next step, the old daemon refuses to start or reload slots.
-   3. On the laptop: `npm run deploy`. It checks the host's Pi, installs the release, and restarts the daemon, which reopens the slots with the new Pi.
+5. Roll out the three parts in this order. Do steps 2 and 3 one right after the other:
+   1. On the laptop: merge the branch, then `git pull && npm ci` in the checkout that `pi-remote` is linked to. The laptop client is now built for the new Pi version, so the daemon refuses it until step 3.
+   2. On the host: upgrade Pi (`pi update`).
+   3. On the laptop: `npm run deploy`. It checks the host's Pi, installs the release, and restarts the daemon, which reopens the slots with the new Pi. The restart waits until no slot is busy. The deploy also restarts the phone web service on the new release at once, so the phone cannot connect until the daemon has restarted.
+   4. Start the clients that were attached during step 3 again. They are built for the old Pi version and cannot reconnect to the new daemon.
+
+Between steps 2 and 3, the host's Pi is newer than the running daemon requires:
+
+- Running slots keep their Pi process. The daemon refuses to start a slot, reload one, or start a child slot (`Remote Pi version NEW does not match required OLD`).
+- If the daemon stops, it does not start again until step 3, and every slot stays stopped.
+- A Pi process whose installation was replaced by the update can fail when it loads code on demand; Pi shows a warning in the session when that happens. This does not apply to Pi's standalone binary. Step 3 restarts every slot on the new Pi.
 
 ## Checklist
 
