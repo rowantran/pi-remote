@@ -78,7 +78,7 @@ export interface SideSplitOptions {
   targetId: string;
   direction: ExplicitSplitDirection;
   cwd?: string;
-  /** Only the SSH/UI/PATH allowlist is forwarded. Defaults to the current client environment. */
+  /** Only the SSH/UI/PATH/editor allowlist is forwarded. Defaults to the current client environment. */
   environment?: Readonly<NodeJS.ProcessEnv>;
 }
 export type LauncherExecFile = (command: string, args: string[], options: {
@@ -100,9 +100,13 @@ export type GhosttyDependencies = LauncherDependencies;
 export type GhosttyLauncher = SideLauncher;
 
 const execute = promisify(execFile);
-// The command bypasses shell startup. Carry only settings needed for SSH and
-// trusted local UI adapters; never copy credentials or the whole client environment.
-const INHERITED_ENVIRONMENT = ['SSH_AUTH_SOCK', 'PI_CODING_AGENT_DIR', 'PI_REMOTE_RENDERER_REPO', 'XDG_CONFIG_HOME', 'PATH'] as const;
+// The command bypasses shell startup. Carry only settings needed for SSH, trusted local
+// UI adapters, and the local editor (Ctrl+G); never copy credentials or the whole client
+// environment. Without VISUAL/EDITOR the new pane's editor falls back to nano, because
+// Ghostty and Rex start it with their app's environment, not the user's shell exports.
+const INHERITED_ENVIRONMENT = [
+  'SSH_AUTH_SOCK', 'PI_CODING_AGENT_DIR', 'PI_REMOTE_RENDERER_REPO', 'XDG_CONFIG_HOME', 'PATH', 'VISUAL', 'EDITOR',
+] as const;
 
 /** `KEY=value` for each allowlisted variable that is set, in allowlist order. */
 function inheritedAssignments(environment: Readonly<NodeJS.ProcessEnv>): string[] {
