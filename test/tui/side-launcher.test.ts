@@ -209,7 +209,7 @@ test('Ghostty macOS bash wrapper preserves quoted argument data', { skip: proces
   assert.deepEqual(JSON.parse(result.stdout), values);
 });
 
-test('split forwards only SSH, UI adapter, XDG config, and PATH settings as argv assignments', async () => {
+test('split forwards only SSH, UI adapter, XDG config, PATH, and editor settings as argv assignments', async () => {
   const { dependencies, calls } = mockGhostty();
   dependencies.env = {
     TERM_PROGRAM: 'ghostty',
@@ -218,6 +218,7 @@ test('split forwards only SSH, UI adapter, XDG config, and PATH settings as argv
     XDG_CONFIG_HOME: '/custom config',
     PI_REMOTE_RENDERER_REPO: '/renderer/$(false);\nend tell',
     PATH: '/bin:/a path/bin',
+    EDITOR: 'nvim', VISUAL: 'code --wait',
     OPENAI_API_KEY: 'do-not-forward', AWS_SECRET_ACCESS_KEY: 'also-not-forwarded',
     NODE_OPTIONS: '--inspect', BASH_ENV: '/do/not/source', HOME: '/not-forwarded',
   };
@@ -228,6 +229,8 @@ test('split forwards only SSH, UI adapter, XDG config, and PATH settings as argv
     'PI_REMOTE_RENDERER_REPO=/renderer/$(false);\nend tell',
     'XDG_CONFIG_HOME=/custom config',
     'PATH=/bin:/a path/bin',
+    'VISUAL=code --wait',
+    'EDITOR=nvim',
   ]);
   const script = calls[0].args[1];
   assert.equal(script.includes(dependencies.env.PI_REMOTE_RENDERER_REPO!), false);
@@ -347,7 +350,7 @@ test('Rex split forwards only the allowlisted environment through /usr/bin/env',
   const { dependencies, calls } = mockRex({
     TERM_PROGRAM: 'rex', REX_BLOCK: BLOCK,
     SSH_AUTH_SOCK: '/socket/a "quoted" path', PI_CODING_AGENT_DIR: '/agent/a=b', XDG_CONFIG_HOME: '/custom config',
-    PI_REMOTE_RENDERER_REPO: '/renderer/$(false)', PATH: '/bin:/a path/bin',
+    PI_REMOTE_RENDERER_REPO: '/renderer/$(false)', PATH: '/bin:/a path/bin', EDITOR: 'nvim',
     OPENAI_API_KEY: 'do-not-forward', NODE_OPTIONS: '--inspect', HOME: '/not-forwarded',
   });
   await openRexSplit({ invocation, targetId: BLOCK, direction: 'right' }, dependencies);
@@ -359,6 +362,7 @@ test('Rex split forwards only the allowlisted environment through /usr/bin/env',
     'PI_REMOTE_RENDERER_REPO=/renderer/$(false)',
     'XDG_CONFIG_HOME=/custom config',
     'PATH=/bin:/a path/bin',
+    'EDITOR=nvim',
     invocation.command, ...invocation.args,
   ]);
   assert.equal(calls[0].args.some(arg => arg.includes('do-not-forward') || arg.includes('--inspect')), false);
