@@ -315,8 +315,8 @@ test('a daemon that stops without restart_daemon leaves every slot stopped', { t
   assert.match(listed.error!, /Daemon restarted/);
 });
 
-test('side slots fork the parent session, inherit its args, and deliver the first prompt once', { timeout: 15_000 }, async t => {
-  const { create, attach, prompt, peer, dir, slots } = await setup(t);
+test('side slots fork the parent session, inherit its args, deliver the first prompt once, and outlive their parent', { timeout: 15_000 }, async t => {
+  const { create, attach, prompt, peer, connect, successor, dir, slots } = await setup(t);
   const parent = await create({ args: ['--session-dir', join(dir, 'sessions')] });
   await attach(parent.id);
   await prompt(parent.id, 'parent work');
@@ -333,8 +333,16 @@ test('side slots fork the parent session, inherit its args, and deliver the firs
     }
     assert.ok(n < 100, 'the side gets its first prompt'); await new Promise(r => setTimeout(r, 50));
   }
+  // Stopping the parent moves the side to the top level, still running.
   await peer.request('kill', { slotId: parent.id });
-  for (let n = 0; (await slots()).find(slot => slot.id === side.id)?.status === 'running'; n++) { assert.ok(n < 100); await new Promise(r => setTimeout(r, 50)); }
+  const orphan = (await slots()).find(slot => slot.id === side.id)!;
+  assert.equal(orphan.status, 'running');
+  assert.equal(orphan.parentSlotId, undefined);
+  // Once stopped, it stays listed like any slot, also after the daemon restarts.
+  await peer.request('kill', { slotId: side.id });
+  await successor();
+  const stopped = (await (await connect()).request<SlotInfo[]>('list')).find(slot => slot.id === side.id);
+  assert.equal(stopped?.status, 'exited');
 });
 
 test('the extension API starts a child slot and asks only the client that typed last to open it', { timeout: 15_000 }, async t => {
