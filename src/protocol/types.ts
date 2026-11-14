@@ -25,7 +25,8 @@ export interface SlotInfo {
   /** Stable positive integer within one daemon's persisted slot catalogue. */
   number?: number;
   cwd: string;
-  /** Parent daemon slot, not the Pi session ID or parentSession file. */
+  /** Parent daemon slot while that slot runs, not the Pi session ID or parentSession file.
+   * Cleared when the parent stops. */
   parentSlotId?: string;
   /** Derived from the live catalogue, never persisted. */
   parentSlotNumber?: number;

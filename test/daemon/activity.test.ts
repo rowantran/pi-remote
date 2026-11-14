@@ -13,7 +13,7 @@ import { PI_VERSION, PROTOCOL_VERSION, type RemoteEvent, type SlotInfo } from '.
 const fixture = fileURLToPath(new URL('../fixtures/fixture-pi.mjs', import.meta.url));
 async function setup(t: TestContext) {
   const dir = await mkdtemp('/tmp/pi-activity-');
-  const supervisor = new Supervisor({ stateDir: dir, executable: process.execPath, prefixArgs: [fixture], skipVersionCheck: true, sideIdleGraceMs: 60_000 });
+  const supervisor = new Supervisor({ stateDir: dir, executable: process.execPath, prefixArgs: [fixture], skipVersionCheck: true });
   await supervisor.start();
   const connections: Connection[] = [];
   t.after(async () => { for (const connection of connections) connection.close(); await supervisor.stop(); await rm(dir, { recursive: true, force: true }); });
