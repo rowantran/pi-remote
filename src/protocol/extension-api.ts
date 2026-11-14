@@ -19,8 +19,8 @@ export interface PiRemoteApi {
    * Start a child slot of this slot: a new Pi process in the same directory, with the same
    * Pi options, that opens `sessionFile`. `sessionDir` replaces the session directory, so
    * /resume, /new and /fork in the child use it. `prompt` is sent once, as the child's first
-   * message. `pi-remote ls` lists the child under this slot. It stops when this slot stops,
-   * and 90 seconds after its last client leaves, once it is idle.
+   * message. `pi-remote ls` lists the child under this slot. It stops when this slot stops or
+   * when it is stopped itself; having no clients does not stop it.
    *
    * Rejects when no slot was started. Resolves with `error` when the slot started but exited.
    */

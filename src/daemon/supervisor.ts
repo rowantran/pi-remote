@@ -58,8 +58,8 @@ interface Slot extends StoredSlot {
   startupRetry?: NodeJS.Timeout;
   /** Never persisted or replayed; bound to the initial process generation only. */
   initialPrompt?: { message: string; incarnation: number };
-  sideExpiry?: NodeJS.Timeout;
-  detachedAt?: number;
+  /** Removes a side that exited during startup once its creator has had time to read the error. */
+  exitedSidePrune?: NodeJS.Timeout;
   stopping?: boolean;
   creating?: boolean;
   live: Live;
@@ -79,7 +79,9 @@ interface Slot extends StoredSlot {
 interface Peer { socket: Socket; slotId?: string; activity?: boolean; verified: boolean; pending: number
   /** The attached client's terminal. */
   terminal?: ClientTerminal }
-export interface DaemonOptions { stateDir: string; executable?: string; prefixArgs?: string[]; env?: NodeJS.ProcessEnv; skipVersionCheck?: boolean; sideIdleGraceMs?: number }
+export interface DaemonOptions { stateDir: string; executable?: string; prefixArgs?: string[]; env?: NodeJS.ProcessEnv; skipVersionCheck?: boolean }
+/** How long a side that exited during startup stays listed, so its creator can read why. */
+const EXITED_SIDE_GRACE_MS = 90_000;
 function object(value: any, name: string): RecordValue {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Invalid ${name}`);
   return value;
@@ -158,7 +160,6 @@ export class Supervisor {
     for (const slot of reopening) { slot.status = 'starting'; slot.error = undefined; }
     await Promise.all(reopening.map(slot => this.relaunch(slot)));
     await this.save();
-    for (const slot of reopening) this.scheduleSideExpiry(slot);
     this.server = createServer(socket => this.connect(socket));
     await new Promise<void>((accept, reject) => {
       this.server!.once('error', reject);
@@ -447,9 +448,9 @@ export class Supervisor {
     if (slot.status === 'exited') {
       // Keep the allocated ID and startup diagnostic addressable for the client's grace,
       // although stopped sides are already absent from persisted metadata.
-      slot.sideExpiry = setTimeout(() => this.pruneExitedSides(), this.options.sideIdleGraceMs ?? 90_000);
-      slot.sideExpiry.unref();
-    } else this.scheduleSideExpiry(slot);
+      slot.exitedSidePrune = setTimeout(() => this.pruneExitedSides(), EXITED_SIDE_GRACE_MS);
+      slot.exitedSidePrune.unref();
+    }
     return this.info(slot);
   }
 
@@ -578,48 +579,14 @@ export class Supervisor {
 
   private peerLeft(id: string): void {
     const slot = this.slots.get(id);
-    if (!slot?.parentSlotId || this.attached(slot)) return;
-    if (slot.status === 'exited') this.pruneExitedSides();
-    else this.scheduleSideExpiry(slot);
-  }
-
-  private scheduleSideExpiry(slot: Slot): void {
-    clearTimeout(slot.sideExpiry);
-    if (!slot.parentSlotId || slot.status === 'exited' || slot.stopping || this.stopping || this.attached(slot)) return;
-    slot.detachedAt = Date.now();
-    const grace = this.options.sideIdleGraceMs ?? 90_000;
-    slot.sideExpiry = setTimeout(() => { void this.expireSide(slot); }, grace);
-    slot.sideExpiry.unref();
-  }
-
-  private async expireSide(slot: Slot): Promise<void> {
-    if (this.stopping || slot.stopping || slot.status === 'exited' || this.attached(slot) || slot.detachedAt === undefined) return;
-    const incarnation = slot.incarnation;
-    // Queries can be blocked by extension dialogs. Never inspect a startup/transition
-    // from cleanup, and never infer idle from a failed or timed-out query.
-    if (!this.transitionBlocker(slot) && !slot.mutations && !slot.initialPrompt
-      && ![...slot.ui.keys()].some(key => key.startsWith('dialog:'))) {
-      try {
-        await this.refreshState(slot);
-        const grace = this.options.sideIdleGraceMs ?? 90_000;
-        if (!this.stopping && !slot.stopping && incarnation === slot.incarnation && !this.attached(slot)
-          && slot.detachedAt !== undefined && Date.now() - slot.detachedAt >= grace
-          && !this.transitionBlocker(slot) && !this.isBusy(slot)) {
-          await this.stopTree(slot);
-          return;
-        }
-      } catch { /* Preserve work when inspection is uncertain. */ }
-    }
-    if (!this.stopping && !slot.stopping && !this.attached(slot)) {
-      slot.sideExpiry = setTimeout(() => { void this.expireSide(slot); }, Math.min(1000, Math.max(10, this.options.sideIdleGraceMs ?? 1000)));
-      slot.sideExpiry.unref();
-    }
+    // A running side keeps running without clients, like any slot. Only exited sides go.
+    if (slot?.parentSlotId && slot.status === 'exited' && !this.attached(slot)) this.pruneExitedSides();
   }
 
   private finishExit(slot: Slot, error: Error): void {
     slot.status = 'exited'; slot.stopping = true; slot.error = error.message;
     slot.initialPrompt = undefined;
-    clearTimeout(slot.startupRetry); clearTimeout(slot.sideExpiry);
+    clearTimeout(slot.startupRetry);
     slot.ui.clear();
     this.publish(slot, { type: 'remote_slot_exit', error: error.message });
     // Retired /reload generations never reach this callback. An orderly daemon restart
@@ -638,7 +605,7 @@ export class Supervisor {
     // creates and reloads cannot launch descendants or resurrect a stopped generation.
     slot.stopping = true;
     slot.initialPrompt = undefined;
-    clearTimeout(slot.sideExpiry); clearTimeout(slot.startupRetry);
+    clearTimeout(slot.startupRetry);
     const children = [...this.slots.values()].filter(child => child.parentSlotId === slot.id && child.status !== 'exited');
     await Promise.all([slot.runtime?.host.stop(), ...children.map(child => this.stopTree(child))]);
     // A reload may have retired its old exit callback before a parent cascaded a stop.
@@ -857,8 +824,6 @@ export class Supervisor {
             const previousSlotId = peer.slotId;
             peer.slotId = slot.id; peer.terminal = terminal;
             if (previousSlotId && previousSlotId !== slot.id) this.peerLeft(previousSlotId);
-            clearTimeout(slot.sideExpiry);
-            slot.detachedAt = undefined;
             if (!slot.runtime.owner || slot.runtime.owner.socket.destroyed) this.takeSize(slot, peer);
             // Synchronous: no Pi extension message can arrive between this cut and live events.
             data = { slot: this.info(slot), messages: slot.runtime.screen.snapshot(), seq: slot.seq, busy: slot.live.busy || slot.live.compacting } satisfies MethodResult<'attach'>;
@@ -917,7 +882,7 @@ export class Supervisor {
     const close = this.server ? new Promise<void>(accept => this.server!.close(() => accept())) : Promise.resolve();
     await Promise.all([...this.slots.values()].map(async slot => {
       slot.stopping = true; slot.initialPrompt = undefined;
-      clearTimeout(slot.sideExpiry); clearTimeout(slot.startupRetry);
+      clearTimeout(slot.exitedSidePrune); clearTimeout(slot.startupRetry);
       await slot.runtime?.host.stop();
       if (slot.status !== 'exited') this.finishExit(slot, new Error('Stopped by daemon shutdown. Session history is on disk.'));
     }));
