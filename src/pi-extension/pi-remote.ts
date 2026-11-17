@@ -158,12 +158,24 @@ class Bridge {
       return { consume: true };
     }
     const barrier = decodeBarrier(data);
-    if (barrier === undefined) { this.quiescent = false; return undefined; }
+    if (barrier === undefined) {
+      // Keys for a picker or dialog cannot change the editor, so they leave the reported state
+      // exact. Pi's own change after one (/tree puts the chosen prompt in the editor) is then
+      // reported at once, not only after the next barrier.
+      if (this.editorHasFocus()) this.quiescent = false;
+      return undefined;
+    }
     // The keys before this barrier were handled synchronously; report the state they produced.
     this.lastBarrier = barrier;
     this.quiescent = true;
     this.reportEditor(true);
     return { consume: true };
+  }
+
+  /** True when Pi sends keys to the editor; also when this cannot be known. */
+  private editorHasFocus(): boolean {
+    const tui = this.tui as (TUI & { getFocusedComponent?(): Component | null }) | undefined;
+    return tui?.getFocusedComponent === undefined || tui.getFocusedComponent() === this.editor;
   }
 
   history(text: string): void { if (!this.disposed) this.channel.send({ type: 'history', text }); }
