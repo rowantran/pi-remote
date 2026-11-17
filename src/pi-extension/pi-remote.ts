@@ -14,7 +14,7 @@
  * in the same process. The host accepts one connection per Pi process, so every start of
  * this extension shares one connection, and the newest start takes over the reporting.
  */
-import { CustomEditor, VERSION, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext, type KeybindingsManager } from '@earendil-works/pi-coding-agent';
+import { CustomEditor, VERSION, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext, type KeybindingsManager, type SessionStartEvent } from '@earendil-works/pi-coding-agent';
 import type { Component, EditorComponent, EditorTheme, TUI } from '@earendil-works/pi-tui';
 import { createConnection, type Socket } from 'node:net';
 import { hostname } from 'node:os';
@@ -277,6 +277,11 @@ interface Shared {
   bridge?: Bridge;
   /** Handles the host's control messages; set by the newest load. */
   onControl?: (message: ControlMessage) => void;
+  /**
+   * The prompts that a new editor must get in its up-arrow history, or undefined when Pi adds
+   * them itself. See priorPrompts.
+   */
+  priorPrompts?: () => string[];
 }
 // Symbol.for: a reloaded copy of this module must find the same values.
 const SHARED = Symbol.for('pi-remote.extension');
@@ -308,7 +313,9 @@ function installEditor(ui: ExtensionUIContext & { [EDITOR_PATCH]?: EditorPatch }
       : new CustomEditor(tui, theme, keybindings, { embedWorkingStatus: true });
     const addToHistory = editor.addToHistory?.bind(editor);
     if (addToHistory) editor.addToHistory = (text: string) => { addToHistory(text); state.bridge?.history(text); };
+    // attach() tells the client that a new editor, with an empty history, is in place.
     state.bridge?.attach(tui, editor, keybindings, factory ? 'extension' : 'default', ui.theme.name);
+    for (const text of state.priorPrompts?.() ?? []) editor.addToHistory?.(text);
     return editor;
   };
   let patch = ui[EDITOR_PATCH];
@@ -323,6 +330,36 @@ function installEditor(ui: ExtensionUIContext & { [EDITOR_PATCH]?: EditorPatch }
   if (state.bridge?.hasInstalledEditor()) return;
   patch.foreign = undefined;
   patch.setEditorComponent(wrap(undefined));
+}
+
+/**
+ * The user's prompts on the session's current branch, oldest first, as Pi adds them to the
+ * editor history when it shows a session (InteractiveMode.renderInitialMessages).
+ */
+function sessionPrompts(ctx: ExtensionContext): string[] {
+  const prompts: string[] = [];
+  for (const entry of ctx.sessionManager.buildContextEntries()) {
+    if (entry.type !== 'message' || entry.message.role !== 'user') continue;
+    const content = entry.message.content ?? [];
+    const text = typeof content === 'string' ? content
+      : content.flatMap(block => block.type === 'text' ? [block.text] : []).join('');
+    if (text) prompts.push(text);
+  }
+  return prompts;
+}
+
+/**
+ * Which prompts a new editor needs in its history, for a session_start with this reason.
+ *
+ * At startup, Pi starts extensions and then shows the session, adding each prompt to the
+ * editor history. On /new, /resume, /fork and /reload, Pi first puts its default editor back
+ * and shows the session (or, on /reload, shows it without history), and only then starts
+ * extensions. The editor this extension installs then starts empty, so it must get the
+ * prompts itself. They are read when the editor is made, so an editor that another
+ * extension sets later in the session gets the current branch.
+ */
+function priorPrompts(reason: SessionStartEvent['reason'], ctx: ExtensionContext): (() => string[]) | undefined {
+  return reason === 'startup' ? undefined : () => sessionPrompts(ctx);
 }
 
 function sessionMessage(ctx: ExtensionContext): PiExtensionMessage {
@@ -444,10 +481,11 @@ export default function piRemoteExtension(pi: ExtensionAPI): void {
     handler: async () => { bridge.channel.send({ type: 'clientAction', action: 'status' }); },
   });
   let unsubscribeInput: (() => void) | undefined;
-  pi.on('session_start', (_event, ctx) => {
+  pi.on('session_start', (event, ctx) => {
     if (ctx.mode !== 'tui') return;
     unsubscribeInput?.();
     unsubscribeInput = ctx.ui.onTerminalInput(data => bridge.input(data));
+    state.priorPrompts = priorPrompts(event.reason, ctx);
     installEditor(ctx.ui, state);
     bridge.channel.send(sessionMessage(ctx));
   });

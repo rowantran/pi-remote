@@ -197,6 +197,39 @@ for (const editor of ['default', 'extension'] as const) {
   });
 }
 
+for (const editor of ['default', 'extension'] as const) {
+  test(`after /reload and /resume, the ${editor} editor's up-arrow history has the session's prompts`, { timeout: 120_000 }, async t => {
+    const { created, first } = await setup(t, editor === 'extension' ? ['--extension', customEditorExtension] : []);
+    await first.attach(created.id);
+    const frame = () => first.screen.snapshot().find(message => message.type === 'frame') as Extract<PiExtensionMessage, { type: 'frame' }> | undefined;
+    const history = () => first.screen.snapshot().flatMap(message => message.type === 'history' ? [message.text] : []);
+    const run = async (data: string, done: string, label: string) => {
+      await first.request('input', { slotId: created.id, data });
+      await first.until(() => first.text().includes(done), `${label} to finish`);
+      await first.until(() => frame()?.editorFocused, `the focused editor after ${label}`);
+    };
+    await first.until(() => frame()?.editorFocused, 'the focused editor');
+    await first.request('input', { slotId: created.id, data: 'GOLDEN_SECOND_USER\r' });
+    await first.until(() => first.text().includes('GOLDEN_SECOND_DONE'), 'the response');
+    await first.until(() => history().includes('GOLDEN_SECOND_USER'), 'the prompt in the history');
+    // The screen can show the reply just before Pi settles; Pi refuses /reload until then.
+    await first.until(() => first.events.some(event => event.type === 'agent_settled'), 'agent_settled');
+
+    await run(encodeSetText('/reload') + '\r', 'Reloaded', '/reload');
+    await first.until(() => history().includes('GOLDEN_SECOND_USER'), 'the prompt in the history after /reload');
+
+    await run(encodeSetText('/new') + '\r', 'New session started', '/new');
+    assert.ok(!history().includes('GOLDEN_SECOND_USER'), 'a new session has no prompts of its own');
+
+    // The resume picker lists the first session; the new one has no messages and is not saved.
+    await first.request('input', { slotId: created.id, data: encodeSetText('/resume') + '\r' });
+    await first.until(() => first.text().includes('GOLDEN_SECOND_USER'), 'the session in the resume picker');
+    await run('\r', 'Resumed session', 'choosing the session');
+    await first.until(() => history().includes('GOLDEN_SECOND_USER'), 'the prompt in the history after /resume');
+    assert.deepEqual(history().filter(text => text === 'GOLDEN_SECOND_USER'), ['GOLDEN_SECOND_USER'], 'the prompt once');
+  });
+}
+
 test('restart_daemon reopens slots from their session files', { timeout: 120_000 }, async t => {
   const { created, first, connect, listed, running, restart } = await setup(t);
   await first.attach(created.id);
