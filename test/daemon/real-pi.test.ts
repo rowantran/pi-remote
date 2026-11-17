@@ -230,6 +230,29 @@ for (const editor of ['default', 'extension'] as const) {
   });
 }
 
+test('when /tree puts the chosen prompt in the editor, the Pi extension reports it at once', { timeout: 120_000 }, async t => {
+  const { created, first } = await setup(t);
+  await first.attach(created.id);
+  const frame = () => first.screen.snapshot().find(message => message.type === 'frame') as Extract<PiExtensionMessage, { type: 'frame' }> | undefined;
+  const editorText = () => (first.screen.snapshot().find(message => message.type === 'editor') as Extract<PiExtensionMessage, { type: 'editor' }> | undefined)?.state.text;
+  await first.until(() => frame()?.editorFocused, 'the focused editor');
+  await first.request('input', { slotId: created.id, data: 'GOLDEN_SECOND_USER\r' });
+  await first.until(() => first.text().includes('GOLDEN_SECOND_DONE'), 'the response');
+  await first.until(() => first.events.some(event => event.type === 'agent_settled'), 'agent_settled');
+  // Open /tree as the terminal client does while its editor is local: keys, then a barrier.
+  await first.request('input', { slotId: created.id, data: encodeSetText('/tree') + '\r' + encodeBarrier('test:1') });
+  await first.until(() => !frame()?.editorFocused, 'the tree picker');
+  // The client sends a picker's keys without barriers. Up selects the prompt; Enter chooses it,
+  // and Enter again chooses "No summary".
+  await first.request('input', { slotId: created.id, data: '\x1b[A' });
+  await new Promise(resolve => setTimeout(resolve, 300));
+  await first.request('input', { slotId: created.id, data: '\r' });
+  await first.until(() => first.text().includes('Summarize branch?'), 'the summary question');
+  await first.request('input', { slotId: created.id, data: '\r' });
+  await first.until(() => first.text().includes('Navigated to selected point'), 'the navigation');
+  await first.until(() => editorText() === 'GOLDEN_SECOND_USER', 'the chosen prompt in the reported editor state');
+});
+
 test('restart_daemon reopens slots from their session files', { timeout: 120_000 }, async t => {
   const { created, first, connect, listed, running, restart } = await setup(t);
   await first.attach(created.id);
