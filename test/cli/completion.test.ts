@@ -508,7 +508,8 @@ test('internal complete command uses the standard SSH hello and read-only RPC, w
   assert.equal(stdout, '~/two words/\ttwo words\n');
   const requests = (await readFile(fixture.log, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(requests.map(request => request.method), ['hello', 'complete_path']);
-  assert.deepEqual(requests[0].params, { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION });
+  // Every SSH client offers heartbeats; this fake daemon lacks the capability, so no pings follow.
+  assert.deepEqual(requests[0].params, { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, heartbeat: true });
 });
 
 test('CLI ls displays short numbers', { timeout: 10000 }, async t => {

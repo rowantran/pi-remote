@@ -3,8 +3,8 @@ import type { Readable, Writable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import { readJsonl, writeJsonl } from '../protocol/jsonl.js';
 import { shellQuote } from '../protocol/shell.js';
-import { PI_VERSION, PROTOCOL_VERSION, type RemoteConnection, type RemoteEvent, type Result } from '../protocol/types.js';
-import type { DaemonMethod, MethodResult, RequestArgs } from '../protocol/methods.js';
+import { HEARTBEAT_CAPABILITY, HEARTBEAT_INTERVAL_MS, PI_VERSION, PROTOCOL_VERSION, type RemoteConnection, type RemoteEvent, type Result } from '../protocol/types.js';
+import type { DaemonMethod, HelloResult, MethodResult, RequestArgs } from '../protocol/methods.js';
 
 interface Pending { resolve: (value: any) => void; reject: (error: Error) => void }
 export class Connection implements RemoteConnection {
@@ -108,11 +108,13 @@ export class Connection implements RemoteConnection {
  * Deadline for transport/version negotiation ONLY; no prompt or mutation deadlines.
  * `piVersion` is the Pi version to name; only restart-daemon names another than its own.
  */
-export async function handshake(connection: Connection, timeoutMs = 45_000, piVersion = PI_VERSION): Promise<void> {
+export async function handshake(connection: Connection, timeoutMs = 45_000, piVersion = PI_VERSION,
+  options: { heartbeat?: boolean } = {}): Promise<HelloResult> {
   const timer = setTimeout(() => connection.disconnect(new Error('Timed out waiting for the daemon version handshake; remote work was not stopped')), timeoutMs);
   try {
-    const hello = await connection.request('hello', { protocol: PROTOCOL_VERSION, piVersion });
+    const hello = await connection.request('hello', { protocol: PROTOCOL_VERSION, piVersion, ...(options.heartbeat ? { heartbeat: true } : {}) });
     if (hello?.protocol !== PROTOCOL_VERSION || hello?.piVersion !== piVersion) throw new Error('Daemon returned an incompatible protocol or Pi version');
+    return hello;
   } catch (error) { connection.close(); throw error; }
   finally { clearTimeout(timer); }
 }
@@ -122,6 +124,18 @@ export interface SshOptions {
   host: string; remoteBin?: string; stateDir?: string;
   /** The Pi version to name in the handshake (default: this client's). See restart-daemon. */
   piVersion?: string;
+  /** How often to ping a daemon that closes silent connections (default HEARTBEAT_INTERVAL_MS). */
+  heartbeatIntervalMs?: number;
+}
+
+/**
+ * Ping on a timer so the daemon can tell a live client from a bridge whose SSH client went
+ * away without the server noticing. Stops when the connection does.
+ */
+function startHeartbeat(connection: Connection, intervalMs: number): void {
+  const timer = setInterval(() => { connection.request('ping').catch(() => { /* A failed connection reports itself. */ }); }, intervalMs);
+  timer.unref();
+  connection.onDisconnect(() => clearInterval(timer));
 }
 
 /**
@@ -189,10 +203,11 @@ export async function connectSsh(options: SshOptions): Promise<Connection> {
     connection.disconnect(new Error(`SSH exited (code=${code}, signal=${signal})${diagnostics ? `\n${diagnostics}` : ''}`));
   });
   try {
-    await handshake(connection, undefined, options.piVersion);
+    const hello = await handshake(connection, undefined, options.piVersion, { heartbeat: true });
     handshakeComplete = true;
     // EOF/exit may arrive alongside the successful hello, before this continuation.
     if (transportEnded) { const error = transportError(); connection.disconnect(error); throw error; }
+    if (hello.capabilities?.includes(HEARTBEAT_CAPABILITY)) startHeartbeat(connection, options.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS);
     return connection;
   }
   catch (error: any) { connection.close(); throw new Error(`${error.message}${diagnostics && !error.message.includes(diagnostics) ? `\n${diagnostics}` : ''}`); }

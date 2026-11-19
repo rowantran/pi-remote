@@ -45,6 +45,8 @@ export interface WebServerOptions {
   checkTailscale?: (origin: URL) => Promise<void>;
   openDaemon?: () => Promise<Socket>;
   handshakeTimeoutMs?: number;
+  /** WebSocket ping interval (default WEB_PING_INTERVAL_MS). */
+  pingIntervalMs?: number;
   now?: () => number;
   /** Called only for paired, identity-checked requests with verified Host/Origin. */
   handleApi?: (request: IncomingMessage, response: ServerResponse, context: AuthenticatedContext) => boolean | Promise<boolean>;
@@ -128,7 +130,11 @@ export async function readJsonBody(request: IncomingMessage, limit = MAX_API_BYT
   });
 }
 
-interface Peer { ws: WebSocket; device: Device; token: string; login: string; connection?: Connection }
+interface Peer { ws: WebSocket; device: Device; token: string; login: string; connection?: Connection
+  /** A pong arrived since the last ping. */
+  alive: boolean }
+/** Ping each browser this often; close it when the previous ping got no pong. */
+const WEB_PING_INTERVAL_MS = 30_000;
 
 export async function startWebServer(options: WebServerOptions): Promise<WebServerHandle> {
   const origin = configuredOrigin(options.origin, options.allowHttpLocalhostForTests === true);
@@ -259,8 +265,9 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   server.on('clientError', (_error, socket) => { socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n'); });
 
   function startProxy(ws: WebSocket, device: Device, token: string, login: string): void {
-    const peer: Peer = { ws, device, token, login };
+    const peer: Peer = { ws, device, token, login, alive: true };
     peers.add(peer);
+    ws.on('pong', () => { peer.alive = true; });
     let ordered = Promise.resolve();
     const ids = new Set<string>();
     let peerPending = 0;
@@ -358,13 +365,25 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   watcher.on('error', () => { for (const peer of peers) closeDeviceConnections(peer.device.id); });
   const poll = setInterval(() => { void checkRevocations(); }, 1000);
   poll.unref();
+  // A phone that sleeps or changes networks can leave its WebSocket open on this side with
+  // nobody behind it. Its daemon connection would stay attached and counted as a client.
+  const ping = setInterval(() => {
+    for (const peer of peers) {
+      if (peer.ws.readyState !== WebSocket.OPEN) continue;
+      // Its close handler also closes the daemon connection.
+      if (!peer.alive) { peer.ws.terminate(); continue; }
+      peer.alive = false;
+      peer.ws.ping();
+    }
+  }, options.pingIntervalMs ?? WEB_PING_INTERVAL_MS);
+  ping.unref();
   let stopped: Promise<void> | undefined;
   return {
     ...context, stateDir, socketPath,
     close() {
       stopped ??= (async () => {
         closing = true;
-        watcher.close(); clearInterval(poll);
+        watcher.close(); clearInterval(poll); clearInterval(ping);
         for (const peer of peers) { peer.connection?.close(); peer.ws.terminate(); }
         for (const socket of sockets) socket.destroy();
         wss.close();

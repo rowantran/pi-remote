@@ -16,7 +16,7 @@ import { socketPath } from '../protocol/paths.js';
 import type { FileMethod, MethodResult, ClientTerminal, SessionInfo } from '../protocol/methods.js';
 import { defaultSessionDir, sessionDirArg, sideSessionDir, withSessionDir } from './session-dirs.js';
 import { forkSideSession } from './side-fork.js';
-import { PI_VERSION, PROTOCOL_VERSION, errorText, versionMismatch, type CreateOptions, type RecordValue, type Request, type SlotInfo, type ServerRecord } from '../protocol/types.js';
+import { HEARTBEAT_CAPABILITY, HEARTBEAT_TIMEOUT_MS, PI_VERSION, PROTOCOL_VERSION, errorText, versionMismatch, type CreateOptions, type RecordValue, type Request, type SlotInfo, type ServerRecord } from '../protocol/types.js';
 
 // SessionManager returns Dates; JSON serialization produces the protocol's ISO strings.
 type SessionInfoSource = Omit<SessionInfo, 'created' | 'modified'> & { created: Date; modified: Date };
@@ -75,9 +75,15 @@ interface Slot extends StoredSlot {
   incarnation: number;
 }
 interface Peer { socket: Socket; slotId?: string; activity?: boolean; verified: boolean; pending: number
+  /** The client promised heartbeats in hello; close the connection when its input stops. */
+  heartbeat?: boolean;
+  /** Date.now() of the last bytes from the client. */
+  lastInput: number;
   /** The attached client's terminal. */
   terminal?: ClientTerminal }
-export interface DaemonOptions { stateDir: string; executable?: string; prefixArgs?: string[]; env?: NodeJS.ProcessEnv; skipVersionCheck?: boolean }
+export interface DaemonOptions { stateDir: string; executable?: string; prefixArgs?: string[]; env?: NodeJS.ProcessEnv; skipVersionCheck?: boolean
+  /** Close a heartbeat client after this long without input (default HEARTBEAT_TIMEOUT_MS). */
+  heartbeatTimeoutMs?: number }
 function object(value: any, name: string): RecordValue {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Invalid ${name}`);
   return value;
@@ -100,6 +106,7 @@ export class Supervisor {
   private server?: Server;
   private saves = Promise.resolve();
   private stopping = false;
+  private heartbeatCheck?: NodeJS.Timeout;
   private reopen = new Set<string>();
   private exitRequest!: () => void;
   /** Resolves when a client asked this daemon to exit for a restart; runDaemon then stops it. */
@@ -146,6 +153,9 @@ export class Supervisor {
     for (const slot of reopening) { slot.status = 'starting'; slot.error = undefined; }
     await Promise.all(reopening.map(slot => this.relaunch(slot)));
     await this.save();
+    const heartbeatTimeout = this.options.heartbeatTimeoutMs ?? HEARTBEAT_TIMEOUT_MS;
+    this.heartbeatCheck = setInterval(() => this.closeSilentPeers(heartbeatTimeout), Math.max(1, Math.floor(heartbeatTimeout / 4)));
+    this.heartbeatCheck.unref();
     this.server = createServer(socket => this.connect(socket));
     await new Promise<void>((accept, reject) => {
       this.server!.once('error', reject);
@@ -160,9 +170,10 @@ export class Supervisor {
     await checkPiVersion({ executable: this.options.executable, prefixArgs: this.options.prefixArgs, env: this.options.env });
   }
   private connect(socket: Socket) {
-    const peer: Peer = { socket, verified: false, pending: 0 };
+    const peer: Peer = { socket, verified: false, pending: 0, lastInput: Date.now() };
     this.peers.add(peer);
     socket.on('error', () => {});
+    socket.on('data', () => { peer.lastInput = Date.now(); });
     socket.on('close', () => {
       this.peers.delete(peer);
       for (const request of [...this.openRequests.values()]) {
@@ -178,6 +189,17 @@ export class Supervisor {
       if (++peer.pending > 256) { socket.destroy(); return; }
       void this.handle(peer, request).finally(() => { peer.pending--; });
     }, () => socket.destroy());
+  }
+  /**
+   * A connection whose client is gone but whose transport never closed (an SSH session the
+   * server never times out) would stay attached and counted forever. Only clients that
+   * promised heartbeats are closed; their pi-remote reconnects if it is still running.
+   */
+  private closeSilentPeers(timeoutMs: number) {
+    const now = Date.now();
+    for (const peer of this.peers) {
+      if (peer.heartbeat && now - peer.lastInput > timeoutMs) peer.socket.destroy();
+    }
   }
   private send(peer: Peer, record: ServerRecord) {
     try { writeJsonl(peer.socket, record); }
@@ -679,7 +701,8 @@ export class Supervisor {
       if (request.method === 'hello') {
         if (params.protocol !== PROTOCOL_VERSION || params.piVersion !== PI_VERSION) throw new Error(versionMismatch());
         peer.verified = true;
-        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, release: RELEASE, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'side_slots', ACTIVITY_CAPABILITY] } satisfies MethodResult<'hello'>;
+        if (params.heartbeat === true) peer.heartbeat = true;
+        data = { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, pid: process.pid, release: RELEASE, capabilities: ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'side_slots', ACTIVITY_CAPABILITY, HEARTBEAT_CAPABILITY] } satisfies MethodResult<'hello'>;
       } else {
         if (!peer.verified) throw new Error('Send hello with matching versions first');
         if (peer.activity && request.method !== 'watch_activity') throw new Error('Activity watchers are read-only; use a separate connection');
@@ -822,6 +845,7 @@ export class Supervisor {
   }
   async stop(): Promise<void> {
     this.stopping = true;
+    clearInterval(this.heartbeatCheck);
     for (const peer of this.peers) peer.socket.destroy();
     const close = this.server ? new Promise<void>(accept => this.server!.close(() => accept())) : Promise.resolve();
     await Promise.all([...this.slots.values()].map(async slot => {

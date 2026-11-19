@@ -225,6 +225,7 @@ pi-remote client -> SSH stdio -> bridge -> private Unix socket
 - Only the SSH bridge and `--local` commands start the daemon. It passes its environment to every Pi slot, so it must start from your shell environment, which includes provider settings such as `OPENAI_BASE_URL`. The phone web server only connects to a running daemon.
 - Default installation: `~/.local/share/pi-remote/`. Default daemon state: `~/.pi/remote/`.
 - SSH uses your existing host config with batch authentication and keepalives.
+- SSH clients ping the daemon every 15 seconds. The daemon closes an SSH client's connection after 60 seconds without input, so a client whose network went away is not counted as attached. The SSH server may never close such a session itself (Tailscale SSH, or sshd without `ClientAliveInterval`). The phone web server pings browsers every 30 seconds and closes those that do not answer.
 - A `0700` state directory and `0600` Unix socket restrict local access. This is not a sandbox: attached clients have the same authority as the remote Pi user, including uploading pasted files to the remote temporary directory.
 - The daemon validates protocol/Pi versions on connection and rechecks the remote Pi executable before starting each slot.
 - `slots.json` contains process metadata and session paths, not credentials or transcripts. `daemon.log` contains stderr and is private but not rotated.

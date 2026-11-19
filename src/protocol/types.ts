@@ -5,6 +5,16 @@ import type { DaemonMethod, MethodResult, RequestArgs } from './methods.js';
 /** 2: every slot runs Pi's own interface (attach); the RPC slot methods are gone. */
 export const PROTOCOL_VERSION = 2;
 export const PI_VERSION = "1.5.2";
+/**
+ * A client that sends `hello` with `heartbeat: true` to a daemon that has this capability
+ * promises to send something at least every HEARTBEAT_INTERVAL_MS. The daemon closes such a
+ * connection after HEARTBEAT_TIMEOUT_MS without input. Without this, a bridge whose SSH
+ * client went away (sleep, network change) stays open and counted as a client for days,
+ * because Tailscale SSH and sshd without ClientAliveInterval never close the session.
+ */
+export const HEARTBEAT_CAPABILITY = 'heartbeat';
+export const HEARTBEAT_INTERVAL_MS = 15_000;
+export const HEARTBEAT_TIMEOUT_MS = 60_000;
 /** The daemon's answer to a `hello` that names another protocol or Pi version. */
 export const versionMismatch = () => `Version mismatch: daemon protocol ${PROTOCOL_VERSION}, Pi ${PI_VERSION}`;
 /**

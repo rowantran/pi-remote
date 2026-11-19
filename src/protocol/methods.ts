@@ -69,7 +69,9 @@ type EmptyResult = Record<string, never>;
 
 /** The daemon envelope is typed here; inner Pi commands and results stay pass-through. */
 export interface DaemonMethods {
-  hello: { params: { protocol: number; piVersion: string }; result: HelloResult };
+  /** `heartbeat`: this client sends a request at least every HEARTBEAT_INTERVAL_MS, so the
+   * daemon may close the connection when input stops. Older daemons ignore it. */
+  hello: { params: { protocol: number; piVersion: string; heartbeat?: boolean }; result: HelloResult };
   list: { params: Record<string, never>; result: SlotInfo[] };
   /** Smallest round trip, for latency measurement. Older daemons lack it and `status`;
    * clients recognize their "Unknown daemon method" error. */
