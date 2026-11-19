@@ -14,7 +14,7 @@ import { Supervisor } from '../../src/daemon/supervisor.js';
 import { ScreenState } from '../../src/protocol/screen.js';
 import { readJsonl, writeJsonl } from '../../src/protocol/jsonl.js';
 import { socketPath } from '../../src/protocol/paths.js';
-import { EDITOR_SECTION, encodeBarrier, encodeSetText, type PiExtensionMessage } from '../../src/protocol/pi-extension.js';
+import { EDITOR_SECTION, encodeBarrier, encodeClick, encodeSetText, type PiExtensionMessage } from '../../src/protocol/pi-extension.js';
 import { PI_VERSION, PROTOCOL_VERSION, type RecordValue, type SlotInfo } from '../../src/protocol/types.js';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
@@ -79,11 +79,11 @@ class Client {
 }
 
 /** A daemon with a slot running the pinned Pi CLI and the offline fixture provider. */
-async function setup(t: import('node:test').TestContext, extraArgs: string[] = []) {
+async function setup(t: import('node:test').TestContext, extraArgs: string[] = [], settings: RecordValue = {}) {
   const root = await mkdtemp(join(tmpdir(), 'pi-remote-daemon-'));
   const stateDir = join(root, 'state'), agent = join(root, 'agent'), gates = join(root, 'gates'), workspace = join(root, 'workspace');
   await Promise.all([mkdir(agent, { recursive: true }), mkdir(gates), mkdir(workspace)]);
-  await writeFile(join(agent, 'settings.json'), JSON.stringify({ theme: 'dark', quietStartup: true, compaction: { enabled: false }, retry: { enabled: false } }));
+  await writeFile(join(agent, 'settings.json'), JSON.stringify({ theme: 'dark', quietStartup: true, compaction: { enabled: false }, retry: { enabled: false }, ...settings }));
   const env = { HOME: root, PI_CODING_AGENT_DIR: agent, PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0', GOLDEN_GATE_DIR: gates, TERM: 'xterm-256color' };
   const daemon = { supervisor: new Supervisor({ stateDir, executable: process.execPath, prefixArgs: [piCli], env }) };
   await daemon.supervisor.start();
@@ -251,6 +251,30 @@ test('when /tree puts the chosen prompt in the editor, the Pi extension reports 
   await first.request('input', { slotId: created.id, data: '\r' });
   await first.until(() => first.text().includes('Navigated to selected point'), 'the navigation');
   await first.until(() => editorText() === 'GOLDEN_SECOND_USER', 'the chosen prompt in the reported editor state');
+});
+
+test('a click on a hidden thinking block in the transcript shows it, as in Pi', { timeout: 120_000 }, async t => {
+  const { root, created, first } = await setup(t, [], { hideThinkingBlock: true });
+  // Let the fixture's first answer run to the end without waiting.
+  await Promise.all(['stream-release', 'tool-release'].map(name => writeFile(join(root, 'gates', name), '')));
+  await first.attach(created.id);
+  const frame = () => first.screen.snapshot().find(message => message.type === 'frame') as Extract<PiExtensionMessage, { type: 'frame' }> | undefined;
+  const transcript = () => frame()?.sections[0]?.insert ?? [];
+  await first.until(() => frame()?.editorFocused, 'the focused editor');
+  await first.request('input', { slotId: created.id, data: 'show thinking\r' });
+  await first.until(() => first.text().includes('GOLDEN_DONE'), 'the answer');
+  assert.ok(!first.text().includes('Thinking stays visible'), 'the thinking block is hidden');
+  const y = transcript().findIndex(line => strip(line).includes('Thinking...'));
+  assert.ok(y >= 0, 'the hidden thinking label');
+
+  // A click on a line that is no longer there does nothing.
+  await first.request('input', { slotId: created.id, data: encodeClick({ x: 2, y, width: frame()!.width, line: 'stale', button: 'left', clickCount: 1, shift: false, alt: false, ctrl: false }) });
+  await first.request('input', { slotId: created.id, data: encodeBarrier('test:1') });
+  await first.until(() => first.events.some(event => event.type === 'screen' && event.message.type === 'editor' && event.message.barrier === 'test:1'), 'the barrier');
+  assert.ok(!first.text().includes('Thinking stays visible'), 'a stale click is dropped');
+
+  await first.request('input', { slotId: created.id, data: encodeClick({ x: 2, y, width: frame()!.width, line: transcript()[y]!, button: 'left', clickCount: 1, shift: false, alt: false, ctrl: false }) });
+  await first.until(() => first.text().includes('Thinking stays visible until toggled.'), 'the thinking text');
 });
 
 test('restart_daemon reopens slots from their session files', { timeout: 120_000 }, async t => {

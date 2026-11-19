@@ -7,12 +7,13 @@ import { isProgramStatusReply } from '@earendil-works/pi-tui/dist/program-status
 import { PiScreen, STATUS_KEY } from '../../src/tui/pi-screen.js';
 import { ForwardedProgramStatus } from '../../src/tui/program-status.js';
 import { answerQueries } from '../../src/daemon/pi-terminal.js';
-import { decodeBarrier, PROGRAM_STATUS_CLEAR, type PiExtensionMessage, type EditorState } from '../../src/protocol/pi-extension.js';
+import { decodeBarrier, decodeClick, PROGRAM_STATUS_CLEAR, type PiExtensionMessage, type EditorState } from '../../src/protocol/pi-extension.js';
 
 class FakeTerminal implements Terminal {
   columns = 80; rows = 24; kittyProtocolActive = true;
   writes: string[] = [];
-  start() {} stop() {} async drainInput() {}
+  onInput?: (data: string) => void;
+  start(onInput: (data: string) => void) { this.onInput = onInput; } stop() {} async drainInput() {}
   write(data: string) { this.writes.push(data); }
   moveBy() {} hideCursor() {} showCursor() {} clearLine() {} clearFromCursor() {} clearScreen() {}
   setTitle() {} setProgress() {} setProgramStatus() {}
@@ -197,6 +198,40 @@ test('lines wider than the local window are cut until Pi renders at the new widt
   } });
   const wide = client.tui.render(80).map(line => line.replace(/\x1b\[[0-9;]*m|\x1b_[^\x07]*\x07/g, '')).filter(line => line.length > 80);
   assert.deepEqual(wide, []);
+});
+
+test('a click on the transcript goes to Pi with the line under it; a drag selects text locally', async () => {
+  const terminal = new FakeTerminal();
+  const sent: string[] = [];
+  const client = new PiScreen(terminal, { send: data => sent.push(...data.split(/(?<=\x1b\\)/)), resize() {} });
+  client.receive({ type: 'editorInstalled', editor: 'default', bindings });
+  const transcript = Array.from({ length: 40 }, (_, n) => `line ${n}`);
+  client.receive({ type: 'frame', width: 80, layout: 'known', reset: true, editorFocused: true, dropdownRows: 0, hardwareCursor: false, sections: {
+    0: { start: 0, remove: 0, insert: transcript },
+    4: { start: 0, remove: 0, insert: ['── pi border ──', '', '──'] },
+  } });
+  client.start();
+  client.tui.renderNow?.();
+  const mouse = (x: number, y: number, release: boolean, motion = false) => terminal.onInput!(`\x1b[<${motion ? 32 : 0};${x + 1};${y + 1}${release ? 'm' : 'M'}`);
+  const clicks = () => sent.map(decodeClick).filter(click => click !== undefined);
+
+  // The transcript follows the end, so screen row 0 shows a later transcript line.
+  mouse(3, 0, false); mouse(3, 0, true);
+  await flush();
+  assert.equal(clicks().length, 1);
+  const [click] = clicks();
+  assert.equal(click!.line, transcript[click!.y], 'transcript coordinates, not screen rows');
+  // 24 rows minus Pi's 3 editor rows show the last 21 of the 40 transcript lines.
+  assert.ok(terminal.writes.join('').includes(`\x1b[1;1H\x1b[2K${transcript[19]}`), 'row 0 shows line 19');
+  assert.equal(click!.y, 19);
+  assert.deepEqual({ x: click!.x, width: click!.width, button: click!.button }, { x: 3, width: 80, button: 'left' });
+
+  // A drag is a text selection, not a click.
+  sent.length = 0;
+  mouse(1, 1, false); mouse(6, 1, false, true); mouse(6, 1, true);
+  await flush();
+  assert.deepEqual(clicks(), []);
+  client.stop();
 });
 
 test('Ctrl+/ opens and closes the status panel without reaching Pi', async () => {
