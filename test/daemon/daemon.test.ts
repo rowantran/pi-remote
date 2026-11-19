@@ -62,13 +62,14 @@ class Peer {
   close(): void { this.socket.destroy(); }
 }
 
-async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {}) {
+async function setup(t: TestContext, options: { skipVersionCheck?: boolean; heartbeatTimeoutMs?: number } = {}) {
   // /tmp keeps Unix socket paths short even on macOS with a long TMPDIR.
   const dir = await realpath(await mkdtemp('/tmp/pi-remote-test-'));
   const versionFile = join(dir, 'fixture-version'), launchLog = join(dir, 'fixture-launch-log');
   const exitFile = join(dir, 'fixture-exit'), gate = join(dir, 'fixture-gate');
   await writeFile(versionFile, `${PI_VERSION}\n`);
   const daemonOptions = { stateDir: dir, executable: process.execPath, prefixArgs: [fixture], skipVersionCheck: options.skipVersionCheck ?? true,
+    heartbeatTimeoutMs: options.heartbeatTimeoutMs,
     // PI_CODING_AGENT_DIR keeps side-session files out of the real ~/.pi/agent.
     env: { PI_FIXTURE_VERSION_FILE: versionFile, PI_FIXTURE_LAUNCH_LOG: launchLog, PI_FIXTURE_EXIT_FILE: exitFile, PI_FIXTURE_PROMPT_GATE: gate,
       PI_CODING_AGENT_DIR: join(dir, 'agent') } };
@@ -92,7 +93,7 @@ async function setup(t: TestContext, options: { skipVersionCheck?: boolean } = {
     peers.push(peer);
     if (verify) {
       const response = await peer.request('hello', hello);
-      assert.deepEqual(response.capabilities, ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'side_slots', 'activity_stream']);
+      assert.deepEqual(response.capabilities, ['slot_numbers', 'complete_path', 'read_attachment', 'filesystem_metadata', 'restart', 'restart_daemon', 'side_slots', 'activity_stream', 'heartbeat']);
     }
     return peer;
   };
@@ -133,6 +134,28 @@ test('private Unix socket, strict hello, and reserved launch arguments', { timeo
   }
   for (const method of ['snapshot', 'rpc', 'answer', 'attach_native']) await assert.rejects(peer.request(method, { slotId: 'x' }), /Unknown daemon method/);
   assert.deepEqual(await peer.request('list'), []);
+});
+
+test('a client that promised heartbeats and went silent is closed and no longer counted', { timeout: 10_000 }, async t => {
+  const { peer, connect, create, attach, slots } = await setup(t, { heartbeatTimeoutMs: 200 });
+  const slot = await create();
+  const silent = await connect(false), pinging = await connect(false), legacy = await connect(false);
+  await silent.request('hello', { ...hello, heartbeat: true });
+  await pinging.request('hello', { ...hello, heartbeat: true });
+  await legacy.request('hello', hello);
+  for (const client of [silent, pinging, legacy]) await attach(slot.id, client);
+  assert.equal((await slots()).find(info => info.id === slot.id)!.clients, 3);
+  const closed = once(silent.socket, 'close');
+  const pings = setInterval(() => { void pinging.request('ping'); }, 50);
+  t.after(() => clearInterval(pings));
+  await closed;
+  await new Promise(resolve => setTimeout(resolve, 300));
+  // The pinging client and the client that never offered heartbeats both stay.
+  assert.equal((await slots()).find(info => info.id === slot.id)!.clients, 2);
+  assert.ok(!pinging.socket.destroyed && !legacy.socket.destroyed);
+  clearInterval(pings);
+  // The setup peer, which also never offered heartbeats, is unaffected.
+  assert.ok(!peer.socket.destroyed);
 });
 
 test('each Pi process starts in a terminal with the Pi extension and the pi-remote session environment', { timeout: 10_000 }, async t => {

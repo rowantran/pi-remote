@@ -80,8 +80,9 @@ async function fixture(t: TestContext, overrides: Partial<WebServerOptions> = {}
     const cookie = response.headers['set-cookie']![0].split(';')[0];
     return { cookie, device: response.json.device, code, response };
   }
-  function ws(headers: Record<string, string> = {}, path = '/ws', omitIdentity = false) {
+  function ws(headers: Record<string, string> = {}, path = '/ws', omitIdentity = false, autoPong = true) {
     const client = new WebSocket(`ws://${HOST}${path}`, {
+      autoPong,
       headers: { ...(omitIdentity ? proxyHeaders : standard), Origin: ORIGIN, ...headers },
       createConnection: () => createConnection(server.socketPath),
     });
@@ -220,6 +221,21 @@ test('JSON requests/results/events proxy through a verified private daemon conne
   await delay(30);
   assert.equal(f.opens(), 1);
   assert.equal(f.requests.filter(record => record.method === 'rpc').length, 2);
+});
+
+test('a browser that stops answering pings is closed with its daemon connection; one that answers stays', async t => {
+  const f = await fixture(t, { pingIntervalMs: 40 });
+  const p = await f.pair();
+  const live = f.ws({ Cookie: p.cookie });
+  const silent = f.ws({ Cookie: p.cookie }, '/ws', false, false);
+  await Promise.all([once(live, 'open'), once(silent, 'open')]);
+  await waitFor(() => f.transports.size === 2);
+  const [code] = await once(silent, 'close');
+  assert.equal(code, 1006, 'terminated without a close handshake');
+  await waitFor(() => f.transports.size === 1);
+  await delay(150);
+  assert.equal(live.readyState, WebSocket.OPEN);
+  assert.equal(f.transports.size, 1);
 });
 
 test('WebSockets never start a missing daemon and close with a clear reason', async t => {

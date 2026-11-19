@@ -155,6 +155,37 @@ test('a noisy successful SSH handshake never writes to local stderr', { timeout:
   assert.equal(writes.mock.callCount(), 0);
 });
 
+/** A fake bridge that answers hello with `capabilities`; `list` returns every request so far. */
+function sshRecorder(capabilities: string[]) {
+  return `import { createInterface } from 'node:readline';
+const seen = [];
+createInterface({ input: process.stdin }).on('line', line => {
+  const request = JSON.parse(line);
+  seen.push({ method: request.method, params: request.params });
+  const data = request.method === 'hello' ? { ...${JSON.stringify(hello)}, capabilities: ${JSON.stringify(capabilities)} } : request.method === 'list' ? seen : {};
+  process.stdout.write(JSON.stringify({ type: 'result', id: request.id, success: true, data }) + '\\n');
+});`;
+}
+
+test('SSH clients offer heartbeats and ping a daemon that accepts them', { timeout: 5000 }, async t => {
+  await fakeSsh(t, sshRecorder(['heartbeat']));
+  const connection = await connectSsh({ host: 'fake', heartbeatIntervalMs: 20 });
+  t.after(() => connection.close());
+  await delay(120);
+  const seen = await connection.request('list') as unknown as { method: string; params: any }[];
+  assert.deepEqual(seen[0], { method: 'hello', params: { protocol: PROTOCOL_VERSION, piVersion: PI_VERSION, heartbeat: true } });
+  assert.ok(seen.filter(record => record.method === 'ping').length >= 3, 'pings on the interval');
+});
+
+test('SSH clients never ping a daemon without the heartbeat capability', { timeout: 5000 }, async t => {
+  await fakeSsh(t, sshRecorder([]));
+  const connection = await connectSsh({ host: 'fake', heartbeatIntervalMs: 20 });
+  t.after(() => connection.close());
+  await delay(120);
+  const seen = await connection.request('list') as unknown as { method: string }[];
+  assert.deepEqual(seen.map(record => record.method), ['hello', 'list']);
+});
+
 test('SSH handshake failure retains bounded stderr even when stdout ends before the diagnostic', { timeout: 5000 }, async t => {
   await fakeSsh(t, `process.stdin.resume();
     process.stdout.end();
