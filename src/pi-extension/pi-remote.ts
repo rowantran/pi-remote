@@ -20,8 +20,8 @@ import { createConnection, type Socket } from 'node:net';
 import { hostname } from 'node:os';
 import { appendFileSync } from 'node:fs';
 import {
-  decodeBarrier, decodeSetText, diffLines, EDITOR_SECTION, PI_EXTENSION_SOCKET_ENV, SECTION_COUNT, sameEditorState,
-  type PiExtensionMessage, type ControlMessage, type EditorState, type LineDiff,
+  decodeBarrier, decodeClick, decodeSetText, diffLines, EDITOR_SECTION, PI_EXTENSION_SOCKET_ENV, SECTION_COUNT, sameEditorState,
+  type PiExtensionMessage, type ControlMessage, type EditorState, type LineDiff, type TranscriptClick,
 } from '../protocol/pi-extension.js';
 import { PI_REMOTE_API_EVENT, type PiRemoteApi } from '../protocol/extension-api.js';
 
@@ -157,6 +157,11 @@ class Bridge {
       this.quiescent = false;
       return { consume: true };
     }
+    const click = decodeClick(data);
+    if (click) {
+      this.click(click);
+      return { consume: true };
+    }
     const barrier = decodeBarrier(data);
     if (barrier === undefined) {
       // Keys for a picker or dialog cannot change the editor, so they leave the reported state
@@ -170,6 +175,26 @@ class Bridge {
     this.quiescent = true;
     this.reportEditor(true);
     return { consume: true };
+  }
+
+  /**
+   * A click on the transcript in a client. Pi's fullscreen renderer gives clicks to the
+   * component under the pointer, for example to show or hide a thinking block or expand tool
+   * output. Do the same here, in the transcript's own coordinates, so it works whatever Pi's
+   * own screen mode and scroll position are. The click is dropped when the transcript line
+   * under it changed since the client drew it.
+   */
+  private click(click: TranscriptClick): void {
+    const tui = this.tui;
+    const document = tui?.children[0];
+    if (!tui || !document?.handleMouse || this.sentLayout !== 'known' || this.width !== click.width) return;
+    const lines = this.latest.get(document);
+    if (!lines || lines[click.y] !== click.line) return;
+    const result = document.handleMouse({
+      type: 'click', button: click.button, x: click.x, y: click.y, screenX: click.x, screenY: click.y,
+      width: this.width, height: lines.length, shift: click.shift, alt: click.alt, ctrl: click.ctrl, clickCount: click.clickCount,
+    });
+    if (result) tui.requestRender();
   }
 
   /** True when Pi sends keys to the editor; also when this cannot be known. */

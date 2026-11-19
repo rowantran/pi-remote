@@ -1,11 +1,11 @@
 import { copyToClipboard, CustomEditor, getSelectListTheme, keyText, type Theme } from '@earendil-works/pi-coding-agent';
 import {
   type Component, type EditorComponent, type EditorTheme, type Focusable, KeybindingsManager, matchesKey, type OverlayHandle,
-  ScrollView, setKeybindings, type Terminal, type TUI, TUI_KEYBINDINGS, TuiAltScreen, type TuiAltScreenOptions, truncateToWidth,
-  visibleWidth, VStack, type KeybindingDefinitions,
+  ScrollView, setKeybindings, type Terminal, type TUI, TUI_KEYBINDINGS, TuiAltScreen, type TuiAltScreenOptions, type TuiMouseEvent,
+  type TuiMouseEventResult, truncateToWidth, visibleWidth, VStack, type KeybindingDefinitions,
 } from '@earendil-works/pi-tui';
 import {
-  applyDiff, EDITOR_SECTION, encodeBarrier, encodeSetText, SECTION_COUNT, sameEditorState,
+  applyDiff, EDITOR_SECTION, encodeBarrier, encodeClick, encodeSetText, SECTION_COUNT, sameEditorState,
   type PiExtensionMessage, type EditorState,
 } from '../protocol/pi-extension.js';
 
@@ -33,6 +33,23 @@ class RemoteLines implements Component {
   }
 
   invalidate(): void { this.cache = undefined; }
+}
+
+/**
+ * Pi's transcript. Clicks on it go to Pi, which gives them to the component under the
+ * pointer, as Pi's own fullscreen renderer does (a thinking block shows or hides, tool output
+ * expands). The local renderer sends a click only for a press and release without a drag, so
+ * text selection stays local.
+ */
+class TranscriptLines extends RemoteLines {
+  constructor(private readonly onClick: (event: TuiMouseEvent, line: string) => void) { super(); }
+
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    const line = this.lines[event.y];
+    if (event.type === 'click' && line !== undefined) this.onClick(event, line);
+    // Pi answers with a new frame. Until then the click acts locally as on any text.
+    return undefined;
+  }
 }
 
 /**
@@ -287,7 +304,10 @@ export class PiScreen {
     // Learn about resizes from the terminal itself (a process terminal or a browser one).
     this.tui = new TuiAltScreen(new ResizeWatcher(terminal, () => this.onResize()), false, undefined, rendererOptions(() => options.theme?.()));
     this.slot = new EditorSlot(this);
-    for (let index = 0; index < SECTION_COUNT; index++) this.sections.push(index === EDITOR_SECTION ? this.slot.remote : new RemoteLines());
+    const transcript = new TranscriptLines((event, line) => this.click(event, line, transcript.width));
+    for (let index = 0; index < SECTION_COUNT; index++) {
+      this.sections.push(index === EDITOR_SECTION ? this.slot.remote : index === 0 ? transcript : new RemoteLines());
+    }
     const components: Component[] = this.sections.map((section, index) => (index === EDITOR_SECTION ? this.slot : section));
     for (const component of components) this.tui.addChild(component);
     const viewport = chatViewport(components, () => options.theme?.(), this.banner);
@@ -390,6 +410,16 @@ export class PiScreen {
     editor.handleInput(data);
     this.pending.push({ id, data, state: editorState(editor) });
     this.tui.requestRender();
+  }
+
+  /** A click on line `event.y` of Pi's transcript, which Pi rendered at `width`. */
+  private click(event: TuiMouseEvent, line: string, width: number): void {
+    // Without the known layout, section 0 holds every line Pi drew, not only the transcript.
+    if (this.layout !== 'known' || event.button === 'none') return;
+    this.send(encodeClick({
+      x: event.x, y: event.y, width, line, button: event.button, clickCount: event.clickCount ?? 1,
+      shift: event.shift, alt: event.alt, ctrl: event.ctrl,
+    }));
   }
 
   private encode(data: string): string { return this.options.encodeKey?.(data) ?? data; }

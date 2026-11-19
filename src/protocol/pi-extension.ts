@@ -145,6 +145,41 @@ export function decodeSetText(data: string): string | undefined {
   return /^[A-Za-z0-9+/]*={0,2}$/.test(encoded) ? Buffer.from(encoded, 'base64').toString('utf8') : undefined;
 }
 
+/**
+ * A mouse click on Pi's transcript (the document section), in the section's own coordinates:
+ * `y` is the transcript line, `x` the column. `width` is the width Pi rendered at, and `line`
+ * the line the client showed at `y`. Pi acts on the click only when both still match, so a
+ * click never lands on other content after Pi re-rendered.
+ */
+export interface TranscriptClick {
+  x: number; y: number; width: number; line: string;
+  button: 'left' | 'middle' | 'right'; clickCount: number;
+  shift: boolean; alt: boolean; ctrl: boolean;
+}
+
+const CLICK_PREFIX = '\x1b_pi-remote:click:';
+
+/** Ask Pi to handle a click on its transcript, in order with keys. */
+export function encodeClick(click: TranscriptClick): string {
+  return `${CLICK_PREFIX}${Buffer.from(JSON.stringify(click), 'utf8').toString('base64')}${APC_END}`;
+}
+
+export function decodeClick(data: string): TranscriptClick | undefined {
+  if (!data.startsWith(CLICK_PREFIX) || !data.endsWith(APC_END)) return undefined;
+  const encoded = data.slice(CLICK_PREFIX.length, -APC_END.length);
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) return undefined;
+  let value: Partial<TranscriptClick>;
+  try { value = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8')) as Partial<TranscriptClick>; }
+  catch { return undefined; }
+  const count = (n: unknown) => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0;
+  if (!value || !count(value.x) || !count(value.y) || !count(value.width) || !count(value.clickCount)
+    || typeof value.line !== 'string' || !['left', 'middle', 'right'].includes(value.button as string)) return undefined;
+  return {
+    x: value.x!, y: value.y!, width: value.width!, line: value.line, button: value.button!, clickCount: value.clickCount!,
+    shift: value.shift === true, alt: value.alt === true, ctrl: value.ctrl === true,
+  };
+}
+
 export function sameEditorState(a: EditorState, b: EditorState): boolean {
   return a.text === b.text && a.cursor.line === b.cursor.line && a.cursor.col === b.cursor.col;
 }
