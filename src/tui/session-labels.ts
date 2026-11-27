@@ -20,3 +20,13 @@ export function stoppedMessage(slotId: string, slotNumber?: number): string {
 function slotLabel(slotId: string, slotNumber?: number): string {
   return slotNumber === undefined ? slotId : `${slotNumber} / ${slotId}`;
 }
+
+/**
+ * The most useful line of a connection error. SSH's own explanation, such as "Timeout, server
+ * rowan-v2-dev not responding.", comes after pi-remote's summary of how SSH ended.
+ */
+export function connectionProblem(error: Error): string {
+  const lines = error.message.split(/[\r\n\u2028\u2029]+/).map(line => line.trim()).filter(Boolean);
+  const problem = lines.at(-1) ?? 'Connection closed';
+  return /[.!?…]$/.test(problem) ? problem : `${problem}.`;
+}

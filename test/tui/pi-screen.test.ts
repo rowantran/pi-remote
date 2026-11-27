@@ -200,6 +200,20 @@ test('lines wider than the local window are cut until Pi renders at the new widt
   assert.deepEqual(wide, []);
 });
 
+test('the connection banner is one screen row, even when SSH errors hold line breaks and escapes', () => {
+  const { client } = setup();
+  const before = client.tui.render(80);
+  // SSH ends its lines with "\r\n"; a line break inside a rendered line moves later rows down.
+  client.setBanner('Disconnected: SSH exited (code=255, signal=null)\nTimeout, server rowan-v2-dev not responding.\r\n\x1b[2J\x1b]0;title\x07 Reconnecting…');
+  const lines = client.tui.render(80);
+  assert.equal(lines.length, before.length + 1, 'the banner adds one line');
+  const banner = lines.find(line => line.includes('Disconnected'))!;
+  const plain = banner.replace(/\x1b\[[0-9;]*m/g, '');
+  assert.match(plain, /^Disconnected: SSH exited \(code=255, signal=null\) Timeout, server rowan-v2-dev n.*…$/);
+  assert.doesNotMatch(plain, /[\x00-\x1f\x7f]/, 'no line breaks or other escapes remain');
+  assert.ok(lines.includes('── pi border ──'), "Pi's editor border keeps its own row");
+});
+
 test('a click on the transcript goes to Pi with the line under it; a drag selects text locally', async () => {
   const terminal = new FakeTerminal();
   const sent: string[] = [];

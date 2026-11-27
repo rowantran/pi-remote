@@ -13,7 +13,7 @@ import { editLocally, readLocalClipboard } from './local-input.js';
 import { loadLocalTheme, readPiThemeSetting, resolveThemeSelection, terminalAppearance } from './local-theme.js';
 import { slotStatusLines } from './host-status.js';
 import { readPresentationConfig } from '../config/presentation.js';
-import { detachMessage, stoppedMessage } from './session-labels.js';
+import { connectionProblem, detachMessage, stoppedMessage } from './session-labels.js';
 import { paint } from './table.js';
 import { attachInvocation, detectSideLauncher, formatInvocation, resolveSplitDirection, type AttachContext, type SideLauncher, type SplitDirection } from './side-launcher.js';
 
@@ -146,9 +146,9 @@ export async function runTerminalSession(connection: RemoteConnection, slot: Slo
     connection.onDisconnect(error => {
       connected = false;
       if (!connection.reconnecting) { finish(error); return; }
-      client.setBanner(`Disconnected: ${error.message} Reconnecting… Remote work continues; typing waits.`);
+      client.setBanner(`Disconnected: ${connectionProblem(error)} Reconnecting… Remote work continues; typing waits.`);
     }),
-    connection.onRetry?.(retry => client.setBanner(`Reconnecting (attempt ${retry.attempt}): ${retry.error.message}`)) ?? (() => {}),
+    connection.onRetry?.(retry => client.setBanner(`Reconnecting (attempt ${retry.attempt}): ${connectionProblem(retry.error)}`)) ?? (() => {}),
     connection.onReconnect?.(attachment => {
       connected = true; connectedAt = Date.now(); reconnects++;
       client.reset();
