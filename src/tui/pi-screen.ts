@@ -239,11 +239,24 @@ class ResizeWatcher implements Terminal {
   get restoreOnExit(): Terminal["restoreOnExit"] { return this.terminal.restoreOnExit?.bind(this.terminal); }
 }
 
+/** Terminal escape sequences: CSI (colors, cursor moves), OSC (titles, links), and two-byte ones. */
+const ESCAPES = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
+
+/**
+ * Text as one screen row. Pi's renderer counts each rendered line as one terminal row, so a
+ * line feed, carriage return or cursor move inside a line puts text where the renderer does not
+ * expect it, over other parts of the screen. SSH errors end lines with "\r\n".
+ */
+export function oneLine(text: string): string {
+  return text.replace(ESCAPES, '').replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 /** One line above the editor area for connection problems; empty when there is nothing to say. */
 class Banner implements Component {
   text?: string;
   render(width: number): string[] {
-    return this.text ? [truncateToWidth(`\x1b[33m${this.text}\x1b[39m`, width, '…')] : [];
+    const text = this.text ? oneLine(this.text) : '';
+    return text ? [truncateToWidth(`\x1b[33m${text}\x1b[39m`, width, '…')] : [];
   }
   invalidate(): void {}
 }
